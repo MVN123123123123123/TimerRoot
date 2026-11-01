@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
      * call site, cred layout and task offsets are all different.
      */
     private static final String TIMER_URL =
-            "https://github.com/MVN123123123123123/TimerRoot/releases/download/timer-p7a/timer";
+            "https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/timer";
     private static final String TIMER_TARGET = "target=lynx";
 
     private static final int BG = 0xFF0B0B0B;
