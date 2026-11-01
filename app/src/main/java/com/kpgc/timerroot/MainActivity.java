@@ -14,6 +14,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -25,6 +26,7 @@ import android.widget.ScrollView;
 import android.widget.Toast;
 import android.widget.TextView;
 
+import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -42,6 +44,14 @@ public class MainActivity extends Activity {
 
     private static final String TAG = "TimerRoot";
     private static final int REQUEST_CODE = 1001;
+    /**
+     * Prebuilt exploit for this exact device build. The upstream timer/timer
+     * targets a 6.12.69 OnePlus kernel and must not be used here: its timer
+     * call site, cred layout and task offsets are all different.
+     */
+    private static final String TIMER_URL =
+            "https://github.com/MVN123123123123123/TimerRoot/releases/download/timer-p7a/timer";
+    private static final String TIMER_TARGET = "target=lynx";
 
     private static final int BG = 0xFF0B0B0B;
     private static final int CARD = 0xFF1C1C1E;
@@ -58,6 +68,8 @@ public class MainActivity extends Activity {
     private IUserService service;
     private boolean bound;
     private boolean rootOpen;
+    private boolean downloading;
+    private Runnable pendingServiceAction;
 
     private LinearLayout statusCard;
     private TextView statusTitle;
@@ -86,6 +98,11 @@ public class MainActivity extends Activity {
             bound = true;
             addLog("user service connected");
             refreshDetails();
+            if (pendingServiceAction != null) {
+                Runnable action = pendingServiceAction;
+                pendingServiceAction = null;
+                ui.post(action);
+            }
         }
 
         @Override
@@ -213,6 +230,8 @@ public class MainActivity extends Activity {
         tools.addView(pill("Log", TEXT, CARD, v -> showTab(1)), rowParams());
         body.addView(tools);
 
+        body.addView(bigButton("Download exploit", CARD, TEXT, v -> downloadTimer()));
+        body.addView(spacer(8));
         body.addView(bigButton("Get root shell", GREEN, 0xFF04140A, v -> confirmRoot()));
         body.addView(spacer(8));
         body.addView(bigButton("Load KernelSU", 0xFF1F7A3D, 0xFFE8FFF0, v -> confirmKsu()));
@@ -220,7 +239,8 @@ public class MainActivity extends Activity {
         body.addView(bigButton("Stop", CARD, RED, v -> stopRoot()));
 
         body.addView(spacer(18));
-        body.addView(smallHint("First run: allow Shizuku, then press Prepare. "
+        body.addView(smallHint("First run: allow Shizuku, then press Prepare for the "
+                + "bundled binary or Download exploit to fetch timer/timer from GitHub. "
                 + "The exploit needs the shell user, which is why it runs through Shizuku."));
         body.addView(spacer(8));
 
@@ -523,16 +543,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void showShizukuHelp() {
+        new AlertDialog.Builder(this)
+                .setTitle("Shizuku is not running")
+                .setMessage("Start Shizuku first:\n\n"
+                        + "1. open the Shizuku app\n"
+                        + "2. use Start via wireless debugging (or pair over USB)\n"
+                        + "3. come back here and try again")
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
     private void prepare() {
         if (!safePing()) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Shizuku is not running")
-                    .setMessage("Start Shizuku first:\n\n"
-                            + "1. open the Shizuku app\n"
-                            + "2. use Start via wireless debugging (or pair over USB)\n"
-                            + "3. come back here and press Prepare again")
-                    .setPositiveButton("OK", null)
-                    .show();
+            showShizukuHelp();
             return;
         }
         if (service == null) {
@@ -545,6 +569,13 @@ public class MainActivity extends Activity {
             try {
                 final String result = service.install(getPackageCodePath());
                 addLog(result);
+                if (result.startsWith("installed")) {
+                    String target = service.run("target");
+                    addLog(target.trim());
+                    if (!target.contains(TIMER_TARGET)) {
+                        addLog("rejected: bundled binary is not built for this kernel");
+                    }
+                }
                 ui.post(() -> {
                     toast(result);
                     refreshDetails();
@@ -552,6 +583,83 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 addLog("prepare failed: " + t);
                 ui.post(() -> toast("prepare failed: " + t));
+            }
+        }).start();
+    }
+
+    /**
+     * Same job as scripts/fetch-timer.ps1, but on the phone: download the
+     * upstream prebuilt binary and hand it to the shell-domain service.
+     */
+    private void downloadTimer() {
+        if (downloading) {
+            return;
+        }
+        if (!safePing()) {
+            showShizukuHelp();
+            return;
+        }
+        if (safePermission() != 0) {
+            try {
+                Shizuku.requestPermission(REQUEST_CODE);
+                toast("Grant Shizuku permission, then press Download again");
+            } catch (Throwable t) {
+                addLog("permission request failed: " + t);
+                toast("Grant Shizuku permission first");
+            }
+            return;
+        }
+        if (service == null) {
+            pendingServiceAction = this::downloadTimer;
+            bindService();
+            toast("Connecting to Shizuku...");
+            return;
+        }
+
+        final IUserService svc = service;
+        downloading = true;
+        addLog("downloading exploit from " + TIMER_URL);
+        toast("Downloading...");
+        new Thread(() -> {
+            File file = new File(getCacheDir(), "timer-download");
+            try {
+                TimerFetcher.Result result = TimerFetcher.download(TIMER_URL, file);
+                addLog("downloaded " + result.bytes + " bytes, sha256 " + result.sha256);
+                String installed;
+                try (ParcelFileDescriptor fd = ParcelFileDescriptor.open(
+                        file, ParcelFileDescriptor.MODE_READ_ONLY)) {
+                    installed = svc.installFd(fd);
+                }
+                addLog(installed);
+                final String message = installed;
+                boolean ok = installed.startsWith("installed");
+                if (ok) {
+                    // Refuse a binary built for another kernel: the timer call
+                    // site and cred layout are build-specific, and using the
+                    // wrong one corrupts the kernel instead of failing safely.
+                    String target = svc.run("target");
+                    addLog(target.trim());
+                    if (!target.contains(TIMER_TARGET)) {
+                        ok = false;
+                        addLog("rejected: binary is not built for this kernel");
+                    }
+                }
+                final boolean good = ok;
+                ui.post(() -> {
+                    downloading = false;
+                    toast(good ? "Exploit installed" : message);
+                    refreshDetails();
+                });
+            } catch (Throwable t) {
+                addLog("download failed: " + t);
+                final String message = "download failed: " + t;
+                ui.post(() -> {
+                    downloading = false;
+                    toast(message);
+                });
+            } finally {
+                //noinspection ResultOfMethodCallIgnored
+                file.delete();
             }
         }).start();
     }
@@ -580,12 +688,23 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 String out = service.openRoot();
-                rootOpen = out.contains("uid=0(root)") || out.contains("started");
+                // Only a real uid=0 shell counts; a failed attempt parks the
+                // exploit and prints diagnostics that must not look like success.
+                rootOpen = out.startsWith("root shell ready");
                 addLog(out);
                 ui.post(this::applyDetails);
                 if (rootOpen && !"active".equals(ksu)) {
                     addLog("root shell ready - loading KernelSU...");
                     runKsu();
+                } else if (!rootOpen) {
+                    addLog("no root shell: the exploit did not reach uid=0."
+                            + " Reboot before retrying.");
+                    ui.post(() -> {
+                        statusTitle.setText("Root failed");
+                        statusSubtitle.setText("exploit did not reach uid=0 - reboot, then retry");
+                        statusBadge.setText("!");
+                        statusBadge.setTextColor(RED);
+                    });
                 }
             } catch (Throwable t) {
                 addLog("root failed: " + t);
@@ -738,7 +857,7 @@ public class MainActivity extends Activity {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(5);
+                .version(7);
     }
 
     private void copyLog() {

@@ -1,5 +1,7 @@
 package com.kpgc.timerroot;
 
+import android.os.ParcelFileDescriptor;
+
 interface IUserService {
     void destroy() = 16777114;
     void exit() = 1;
@@ -12,4 +14,5 @@ interface IUserService {
     String closeRoot() = 8;
     String info() = 9;
     String rebootDevice() = 10;
+    String installFd(in ParcelFileDescriptor fd) = 11;
 }

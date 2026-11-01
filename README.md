@@ -35,18 +35,27 @@ MainActivity (untrusted_app)
 
 ## Getting the exploit binary
 
-TimerRoot expects the compiled exploit at `app/src/main/assets/timer`:
+The exploit is build-specific: the timer call site, `cred` layout and
+`task_struct` offsets differ per kernel, and a binary built for another build
+will corrupt the kernel instead of failing safely. This app is ported to the
+Pixel 7a (`lynx`) build `CP3A.261005.002.A1`, kernel
+`6.1.162-android14-11-g9dd05ae3a1de-ab16261587`.
 
-```bash
-git clone https://github.com/YuKongA/CVE-2026-98260
-cp CVE-2026-98260/timer/timer app/src/main/assets/timer
+The binary is not committed (`assets/timer` is gitignored). Build it and drop it
+in place, or use **Download exploit**, which fetches the release asset and
+installs it directly:
+
+```
+installed 2188600 bytes (uid=2000)
+target=lynx
+kernel=6.1.162-android14-11-g9dd05ae3a1de-ab16261587
 ```
 
-or
+After installing, the app always runs `timer target` and refuses any binary
+whose `target=` line does not match this kernel.
 
-```powershell
-scripts/fetch-timer.ps1
-```
+The port derives every constant from the factory `boot.img` of that build
+(kallsyms + BTF), so re-derive them before using it on a different kernel.
 
 The binary is MIT licensed by its authors; only use it on hardware you own, and
 only when your kernel matches the build it was ported to.
@@ -121,13 +130,21 @@ the server is **not** running; the exploit cannot start until it is.
 3. The card turns **Ready** (Shizuku connected, no root yet). If it still says
    `Not connected`, press `Shizuku` in the tools row to request again.
 
-### 3. Prepare
+### 3. Install the binary
 
-`Prepare` extracts `assets/timer` to `/data/local/tmp/timer`:
+Press **Download exploit** to fetch the release asset, or `Prepare` to extract a
+binary you built into `app/src/main/assets/timer`. Either path installs it to
+`/data/local/tmp/timer` and then checks the target:
 
 ```
-installed 307192 bytes
+installed 2188600 bytes (uid=2000)
+target=lynx
+kernel=6.1.162-android14-11-g9dd05ae3a1de-ab16261587
+timer_site=0xffffffc008192f7c
 ```
+
+`Diagnose` runs `timer ids`, which only probes the tracefs page event ids and
+never touches the timer queue.
 
 ### 4. Get root shell
 
