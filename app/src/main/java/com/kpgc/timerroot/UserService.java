@@ -69,7 +69,8 @@ public class UserService extends IUserService.Stub {
                 // The old binary may still be mapped by a parked process; rename
                 // over it instead of writing in place (ETXTBSY).
                 Process move = Runtime.getRuntime().exec(new String[]{"/system/bin/sh",
-                        "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN});
+                        "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN
+                            + " && sync"});
                 move.waitFor();
             }
             return "installed " + new File(BIN).length() + " bytes (uid="
@@ -99,7 +100,8 @@ public class UserService extends IUserService.Stub {
                 }
             }
             Process move = Runtime.getRuntime().exec(new String[]{"/system/bin/sh",
-                    "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN});
+                    "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN
+                            + " && sync"});
             int rc = move.waitFor();
             if (rc != 0) {
                 return "install failed: mv rc=" + rc;
@@ -267,6 +269,72 @@ public class UserService extends IUserService.Stub {
                 ? "active" : "not loaded";
         return "selinux=" + selinux + "\nseccomp=" + seccomp + "\nksud=" + ksud
                 + "\nksu=" + ksu + "\n";
+    }
+
+    /**
+     * KernelSU's module init forces SELinux back to Enforcing about 0.4s
+     * after late-load, which overwrites the exploit's write. Re-apply from
+     * here (uid 2000 shell) through KSU's own su, then confirm. su is the
+     * reliable path: the enforcing flag stays 0 once set from u:r:ksu:s0.
+     * The first su() calls can block while KSU finishes its allowlist and
+     * manager setup, so every attempt is bounded and retried.
+     */
+    @Override
+    public String keepPermissive() {
+        String state = "unknown";
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(
+                "/data/local/tmp/ksu_enforce.log", false)) {
+            out.write(("start " + System.currentTimeMillis() + "\n").getBytes("UTF-8"));
+        } catch (Throwable ignored) {
+        }
+        for (int i = 0; i < 12; i++) {
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException ignored) {
+                break;
+            }
+            execCodeTimeout("/system/bin/su -c 'setenforce 0'", 8000);
+            state = execOutTimeout("getenforce", 5000).trim();
+            diag("attempt=" + (i + 1) + " enforce=" + state);
+            if (state.equals("Permissive")) {
+                return "selinux=" + state + " (after " + (i + 1) + "s)";
+            }
+        }
+        return "selinux=" + state;
+    }
+
+    private void diag(String line) {
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(
+                "/data/local/tmp/ksu_enforce.log", true)) {
+            out.write((line + "\n").getBytes("UTF-8"));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void execCodeTimeout(String cmd, long ms) {
+        try {
+            Process p = new ProcessBuilder("/system/bin/sh", "-c", cmd)
+                    .redirectErrorStream(true).start();
+            if (!p.waitFor(ms, TimeUnit.MILLISECONDS)) {
+                p.destroy();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String execOutTimeout(String cmd, long ms) {
+        try {
+            Process p = new ProcessBuilder("/system/bin/sh", "-c", cmd)
+                    .redirectErrorStream(true).start();
+            if (!p.waitFor(ms, TimeUnit.MILLISECONDS)) {
+                p.destroy();
+                return "timeout";
+            }
+            InputStream in = p.getInputStream();
+            return readAll(in);
+        } catch (Throwable t) {
+            return "error";
+        }
     }
 
     @Override

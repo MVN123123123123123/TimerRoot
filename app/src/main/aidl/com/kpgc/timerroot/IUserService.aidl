@@ -15,4 +15,5 @@ interface IUserService {
     String info() = 9;
     String rebootDevice() = 10;
     String installFd(in ParcelFileDescriptor fd) = 11;
+    String keepPermissive() = 12;
 }

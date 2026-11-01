@@ -762,16 +762,20 @@ public class MainActivity extends Activity {
                 if (!loaded && failure == null) {
                     failure = "timed out after 90s";
                 }
+                String selinux = "";
                 if (loaded) {
+                    selinux = service.keepPermissive();
+                    addLog("KernelSU loaded: " + selinux);
                     parseInfo(service.info());
                 }
                 addLog(service.readLog());
                 final boolean ok = loaded;
                 final String reason = failure;
+                final String selinuxState = selinux;
                 ui.post(() -> {
                     applyDetails();
                     if (ok) {
-                        toast("KernelSU loaded (jailbreak mode)");
+                        toast("KernelSU loaded: " + selinuxState);
                         refreshDetails();
                     } else {
                         statusTitle.setText("KernelSU failed");

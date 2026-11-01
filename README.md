@@ -162,6 +162,10 @@ The card goes **Root shell** -> **Jailbreak mode** (`u:r:ksu:s0`). If the
 KernelSU stage loses its race, the card turns red with `KernelSU failed`, and
 you should reboot before retrying.
 
+KernelSU re-enables SELinux about half a second after it loads, so the app
+immediately retries `su -c setenforce 0` (over ~12s) and confirms with
+`getenforce`. A successful run therefore ends on `SELinux: Permissive`.
+
 ### 5. Reboot
 
 Use the `Reboot` pill. It goes through the service (`svc power reboot`), so it
