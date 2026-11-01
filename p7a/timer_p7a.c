@@ -26,7 +26,8 @@
  *     cred == real_cred and a real SELinux blob, so the worker can safely
  *     normalize uid/gid.  The worker then execs ksud late-load, which
  *     finds the installed KernelSU, KernelSU-Next or SukiSU Ultra
- *     libksud.so and loads the matching android14-6.1 module.
+ *     libksud.so -- including repackaged managers with randomized
+ *     package names -- and loads that manager's android14-6.1 module.
  *     The parent parks with its socket buffers holding the fake cred page.
  *
  * The trigger leaves a stale timerqueue node; every failed plant parks
@@ -957,28 +958,54 @@ static void write_ksu_script(void)
         "#!/system/bin/sh\n"
         "echo \"[ksu] start uid=$(id -u) selinux=$(getenforce)\"\n"
         "grep -E '^(Cap|Seccomp)' /proc/self/status\n"
-        /* Try upstream KernelSU, KernelSU-Next and SukiSU Ultra. */
+        /* Try upstream KernelSU, KernelSU-Next and SukiSU Ultra first. */
         "PKGS='me.weishu.kernelsu com.rifsxd.ksunext com.sukisu.ultra'\n"
         "KMI=android14-6.1\n"
         "KSUD=''\n"
         "PKG=''\n"
         "APK=''\n"
+        "lib_for() {\n"
+        "  d=$(dirname \"$1\")\n"
+        "  for c in \"$d/lib/arm64/libksud.so\" "
+        "\"$d/lib/arm64-v8a/libksud.so\"; do\n"
+        "    if [ -x \"$c\" ]; then echo \"$c\"; return 0; fi\n"
+        "  done\n"
+        "  return 1\n"
+        "}\n"
         "for p in $PKGS; do\n"
         "  a=$(pm path \"$p\" 2>/dev/null | head -n1 | cut -d: -f2)\n"
         "  [ -n \"$a\" ] || continue\n"
-        "  if [ -z \"$PKG\" ]; then PKG=\"$p\"; APK=\"$a\"; fi\n"
-        "  d=$(dirname \"$a\")\n"
-        "  for c in \"$d/lib/arm64/libksud.so\" "
-        "\"$d/lib/arm64-v8a/libksud.so\"; do\n"
-        "    if [ -x \"$c\" ]; then KSUD=\"$c\"; PKG=\"$p\"; APK=\"$a\"; "
-        "break 2; fi\n"
-        "  done\n"
+        "  [ -n \"$APK\" ] || { APK=\"$a\"; PKG=\"$p\"; }\n"
+        "  c=$(lib_for \"$a\") && { KSUD=\"$c\"; PKG=\"$p\"; APK=\"$a\"; "
+        "break; }\n"
         "done\n"
+        /* Repackaged managers (e.g. spoofed KernelSU-Next) can use any
+         * package name, and pm is not always usable from this context.
+         * As uid 0 we can read /data/app directly, so scan every libksud.so
+         * and derive the package from its install dir.  Prefer a manager
+         * installed for user 0 over one that only exists in another user. */
         "if [ -z \"$KSUD\" ]; then\n"
-        "  for p in $PKGS; do\n"
-        "    c=$(find /data/app -path \"*/$p*/lib/arm64/libksud.so\" "
-        "2>/dev/null | head -n1)\n"
-        "    if [ -x \"$c\" ]; then KSUD=\"$c\"; PKG=\"$p\"; break; fi\n"
+        "  for c in $(find /data/app -name libksud.so 2>/dev/null | "
+        "grep '/lib/arm64'); do\n"
+        "    [ -x \"$c\" ] || continue\n"
+        "    d=$(dirname \"$(dirname \"$(dirname \"$c\")\")\")\n"
+        "    b=$(basename \"$d\"); p=${b%%-*}\n"
+        "    if [ -z \"$KSUD\" ]; then\n"
+        "      KSUD=\"$c\"; PKG=\"$p\"; APK=\"$d/base.apk\"\n"
+        "    fi\n"
+        "    if [ -d \"/data/user/0/$p\" ] || "
+        "[ -d \"/data/user_de/0/$p\" ]; then\n"
+        "      KSUD=\"$c\"; PKG=\"$p\"; APK=\"$d/base.apk\"; break\n"
+        "    fi\n"
+        "  done\n"
+        "fi\n"
+        /* pm fallback for environments where the direct scan is denied. */
+        "if [ -z \"$KSUD\" ]; then\n"
+        "  for line in $(pm list packages --user 0 -f 2>/dev/null); do\n"
+        "    a=${line#package:}; a=${a%=*}\n"
+        "    c=$(lib_for \"$a\") || continue\n"
+        "    KSUD=\"$c\"; APK=\"$a\"; PKG=${line##*=}\n"
+        "    break\n"
         "  done\n"
         "fi\n"
         /* Some installs keep native libs compressed inside the APK. */
@@ -1000,14 +1027,14 @@ static void write_ksu_script(void)
         "fi\n"
         "if [ -z \"$PKG\" ]; then\n"
         "  for p in $PKGS; do\n"
-        "    if pm list packages 2>/dev/null | grep -qx \"package:$p\"; then "
-        "PKG=\"$p\"; break; fi\n"
+        "    if pm list packages --user 0 2>/dev/null | "
+        "grep -qx \"package:$p\"; then PKG=\"$p\"; break; fi\n"
         "  done\n"
         "fi\n"
         "[ -n \"$PKG\" ] || PKG=me.weishu.kernelsu\n"
         "if [ ! -x \"$KSUD\" ]; then\n"
-        "  echo \"[ksu] ksud missing (tried: $PKGS, "
-        "/data/local/tmp/ksud, /data/adb/ksu/bin/ksud)\"\n"
+        "  echo \"[ksu] ksud missing (tried: $PKGS, any user-0 package "
+        "with libksud.so, /data/local/tmp/ksud, /data/adb/ksu/bin/ksud)\"\n"
         "  echo KSU_MISSING\n"
         "  exit 1\n"
         "fi\n"

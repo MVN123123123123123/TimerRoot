@@ -161,9 +161,11 @@ KSU_LOADED
 ```
 
 The card goes **Root shell** -> **Jailbreak mode** (`u:r:ksu:s0`). The loader
-auto-detects which manager is installed (`me.weishu.kernelsu`,
-`com.rifsxd.ksunext`, or `com.sukisu.ultra`) and uses that package's
-`libksud.so`. If the KernelSU stage loses its race, the card turns red with
+finds the installed manager's `libksud.so` and loads that manager's module.
+Known package names (`me.weishu.kernelsu`, `com.rifsxd.ksunext`,
+`com.sukisu.ultra`) are tried first, then any package available to user 0 that
+ships `libksud.so`, so repackaged managers with randomized package names are
+supported too. If the KernelSU stage loses its race, the card turns red with
 `KernelSU failed`, and you should reboot before retrying.
 
 KernelSU re-enables SELinux about half a second after it loads, so the app
