@@ -750,6 +750,14 @@ public class MainActivity extends Activity {
                         failure = "the exploit parked before loading ksud";
                         break;
                     }
+                    if (tail.contains("[ksu] ksud missing")) {
+                        failure = "no supported manager (KernelSU, KernelSU-Next, SukiSU)";
+                        break;
+                    }
+                    if (tail.contains("KSU_MISSING")) {
+                        failure = "ksud late-load failed - see the [ksu] log lines";
+                        break;
+                    }
                     final long secs = (System.currentTimeMillis() - start) / 1000;
                     if (secs % 5 == 0) {
                         ui.post(() -> {

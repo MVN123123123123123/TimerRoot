@@ -28,8 +28,10 @@ MainActivity (untrusted_app)
 - Android 12+ (`minSdk 30`), arm64
 - [Shizuku](https://shizuku.rikka.app/) running (start it from the Shizuku app
   via wireless debugging, or over ADB)
-- [KernelSU](https://github.com/tiann/KernelSU) manager installed, for the
-  `Load KernelSU` path
+- One supported manager installed, for the `Load KernelSU` path:
+  [KernelSU](https://github.com/tiann/KernelSU),
+  [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
+  [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
 - A kernel build the exploit was ported to. The upstream binary targets
   `6.12.69-android16-6-g242e1a07f878-ab15865446-4k`; see below.
 
@@ -158,9 +160,11 @@ Loading KernelSU... 12s
 KSU_LOADED
 ```
 
-The card goes **Root shell** -> **Jailbreak mode** (`u:r:ksu:s0`). If the
-KernelSU stage loses its race, the card turns red with `KernelSU failed`, and
-you should reboot before retrying.
+The card goes **Root shell** -> **Jailbreak mode** (`u:r:ksu:s0`). The loader
+auto-detects which manager is installed (`me.weishu.kernelsu`,
+`com.rifsxd.ksunext`, or `com.sukisu.ultra`) and uses that package's
+`libksud.so`. If the KernelSU stage loses its race, the card turns red with
+`KernelSU failed`, and you should reboot before retrying.
 
 KernelSU re-enables SELinux about half a second after it loads, so the app
 immediately retries `su -c setenforce 0` (over ~12s) and confirms with
@@ -216,7 +220,7 @@ scripts/build.ps1                                        Gradle-free build
   (MIT), based on work by woshigenm and the other 98260 ports.
 - [Shizuku](https://github.com/RikkaApps/Shizuku) and
   [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) (Apache-2.0) by Rikka.
-- KernelSU (GPL-2.0) for the late-load path.
+- KernelSU (GPL-2.0), KernelSU-Next, and SukiSU Ultra for the late-load path.
 
 ## License
 
