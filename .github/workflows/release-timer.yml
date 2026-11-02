@@ -1,0 +1,84 @@
+name: Update timer release
+
+# Rebuild the exploit from source and replace the asset the app downloads:
+#   https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/timer
+# The release tag is fixed, so the app URL never changes; only the asset does.
+on:
+  push:
+    branches: [main]
+    paths:
+      - p7a/timer_p7a.c
+      - .github/workflows/release-timer.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: timer-release
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: 29.0.14206865
+  RELEASE_TAG: bingchiling
+  TARGET: aarch64-linux-android21
+
+jobs:
+  build-and-release:
+    name: Build and update release asset
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "ndk;${NDK_VERSION}"
+          echo "NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build timer
+        shell: bash
+        run: |
+          set -euo pipefail
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}-clang"
+          test -x "$CC"
+          "$CC" -O2 -ffunction-sections -fdata-sections \
+            -Wl,--gc-sections -g -static -pthread \
+            -o timer p7a/timer_p7a.c
+          file timer
+          strings timer | grep -q 'target=lynx'
+          test "$(stat -c %s timer)" -gt 100000
+
+      - name: Publish assets to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The app uses the asset named "timer"; keep the historical
+          # "timer_p7a" name and the source next to it for the release page.
+          cp timer timer_p7a
+          cp p7a/timer_p7a.c timer_p7a.c
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "timer-p7a" \
+              --notes "Rolling timer exploit build, updated automatically from main." \
+              --latest
+          fi
+
+          gh release upload "$RELEASE_TAG" \
+            timer timer_p7a timer_p7a.c \
+            --clobber
