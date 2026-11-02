@@ -741,7 +741,7 @@ static unsigned long long calibrate_base(unsigned char *raw)
         {
             unsigned long long pfn = u64(raw, i);
 
-            if (pfn >= (1ULL << 26) || (int)u32(raw, i + 8) != 1 ||
+            if (pfn >= (1ULL << 26) || (int)u32(raw, i + 8) != (int)SLAB_ORDER ||
                 u32(raw, i - 4) != (unsigned)me ||
                 (u32(raw, i - 8) & 0xffff) != g_t_page_alloc)
                 continue;
