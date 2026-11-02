@@ -1,13 +1,22 @@
 name: Update timer release
 
-# Rebuild the exploit from source and replace the asset the app downloads:
+# Rebuild the exploit and the app, then refresh the assets the app uses:
 #   https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/timer
-# The release tag is fixed, so the app URL never changes; only the asset does.
+#   https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/TimerRoot.apk
+# The release tag is fixed, so the app URL never changes; only the assets do.
 on:
   push:
     branches: [main]
     paths:
       - p7a/timer_p7a.c
+      - app/src/main/java/**
+      - app/src/main/res/**
+      - app/src/main/aidl/**
+      - app/src/main/AndroidManifest.xml
+      - app/build.gradle
+      - build.gradle
+      - settings.gradle
+      - gradle.properties
       - .github/workflows/release-timer.yml
   workflow_dispatch:
 
@@ -22,25 +31,42 @@ env:
   NDK_VERSION: 29.0.14206865
   RELEASE_TAG: bingchiling
   TARGET: aarch64-linux-android21
+  GRADLE_VERSION: "9.6.0"
 
 jobs:
   build-and-release:
-    name: Build and update release asset
+    name: Build and update release assets
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install pinned NDK
+      # AGP 8.7.3 cannot run on newer JDKs (the JdkImageTransform jlink step
+      # fails on JDK 21+), so pin 17.
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The wrapper is gitignored, so let the action provide Gradle itself.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Install Android SDK packages and NDK
         shell: bash
         run: |
           set -euo pipefail
 
           # The runner image already provides the SDK and cmdline-tools; the
           # setup-android action's "sdkmanager tools" step fails because that
-          # package no longer exists.  Use the preinstalled sdkmanager.
+          # package no longer exists, so call sdkmanager directly.
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
 
           find_sdkmanager() {
             local c
@@ -54,6 +80,30 @@ jobs:
             command -v sdkmanager
           }
 
+          SDKMANAGER="$(find_sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT"
+            exit 1
+          fi
+
+          # compileSdk 36 needs the platform and build-tools 36 (AGP 8.7's
+          # default build-tools is 35, which cannot compile against 36).
+          PACKAGES=()
+          [ -d "$SDK_ROOT/platforms/android-36" ] || PACKAGES+=("platforms;android-36")
+          [ -d "$SDK_ROOT/build-tools/36.0.0" ] || PACKAGES+=("build-tools;36.0.0")
+          if [ ! -x "$SDK_ROOT/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}-clang" ]; then
+            PACKAGES+=("ndk;${NDK_VERSION}")
+          fi
+
+          if [ ${#PACKAGES[@]} -gt 0 ]; then
+            yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "${PACKAGES[@]}"
+          fi
+
+          for p in "platforms/android-36" "build-tools/36.0.0"; do
+            [ -d "$SDK_ROOT/$p" ] || { echo "::error::missing $SDK_ROOT/$p"; exit 1; }
+          done
+
           find_clang() {
             local root="$1" c
             for c in "$root/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/"*"/bin/${TARGET}-clang" \
@@ -66,25 +116,14 @@ jobs:
             return 1
           }
 
-          NDK="${SDK_ROOT}/ndk/${NDK_VERSION}"
-          if [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}-clang" ]; then
-            SDKMANAGER="$(find_sdkmanager || true)"
-            if [ -n "$SDKMANAGER" ]; then
-              yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
-              "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "ndk;${NDK_VERSION}" \
-                || echo "::warning::pinned NDK ${NDK_VERSION} install failed; falling back"
-            fi
-          fi
-
           CC_PATH="$(find_clang "$SDK_ROOT" || true)"
           if [ -z "$CC_PATH" ]; then
             echo "::error::no aarch64 clang in $SDK_ROOT/ndk"
             ls -1 "$SDK_ROOT/ndk" 2>/dev/null || true
             exit 1
           fi
-          NDK="${CC_PATH%%/toolchains/llvm/prebuilt/*}"
-          echo "NDK=$NDK" >> "$GITHUB_ENV"
-          echo "Using NDK at $NDK (clang: $CC_PATH)"
+          echo "NDK=${CC_PATH%%/toolchains/llvm/prebuilt/*}" >> "$GITHUB_ENV"
+          echo "Using SDK $SDK_ROOT, clang $CC_PATH"
 
       - name: Build timer
         shell: bash
@@ -101,13 +140,71 @@ jobs:
           test "$(strings timer | grep -c 'target=lynx')" -ge 1
           test "$(stat -c %s timer)" -gt 100000
 
-      - name: Publish assets to rolling release
+          # Embed the same binary in the app; assets/timer is gitignored.
+          mkdir -p app/src/main/assets
+          cp timer app/src/main/assets/timer
+
+      - name: Build app
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle --no-daemon --stacktrace assembleRelease
+
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BT="$(ls -d "$ANDROID_SDK_ROOT"/build-tools/36.* | sort -V | tail -n1)"
+          UNSIGNED="$(find app/build/outputs/apk/release -name '*-unsigned.apk' | head -n1)"
+          if [ -z "$UNSIGNED" ]; then
+            echo "::error::no release APK produced"
+            find app/build/outputs -type f || true
+            exit 1
+          fi
+          echo "unsigned APK: $UNSIGNED"
+
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            KS="$RUNNER_TEMP/release.jks"
+            KS_PASS="${KEYSTORE_PASSWORD:?KEYSTORE_PASSWORD must be set with KEYSTORE_BASE64}"
+            ALIAS="${KEY_ALIAS:?KEY_ALIAS must be set with KEYSTORE_BASE64}"
+            KEY_PASS="${KEY_PASSWORD:-$KS_PASS}"
+            echo "Signing with the repository release key"
+          else
+            # No secret configured: sign with a throwaway key so the APK is
+            # installable.  Android will refuse to update an app signed by a
+            # different key, so set the secrets to keep updates working.
+            KS="$RUNNER_TEMP/ci.jks"
+            KS_PASS="android"
+            ALIAS="timerroot"
+            KEY_PASS="android"
+            keytool -genkeypair -keystore "$KS" -storepass "$KS_PASS" \
+              -keypass "$KEY_PASS" -alias "$ALIAS" -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=TimerRoot,O=TimerRoot,C=US" >/dev/null 2>&1
+            echo "::warning::KEYSTORE_BASE64 is not set; signed with a throwaway key, so this APK cannot update an install signed with another key"
+          fi
+
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" \
+            --key-pass "pass:$KEY_PASS" --ks-key-alias "$ALIAS" \
+            --out TimerRoot.apk "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" verify --print-certs TimerRoot.apk | head -n 5
+
+      - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
 
+          # Upload only after both artifacts built successfully, so a failed
+          # app build cannot leave the release half updated.
           # The app uses the asset named "timer"; keep the historical
           # "timer_p7a" name and the source next to it for the release page.
           cp timer timer_p7a
@@ -116,10 +213,14 @@ jobs:
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --title "timer-p7a" \
-              --notes "Rolling timer exploit build, updated automatically from main." \
+              --notes "Rolling timer exploit and app build, updated automatically from main." \
               --latest
           fi
 
           gh release upload "$RELEASE_TAG" \
-            timer timer_p7a timer_p7a.c \
+            timer timer_p7a timer_p7a.c TimerRoot.apk \
             --clobber
+
+          gh release view "$RELEASE_TAG" \
+            --json assets \
+            --jq '.assets[] | "\(.name) \(.size) bytes"'
