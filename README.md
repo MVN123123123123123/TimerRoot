@@ -32,16 +32,20 @@ MainActivity (untrusted_app)
   [KernelSU](https://github.com/tiann/KernelSU),
   [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
   [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
-- A kernel build the exploit was ported to. The upstream binary targets
-  `6.12.69-android16-6-g242e1a07f878-ab15865446-4k`; see below.
+- A device running the `6.1.162-android14-11-g9dd05ae3a1de-ab16261587` kernel.
+  The upstream binary targets `6.12.69-android16-6-g242e1a07f878-ab15865446-4k`
+  and will not work here; this port covers the Pixel kernels listed under
+  [Supported devices](#supported-devices).
 
 ## Getting the exploit binary
 
 The exploit is build-specific: the timer call site, `cred` layout and
 `task_struct` offsets differ per kernel, and a binary built for another build
 will corrupt the kernel instead of failing safely. This app is ported to the
-Pixel 7a (`lynx`) build `CP3A.261005.002.A1`, kernel
-`6.1.162-android14-11-g9dd05ae3a1de-ab16261587`.
+`6.1.162-android14-11-g9dd05ae3a1de-ab16261587` kernel shipped in the
+`CP3A.261005.002.A1` (Pixel 7a) and `CP3A.261005.005` (Pixel 9a) builds. See
+[Supported devices](#supported-devices) for the full list of devices that use
+this kernel.
 
 The binary is not committed (`assets/timer` is gitignored). Build it and drop it
 in place, or use **Download exploit**, which fetches the release asset and
@@ -61,6 +65,55 @@ The port derives every constant from the factory `boot.img` of that build
 
 The binary is MIT licensed by its authors; only use it on hardware you own, and
 only when your kernel matches the build it was ported to.
+
+## Supported devices
+
+The exploit is tied to a kernel build, not to a device name. This port targets
+`6.1.162-android14-11-g9dd05ae3a1de-ab16261587`, the GKI kernel shipped in the
+`CP3A.261005.002.A1` and `CP3A.261005.005` factory images. Every device below
+ships that exact kernel payload, so the same binary applies to all of them.
+
+**Only the Pixel 7a and Pixel 9a have actually been tested.** Everything else
+in the table ships the same kernel and is expected to work, but has not been
+run, so treat it as untested.
+
+| Device | Codename | Factory build | Status |
+|---|---|---|---|
+| Pixel 6 | `oriole` | `CP3A.261005.002.A1` | untested |
+| Pixel 6 Pro | `raven` | `CP3A.261005.002.A1` | untested |
+| Pixel 6a | `bluejay` | `CP3A.261005.002.A1` | untested |
+| Pixel 7 | `panther` | `CP3A.261005.002.A1` | untested |
+| Pixel 7 Pro | `cheetah` | `CP3A.261005.002.A1` | untested |
+| **Pixel 7a** | `lynx` | `CP3A.261005.002.A1` | **tested** |
+| Pixel Fold | `felix` | `CP3A.261005.002.A1` | untested |
+| Pixel Tablet | `tangorpro` | `CP3A.261005.002.A1` | untested |
+| Pixel 8 | `shiba` | `CP3A.261005.005` | untested |
+| Pixel 8 Pro | `husky` | `CP3A.261005.005` | untested |
+| Pixel 8a | `akita` | `CP3A.261005.005` | untested |
+| Pixel 9 | `tokay` | `CP3A.261005.005` | untested |
+| Pixel 9 Pro | `caiman` | `CP3A.261005.005` | untested |
+| Pixel 9 Pro XL | `komodo` | `CP3A.261005.005` | untested |
+| Pixel 9 Pro Fold | `comet` | `CP3A.261005.005` | untested |
+| **Pixel 9a** | `tegu` | `CP3A.261005.005` | **tested** |
+| Pixel 10a | `stallion` | `CP3A.261005.005` | untested |
+
+The Pixel 10, 10 Pro, 10 Pro XL and 10 Pro Fold share the `CP3A.261005.005`
+build number but run `6.6.127-android15-8-g91d825611104-ab16252310-4k`, a
+different kernel with different symbol addresses. They are **not** supported.
+
+Every factory image above contains the same kernel payload: the 4K `boot.img`
+kernel is byte-identical (16,637,222 bytes) across all 17 devices, so this is
+the same binary, not merely the same version string.
+
+Devices whose factory image also ships a `kernel_16k` (Pixel 8, 8 Pro, 8a, 9,
+9 Pro, 9 Pro XL, 9a and 10a) can boot the 16K-page build of that same kernel.
+Those images are byte-identical too, and the binary selects its offsets from
+`sysconf(_SC_PAGESIZE)`, so it covers both the 4K and 16K layouts. The Pixel 9a
+16K image was verified in the same local VM run as the stock 4K image.
+
+If your device is not in this table, or its status is untested, run
+`timer target` first and check that the reported `kernel=` matches. Do not run
+the exploit on a kernel that does not match.
 
 ## Build
 
