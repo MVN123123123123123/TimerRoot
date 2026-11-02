@@ -32,20 +32,59 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Android SDK tools
-        uses: android-actions/setup-android@v3
-
       - name: Install pinned NDK
         shell: bash
         run: |
           set -euo pipefail
-          SDKMANAGER="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER="$(command -v sdkmanager)"
+
+          # The runner image already provides the SDK and cmdline-tools; the
+          # setup-android action's "sdkmanager tools" step fails because that
+          # package no longer exists.  Use the preinstalled sdkmanager.
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+
+          find_sdkmanager() {
+            local c
+            for c in "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+                     "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager; do
+              if [ -x "$c" ]; then
+                echo "$c"
+                return 0
+              fi
+            done
+            command -v sdkmanager
+          }
+
+          find_clang() {
+            local root="$1" c
+            for c in "$root/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/"*"/bin/${TARGET}-clang" \
+                     "$root"/ndk/*/toolchains/llvm/prebuilt/*/bin/${TARGET}-clang; do
+              if [ -x "$c" ]; then
+                echo "$c"
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          NDK="${SDK_ROOT}/ndk/${NDK_VERSION}"
+          if [ ! -x "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}-clang" ]; then
+            SDKMANAGER="$(find_sdkmanager || true)"
+            if [ -n "$SDKMANAGER" ]; then
+              yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+              "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install "ndk;${NDK_VERSION}" \
+                || echo "::warning::pinned NDK ${NDK_VERSION} install failed; falling back"
+            fi
           fi
-          yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" --install "ndk;${NDK_VERSION}"
-          echo "NDK=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+          CC_PATH="$(find_clang "$SDK_ROOT" || true)"
+          if [ -z "$CC_PATH" ]; then
+            echo "::error::no aarch64 clang in $SDK_ROOT/ndk"
+            ls -1 "$SDK_ROOT/ndk" 2>/dev/null || true
+            exit 1
+          fi
+          NDK="${CC_PATH%%/toolchains/llvm/prebuilt/*}"
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "Using NDK at $NDK (clang: $CC_PATH)"
 
       - name: Build timer
         shell: bash
@@ -57,7 +96,9 @@ jobs:
             -Wl,--gc-sections -g -static -pthread \
             -o timer p7a/timer_p7a.c
           file timer
-          strings timer | grep -q 'target=lynx'
+          # grep -c reads all input, so pipefail cannot turn grep's early
+          # exit into SIGPIPE (141) here.
+          test "$(strings timer | grep -c 'target=lynx')" -ge 1
           test "$(stat -c %s timer)" -gt 100000
 
       - name: Publish assets to rolling release
