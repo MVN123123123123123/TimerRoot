@@ -735,9 +735,17 @@ public class MainActivity extends Activity {
                 final long start = System.currentTimeMillis();
                 boolean loaded = false;
                 String failure = null;
+                boolean sawLateLoad = false;
+                int lastLen = -1;
+                long lastChange = System.currentTimeMillis();
                 while (System.currentTimeMillis() - start < 90000) {
                     Thread.sleep(1000);
                     String tail = service.readLog();
+                    sawLateLoad |= tail.contains("[ksu] late-load rc=0");
+                    if (tail.length() != lastLen) {
+                        lastLen = tail.length();
+                        lastChange = System.currentTimeMillis();
+                    }
                     if (tail.contains("KSU_LOADED")) {
                         loaded = true;
                         break;
@@ -746,8 +754,8 @@ public class MainActivity extends Activity {
                         failure = "the selinux stage missed its race";
                         break;
                     }
-                    if (tail.contains("parking without reap")) {
-                        failure = "the exploit parked before loading ksud";
+                    if (tail.contains("KSU_STALE")) {
+                        failure = "an old KernelSU module is still loaded - reboot, then retry";
                         break;
                     }
                     if (tail.contains("[ksu] ksud missing")) {
@@ -756,6 +764,44 @@ public class MainActivity extends Activity {
                     }
                     if (tail.contains("KSU_MISSING")) {
                         failure = "ksud late-load failed - see the [ksu] log lines";
+                        break;
+                    }
+                    /*
+                     * The exploit parent always parks (and says so) once the
+                     * stage is done, even when the late-load succeeded - the
+                     * line alone means nothing. What matters is whether the
+                     * module that is now loaded actually hands out root.
+                     */
+                    if (tail.contains("parking without reap")) {
+                        if (sawLateLoad) {
+                            if (service.ksuActive()) {
+                                loaded = true;
+                            } else {
+                                failure = "ksud late-load finished but su is not"
+                                        + " available - see the [ksu] log lines";
+                            }
+                        } else {
+                            failure = "the exploit parked before loading ksud";
+                        }
+                        break;
+                    }
+                    if (tail.contains("[ksu] late-load rc=0")) {
+                        sawLateLoad = true;
+                    }
+                    /*
+                     * SukiSU's loader can take the module and terminate the
+                     * stage shell before it prints KSU_LOADED. Once the log
+                     * has been quiet for a few seconds after a late-load,
+                     * ask the kernel whether root actually works.
+                     */
+                    if (sawLateLoad
+                            && System.currentTimeMillis() - lastChange > 5000) {
+                        if (service.ksuActive()) {
+                            loaded = true;
+                        } else {
+                            failure = "ksud late-load finished but su is not"
+                                    + " available - see the [ksu] log lines";
+                        }
                         break;
                     }
                     final long secs = (System.currentTimeMillis() - start) / 1000;
@@ -768,7 +814,12 @@ public class MainActivity extends Activity {
                     }
                 }
                 if (!loaded && failure == null) {
-                    failure = "timed out after 90s";
+                    /* Last chance: the stage may have lost its output. */
+                    if (service.ksuActive()) {
+                        loaded = true;
+                    } else {
+                        failure = "timed out after 90s";
+                    }
                 }
                 String selinux = "";
                 if (loaded) {

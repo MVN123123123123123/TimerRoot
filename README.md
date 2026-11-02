@@ -164,9 +164,16 @@ The card goes **Root shell** -> **Jailbreak mode** (`u:r:ksu:s0`). The loader
 finds the installed manager's `libksud.so` and loads that manager's module.
 Known package names (`me.weishu.kernelsu`, `com.rifsxd.ksunext`,
 `com.sukisu.ultra`) are tried first, then any package available to user 0 that
-ships `libksud.so`, so repackaged managers with randomized package names are
-supported too. If the KernelSU stage loses its race, the card turns red with
-`KernelSU failed`, and you should reboot before retrying.
+ships `libksud.so`. Repackaged managers with randomized package names are
+supported, including builds that rename `libksud.so` to an unrelated `.so`
+(it is identified by size and the `late-load` marker). The loader then compares
+the manager's uapi version with the module the kernel reports (`ksud debug
+info`). If a module from an earlier run is still loaded and its uapi does not
+match, it prints `KSU_STALE` instead of pretending success: a kernel module
+cannot be replaced without a reboot, and a mismatch is exactly what makes the
+manager show `not installed` (for example KernelSU-Next's uapi 5 module with
+SukiSU Ultra's uapi 6 manager). If the KernelSU stage loses its race, the card
+turns red with `KernelSU failed`, and you should reboot before retrying.
 
 KernelSU re-enables SELinux about half a second after it loads, so the app
 immediately retries `su -c setenforce 0` (over ~12s) and confirms with
