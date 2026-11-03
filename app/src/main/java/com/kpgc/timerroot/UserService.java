@@ -122,8 +122,8 @@ public class UserService extends IUserService.Stub {
             pb.redirectErrorStream(true);
             Process p = pb.start();
             String text = readAll(p.getInputStream());
-            if (!p.waitFor(300, TimeUnit.SECONDS)) {
-                return text + "\n[timeout] still running after 300s - do not kill it,"
+            if (!p.waitFor(420, TimeUnit.SECONDS)) {
+                return text + "\n[timeout] still running after 420s - do not kill it,"
                         + " reboot to clean up";
             }
             return text;

@@ -28,6 +28,9 @@ MainActivity (untrusted_app)
 - Android 12+ (`minSdk 30`), arm64
 - [Shizuku](https://shizuku.rikka.app/) running (start it from the Shizuku app
   via wireless debugging, or over ADB)
+- For unattended boots: one **Install channel** while a root shell is open, then
+  one *Always allow* tap for TimerRoot's ADB key. After that the exploit runs on
+  its own at every unlock (see [Auto-root on boot](#auto-root-on-boot))
 - One supported manager installed, for the `Load KernelSU` path:
   [KernelSU](https://github.com/tiann/KernelSU),
   [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
@@ -267,8 +270,40 @@ Use the `Reboot` pill. It goes through the service (`svc power reboot`), so it
 works even when no root shell is open yet. Rebooting is also the only clean way
 to remove parked processes and to unload KernelSU.
 
-After rebooting, start again from step 1: Shizuku is stopped and KernelSU is
-gone.
+After rebooting, TimerRoot can repeat the whole chain by itself: Shizuku is
+stopped and KernelSU is gone, but the auto-root service starts Shizuku over a
+localhost ADB channel while the device is still at the lock screen, binds it
+right after you unlock and runs the exploit once per real boot.
+
+### 6. Auto-root on boot
+
+1. Get a root shell once (step 4).
+2. Press **Install channel**. It runs `timer permissive` (clears the kernel's
+   SELinux flag through the exploit), opens a root shell and appends
+   `persist.adb.tcp.port=5555` to `/data/property/persistent_properties`, so
+   adbd listens on localhost at every boot even with Wi-Fi off. It also
+   disables the 7-day ADB key expiry. KernelSU is not required for this step.
+3. Reboot. The first localhost connection shows the normal *Allow USB
+   debugging?* dialog; tap **Always allow**. The key is then in `adb_keys`, so
+   later boots use signature auth with no UI.
+
+From then on a foreground service runs on every real boot in two stages.
+`LOCKED_BOOT_COMPLETED` (seconds after the kernel starts) starts Shizuku over
+`127.0.0.1:5555`. Once the device is unlocked, `BOOT_COMPLETED` reuses that
+server, restarts the app's own process once (Shizuku only pushes its binder on
+a uid `gone -> active` transition) and runs `timer shell`. The service stays in
+the foreground to keep the root shell alive. **Run auto-root now** repeats it
+on demand; the history is under **Auto-root log**.
+
+The unlock is a hard requirement, not a design choice: Shizuku checks its
+permission against the credential-encrypted user, so it cannot deliver its
+binder while the device is at the lock screen (and a password-protected device
+needs its password after every reboot). Shizuku itself is already up by then,
+so the exploit starts within seconds of unlocking instead of after a fresh
+Shizuku start.
+
+Without the channel, auto-root still works when Shizuku is already running
+(for example started by hand over Wi-Fi).
 
 The status card reflects what is actually live, detected by running
 `su -c id` and checking for `u:r:ksu:s0`:
@@ -298,11 +333,18 @@ This is a kernel exploit. Read this before pressing anything.
 ## Layout
 
 ```
-app/src/main/java/com/kpgc/timerroot/MainActivity.java   UI and state
-app/src/main/java/com/kpgc/timerroot/UserService.java    runs as the shell user
-app/src/main/aidl/com/kpgc/timerroot/IUserService.aidl   service interface
-app/src/main/assets/timer                                exploit binary (not in git)
-scripts/build.ps1                                        Gradle-free build
+app/src/main/java/com/kpgc/timerroot/MainActivity.java        UI and state
+app/src/main/java/com/kpgc/timerroot/UserService.java         runs as the shell user
+app/src/main/java/com/kpgc/timerroot/AutoRootService.java     boot-time state machine
+app/src/main/java/com/kpgc/timerroot/AutoRoot.java            guards, key and log
+app/src/main/java/com/kpgc/timerroot/AdbLocal.java            minimal localhost ADB client
+app/src/main/java/com/kpgc/timerroot/AdbKey.java              RSA key generation
+app/src/main/java/com/kpgc/timerroot/BootReceiver.java        BOOT_COMPLETED entry point
+app/src/main/java/com/kpgc/timerroot/RestartJobService.java   binder-push restart
+app/src/main/aidl/com/kpgc/timerroot/IUserService.aidl        service interface
+app/src/main/assets/timer                                     exploit binary (not in git)
+scripts/build.ps1                                             Gradle-free build
+docs/auto-root.md                                             research and field notes
 ```
 
 ## Credits
