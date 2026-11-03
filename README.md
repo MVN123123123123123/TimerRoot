@@ -32,33 +32,41 @@ MainActivity (untrusted_app)
   [KernelSU](https://github.com/tiann/KernelSU),
   [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
   [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
-- A device running the `6.1.162-android14-11-g9dd05ae3a1de-ab16261587` kernel.
-  The upstream binary targets `6.12.69-android16-6-g242e1a07f878-ab15865446-4k`
-  and will not work here; this port covers the Pixel kernels listed under
-  [Supported devices](#supported-devices).
+- A device running one of the kernels this port covers (see
+  [Supported devices](#supported-devices)):
+  `6.1.162-android14-11-g9dd05ae3a1de-ab16261587` (Pixel 6 through Pixel 10a)
+  or `6.6.127-android15-8-g91d825611104-ab16252310-4k` (Pixel 10 series). The
+  upstream binary targets `6.12.69-android16-6-g242e1a07f878-ab15865446-4k`
+  and will not work here.
 
 ## Getting the exploit binary
 
 The exploit is build-specific: the timer call site, `cred` layout and
 `task_struct` offsets differ per kernel, and a binary built for another build
-will corrupt the kernel instead of failing safely. This app is ported to the
-`6.1.162-android14-11-g9dd05ae3a1de-ab16261587` kernel shipped in the
-`CP3A.261005.002.A1` (Pixel 7a) and `CP3A.261005.005` (Pixel 9a) builds. See
-[Supported devices](#supported-devices) for the full list of devices that use
-this kernel.
+will corrupt the kernel instead of failing safely. One binary carries a profile
+for each kernel family this port covers: `6.1.162-android14-11-...` in the
+`CP3A.261005.002.A1` and `CP3A.261005.005` builds (Pixel 6 through Pixel 10a)
+and `6.6.127-android15-8-...-4k` in the Pixel 10 series' `CP3A.261005.005`
+build. The profile is selected at startup from the running kernel banner and
+userspace page size. See [Supported devices](#supported-devices).
 
 The binary is not committed (`assets/timer` is gitignored). Build it and drop it
 in place, or use **Download exploit**, which fetches the release asset and
 installs it directly:
 
 ```
-installed 2188600 bytes (uid=2000)
+installed 2106912 bytes (uid=2000)
 target=lynx
 kernel=6.1.162-android14-11-g9dd05ae3a1de-ab16261587
+profile=4k
+timer_site=0xffffffc008192f7c
 ```
 
+On a Pixel 10 the same `target=lynx` check passes and the kernel line reports
+`6.6.127-android15-8-g91d825611104-ab16252310-4k` with profile `6.6-4k`.
+
 After installing, the app always runs `timer target` and refuses any binary
-whose `target=` line does not match this kernel.
+whose `target=` line does not match `target=lynx`.
 
 The port derives every constant from the factory `boot.img` of that build
 (kallsyms + BTF), so re-derive them before using it on a different kernel.
@@ -68,14 +76,19 @@ only when your kernel matches the build it was ported to.
 
 ## Supported devices
 
-The exploit is tied to a kernel build, not to a device name. This port targets
-`6.1.162-android14-11-g9dd05ae3a1de-ab16261587`, the GKI kernel shipped in the
-`CP3A.261005.002.A1` and `CP3A.261005.005` factory images. Every device below
-ships that exact kernel payload, so the same binary applies to all of them.
+The exploit is tied to a kernel build, not to a device name. One binary carries
+a profile for each kernel family below and selects it at startup from the
+running kernel banner and the userspace page size.
 
-**Only the Pixel 7a and Pixel 9a have actually been tested.** Everything else
-in the table ships the same kernel and is expected to work, but has not been
-run, so treat it as untested.
+### 6.1.162 (4K and 16K)
+
+`6.1.162-android14-11-g9dd05ae3a1de-ab16261587`, the GKI kernel shipped in the
+`CP3A.261005.002.A1` and `CP3A.261005.005` factory images. Every device in this
+table ships that exact kernel payload.
+
+**Only the Pixel 7a and Pixel 9a have actually been run on hardware.**
+Everything else in this table ships the same kernel and is expected to work,
+but has not been run, so treat it as untested.
 
 | Device | Codename | Factory build | Status |
 |---|---|---|---|
@@ -97,21 +110,36 @@ run, so treat it as untested.
 | **Pixel 9a** | `tegu` | `CP3A.261005.005` | **tested** |
 | Pixel 10a | `stallion` | `CP3A.261005.005` | untested |
 
-The Pixel 10, 10 Pro, 10 Pro XL and 10 Pro Fold share the `CP3A.261005.005`
-build number but run `6.6.127-android15-8-g91d825611104-ab16252310-4k`, a
-different kernel with different symbol addresses. They are **not** supported.
-
-Every factory image above contains the same kernel payload: the 4K `boot.img`
-kernel is byte-identical (16,637,222 bytes) across all 17 devices, so this is
-the same binary, not merely the same version string.
+Every factory image in this table contains the same kernel payload: the 4K
+`boot.img` kernel is byte-identical (16,637,222 bytes) across all 17 devices,
+so this is the same binary, not merely the same version string.
 
 Devices whose factory image also ships a `kernel_16k` (Pixel 8, 8 Pro, 8a, 9,
 9 Pro, 9 Pro XL, 9a and 10a) can boot the 16K-page build of that same kernel.
 Those images are byte-identical too, and the binary selects its offsets from
 `sysconf(_SC_PAGESIZE)`, so it covers both the 4K and 16K layouts. The Pixel 9a
-16K image was verified in the same local VM run as the stock 4K image.
+16K image was verified end-to-end in QEMU as well (`timer verify` and
+`timer fake`).
 
-If your device is not in this table, or its status is untested, run
+### 6.6.127 (4K)
+
+`6.6.127-android15-8-g91d825611104-ab16252310-4k`, shipped by the Pixel 10
+series in the same `CP3A.261005.005` build number:
+
+| Device | Codename | Status |
+|---|---|---|
+| **Pixel 10** | `frankel` | **verified in QEMU** |
+| **Pixel 10 Pro** | `blazer` | **verified in QEMU** |
+| **Pixel 10 Pro XL** | `mustang` | **verified in QEMU** |
+| **Pixel 10 Pro Fold** | `rango` | **verified in QEMU** |
+
+All four factory images contain a byte-identical kernel payload (36,866,560
+bytes, SHA-256 `0226c3be4224b02884d4f9b332aee58ec06c65b2263265e80f2498332ef15c06`),
+so one profile covers all of them. The 6.6 profile was verified end-to-end
+(`timer verify` and `timer fake`) in a QEMU VM booting the factory kernel; it
+has not been flashed on physical Pixel 10 hardware yet.
+
+If your device is not in these tables, or its status is untested, run
 `timer target` first and check that the reported `kernel=` matches. Do not run
 the exploit on a kernel that does not match.
 
@@ -192,9 +220,10 @@ binary you built into `app/src/main/assets/timer`. Either path installs it to
 `/data/local/tmp/timer` and then checks the target:
 
 ```
-installed 2188600 bytes (uid=2000)
+installed 2106912 bytes (uid=2000)
 target=lynx
 kernel=6.1.162-android14-11-g9dd05ae3a1de-ab16261587
+profile=4k
 timer_site=0xffffffc008192f7c
 ```
 
