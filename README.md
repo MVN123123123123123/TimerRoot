@@ -283,7 +283,7 @@ scripts/build.ps1                                        Gradle-free build
 - [Shizuku](https://github.com/RikkaApps/Shizuku) and
   [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) (Apache-2.0) by Rikka.
 - KernelSU (GPL-2.0), KernelSU-Next, and SukiSU Ultra for the late-load path.
-
+- Original repository that this fork based on: [kpgc10kai/TimerRoot](https://github.com/kpgc10kai/TimerRoot)
 ## License
 
 MIT for the app code in this repository. The exploit binary and the Shizuku API
