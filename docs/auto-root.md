@@ -219,8 +219,10 @@ BootReceiver (directBootAware)
        ├─ wait for Shizuku binder, check permission, bindUserService()
        ├─ install bundled assets/timer if missing or wrong
        ├─ `timer target` must print `target=lynx` before running anything
-       ├─ once per boot: `timer fake`  (late-load KernelSU, `KSU_LOADED`)
-       │  or `timer shell`            (root shell held by the app)
+       ├─ once per boot: `timer shell` (root shell held by the app)
+       ├─ then `timer fake`, replanted up to 3x
+       │     (fake cred -> ksud late-load -> `KSU_LOADED`, SELinux off)
+       ├─ `su -c id` must report `u:r:ksu:s0`, then `keepPermissive()`
        └─ notification: running / done / needs attention
 ```
 
@@ -272,6 +274,9 @@ Files:
   - `<service android:name=".AutoRootService"
     android:foregroundServiceType="specialUse">` plus the
     `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property.
+  - `<provider android:name="rikka.shizuku.ShizukuProvider"
+    android:directBootAware="true">` so `shizuku_server` can deliver its binder
+    while the credential-encrypted user is locked.
 - `BootReceiver.java`: reads the auto-root flag from **device protected**
   prefs; if enabled, `startForegroundService(...)`.
 - `AutoRootService.java`: the state machine above. Keep a notification, and
@@ -288,8 +293,9 @@ Ordering and retries:
 
 - `BOOT_COMPLETED` can arrive before adbd or Shizuku are ready. Poll with
   backoff (e.g. every 5 s for 3 minutes) instead of failing once.
-- Handle `LOCKED_BOOT_COMPLETED` early (root mode can start there; ADB mode
-  usually cannot) and `BOOT_COMPLETED` as the main attempt.
+- `LOCKED_BOOT_COMPLETED` is the main attempt: start Shizuku there and run the
+  exploit at BFU. `BOOT_COMPLETED` is a retry for a failure that happened
+  before the exploit started.
 - Do not start a `dataSync` FGS; use `specialUse`.
 - Do not download the binary at boot; `assets/timer` is already bundled and
   `UserService.install()` copies it from the APK.
@@ -301,10 +307,12 @@ long bootTime = System.currentTimeMillis() - SystemClock.elapsedRealtime();
 // store bootTime; if unchanged (within ~30 s), this is the same boot → skip
 ```
 
-One attempt per boot, and never retry after a failure:
+One exploit per boot; retry only failures that happened before it:
 
 - `timer shell` / `timer fake` park a process on failure and the app already
   warns "reboot before retrying".
+- The boot claim is released only when the failure happened before
+  `openRoot()`; a retry then cannot double-run the exploit.
 - Read `/data/local/tmp/timer.log`; if it contains `parking without reap`,
   `no successful plant`, or `KSU_STALE`, stop and notify. Do not loop.
 
@@ -333,7 +341,12 @@ State to keep in device protected prefs:
 - **USB debugging stays on** in this design (that is what makes adbd start at
   boot). Turning it off kills the channel; detect it and notify.
 - **The exploit is one-shot per boot.** `openRoot()` blocks up to 300 s and
-  succeeds only if the race lands; auto-retrying can corrupt state.
+  succeeds only if the race lands; auto-retrying can corrupt state. The one
+  exception is a missed burst: the exploit itself replants up to three times
+  in `shell`/`permissive` mode without reaping the parked zombie, and
+  `AutoRootService` uses the same bound when it replants the `fake` stage.
+  Anything after `KSU_LOADED` (or a `KSU_STALE` / missing-manager verdict) is
+  final and must not be retried.
 - **Binary/target check** must stay: run `timer target` and require
   `target=lynx` before every attempt, otherwise a wrong build can corrupt the
   kernel.
@@ -425,9 +438,9 @@ Files:
 
 | File | Purpose |
 | --- | --- |
-| `BootReceiver.java` | `directBootAware`; `LOCKED_BOOT_COMPLETED` starts Shizuku early, `BOOT_COMPLETED` runs the bind + exploit. |
-| `AutoRootService.java` | `specialUse` FGS state machine: prestart at locked boot, then wait for unlock → reuse or start Shizuku → restart once so the binder is pushed → bind `UserService` → install asset → check `target=lynx` → `openRoot()` once. Stays alive after success so the root shell survives. |
-| `RestartJobService.java` | `JobScheduler` job (1 s latency, 4 s deadline) that starts `AutoRootService` in a fresh process after the boot path kills itself. |
+| `BootReceiver.java` | `directBootAware`; `LOCKED_BOOT_COMPLETED` starts Shizuku early and runs the exploit at BFU, `BOOT_COMPLETED` only retries when the BFU attempt failed before the exploit. |
+| `AutoRootService.java` | `specialUse` FGS state machine: at locked boot reuse/start Shizuku → bind at BFU → install asset → check `target=lynx` → `openRoot()` → `timer fake` → `keepPermissive()`. Stays alive after success so the root shell survives. |
+| `RestartJobService.java` | Fallback binder-push restart when the server is up but its binder never arrived (used after unlock, not at BFU). |
 | `AutoRoot.java` | Device-protected prefs, per-boot and restart guards, key pair, rotating log. |
 | `AdbKey.java` | RSA 2048 generation and the exact 524-byte public blob / key line. |
 | `AdbLocal.java` | CNXN/AUTH/OPEN/WRTE/CLSE only; no TLS, mDNS or pairing. |
@@ -436,13 +449,21 @@ Files:
 
 Behaviour:
 
-- Two boot stages. `LOCKED_BOOT_COMPLETED` arrives seconds after the kernel
-  starts, so it is used to start `shizuku_server` over the localhost ADB
-  channel; the service then stays foreground with "waiting for unlock".
-  `BOOT_COMPLETED` is delivered after the first unlock on Android 17 and runs
-  the rest. The split exists because `BinderSender.checkPermission` reads the
-  credential-encrypted user: while the device is locked, no binder is pushed
-  and `bindUserService` cannot work, no matter how early Shizuku came up.
+- Direct-boot-aware provider is the key. When `shizuku_server` starts, its
+  `RunnableC2088g0` hands the binder to the manager and then to every installed
+  package that requests `moe.shizuku.manager.permission.API_V23`
+  (`ShizukuService.B`), using `getContentProviderExternal` on `<pkg>.shizuku`.
+  With `android:directBootAware="true"` on `ShizukuProvider`, the provider can
+  be instantiated while the credential-encrypted user is locked, so the binder
+  arrives at BFU. The permission check reads package-manager state, which is
+  also available at BFU. Verified on the Pixel 7a below.
+- Two boot stages, both attempt the exploit. `LOCKED_BOOT_COMPLETED` arrives
+  seconds after the kernel starts; the service starts or reuses
+  `shizuku_server` over the localhost ADB channel and runs the whole chain
+  immediately. `BOOT_COMPLETED` is only a retry for a failure that happened
+  before the exploit (no binder, permission, bind, install or target check).
+  After a successful BFU run the receiver ignores `BOOT_COMPLETED` outright,
+  so the live notification, FGS and root shell are not touched.
 - The prestart stage retries the starter (four tries) because it runs while
   parts of the system are still coming up; the starter itself is confirmed
   with `pidof shizuku_server`, since it daemonizes and exits 0 immediately.
@@ -450,20 +471,30 @@ Behaviour:
   calling the starter again (the starter kills the old process first).
 - Guard: `bootId = (currentTimeMillis - elapsedRealtime) / 30s`; one claim per
   boot, so `LOCKED_BOOT_COMPLETED` + `BOOT_COMPLETED`, a retry, or a second
-  service start cannot trigger the exploit twice. The claim is released if the
-  device is still locked when the boot stage runs, so that boot can be retried
-  from the app. A scheduled restart is exempt from the guard and is allowed
-  twice per boot.
+  service start cannot trigger the exploit twice. The claim is released on any
+  failure before `openRoot()` starts, so a later retry is still possible; once
+  `openRoot()` has run the claim is kept, because the exploit is one-shot.
 - `specialUse` FGS (allowed from `BOOT_COMPLETED` on 15/16/17); a partial
   wake lock covers the exploit window.
-- Shizuku binder delivery needs a uid `gone -> active` transition. At boot the
-  app process exists before `shizuku_server`, so `BinderSender` never pushes
-  the binder. Starting another process of the same uid (`:probe`) is not
-  enough. The boot path therefore kills its own process and lets a
-  `JobScheduler` job start it again; the new process receives the binder
-  through `ShizukuProvider` before `Application.onCreate`.
-- Failures are one-shot: a parked exploit already means "reboot", so the
-  service reports the reason and does not loop.
+- Binder-restart fallback: if the server is up but its binder never arrived
+  after unlock, the service kills its own process and a `JobScheduler` job
+  starts it again, giving the uid a `gone -> active` transition. At BFU the
+  path deliberately does not use this (jobs may be deferred while locked); it
+  leaves the boot claim free and lets the post-unlock `BOOT_COMPLETED` retry.
+- Failures are one-shot once the exploit has started: a parked exploit already
+  means "reboot", so the service reports the reason and does not loop.
+- KernelSU is part of the boot chain, not a manual extra: after `openRoot()`
+  the service runs `timer fake`, which late-loads the manager's module and
+  clears the kernel enforcing flag in the same plant (no separate `timer
+  permissive` run). The stage is replanted up to three times, because the
+  plant is a race and the exploit itself replants three times in `shell` and
+  `permissive` mode; a missed burst parks a process and is otherwise
+  harmless. Success is decided by the kernel, not by the stage output:
+  `su -c id` must report `u:r:ksu:s0` (SukiSU Ultra tears the stage shell down
+  before it can print `KSU_LOADED`), and `keepPermissive()` then re-applies
+  `setenforce 0` because the module forces enforcing back ~0.4 s after load.
+  A KernelSU failure keeps the working root shell and is reported as
+  `root shell ready; KernelSU failed: ...`.
 - The ADB starter command is the same one Shizuku uses:
   `<nativeLibraryDir>/libshizuku.so --apk=<base.apk>`, located with
   `pm path` so no package-visibility or cross-app file access is needed.
@@ -476,52 +507,58 @@ Behaviour:
   `setprop` and `adb_keys` still fail because the shell domain has no
   capabilities; the key needs one "Always allow" tap.
 
-Verified on the Pixel 7a (`CP3A.261005.002.A1`, SDK 37, Wi-Fi off):
-
-Fresh-process variant (the APK update had killed the prestart process, so
-`BinderSender` delivered the binder on its own):
-
-```
-22:53:39  received android.intent.action.LOCKED_BOOT_COMPLETED
-22:53:45  prestart starter 1: launched
-22:53:46  prestart: server is up, waiting for unlock
-          (device left at the lock screen for 13 min; shizuku_server pid 3621 stayed up)
-23:07:34  received android.intent.action.BOOT_COMPLETED      (immediately after unlock)
-23:07:35  Shizuku is already running
-23:07:36  installed 2108688 bytes (uid=2000)
-23:07:36  timer shell
-23:07:49  success: root shell ready
-```
-
-Normal variant (the prestart process survives to unlock, so the restart branch
-is required):
+Verified on the Pixel 7a (`CP3A.261005.002.A1`, SDK 37, Wi-Fi off), with the
+device still BFU for the whole run (`dumpsys user` → `State: RUNNING_LOCKED`,
+unlock time unknown):
 
 ```
-23:15:00  received android.intent.action.LOCKED_BOOT_COMPLETED
-23:15:03  prestart: server is up, waiting for unlock
-23:17:28  received android.intent.action.BOOT_COMPLETED      (immediately after unlock)
-23:17:44  Shizuku server is already up from the prestart
-23:17:44  server is up, no binder yet; restarting the app process
-23:17:46  restart job: starting auto-root
-23:17:46  resuming this boot after the binder restart
-23:17:47  installed 2108688 bytes (uid=2000)
-23:17:47  timer shell
-23:18:16  success: root shell ready
+17:11:39.178  BinderSender: Uid 10326 starts
+17:11:39.219  ShizukuProvider: binder received
+17:11:39.221  ShizukuServerLog: attachApplication from com.kpgc.timerroot
+17:11:39.245  debug hook started AutoRootService (temporary test receiver)
+17:11:39.269  prestart: Shizuku is already running
+17:11:39.294  user service com.kpgc.timerroot:timer started (uid 2000)
+17:11:39.627  installed 2108688 bytes (uid=2000)
+17:11:39.753  timer shell
+17:12:17.668  success: root shell ready
 ```
 
-After that boot: `isForeground=true` on `AutoRootService`, `shizuku_server` and
-`com.kpgc.timerroot:timer` alive, a `uid=0` `sh` child under it, and adbd
-listening on `*:5555` from `persist.adb.tcp.port`.
+After that: `isForeground=true` on `AutoRootService`, `shizuku_server` and
+`com.kpgc.timerroot:timer` alive, a `uid=0` `sh -i` child under `timer`, and the
+user still locked. The temporary debug receiver used to trigger this run was
+removed from the final APK.
 
-The earlier single-stage runs (`BOOT_COMPLETED` only) were verified end to end
-twice with Wi-Fi off: `22:11:54` → success at `22:12:50`, and `22:32` → success
-at `22:32:53`. `Install channel` was also verified end-to-end from the app:
-`permissive ok` (4 s), root shell in ~70 s, `PROP_PRESENT size=13283`, and the
-property survived a real reboot.
-
-After that boot: `isForeground=true` on `AutoRootService`, `shizuku_server`
-and `com.kpgc.timerroot:timer` alive, a `uid=0` `sh` child under it, and adbd
-listening on `*:5555` from `persist.adb.tcp.port`. `Install channel` was also
+Before the provider fix, the same localhost ADB channel was verified end to end
+after unlock (`BOOT_COMPLETED` → success), including the binder-restart branch.
+Those runs proved the starter, the user service and the exploit; the BFU run
+above adds the missing direct-boot binder delivery. `Install channel` was also
 verified end-to-end from the app: `permissive ok` (4 s), root shell in ~70 s,
 `PROP_PRESENT size=13283`, and the property survived a real reboot.
+
+KernelSU at BFU (same build, still `State: RUNNING_LOCKED` when the last line
+was logged):
+
+```
+17:57:07  auto: root shell ready; loading KernelSU
+17:57:09  auto: timer fake
+17:57:27  [+] plant1 free_seen=1 burst hit=0 after 15002ms
+17:57:27  auto: KernelSU attempt 2: the exploit parked before loading ksud
+17:57:29  auto: timer fake
+17:57:46  [ksu] uapi manager=6 kernel=6 preloaded=0
+17:57:46  KSU_LOADED
+17:57:46  auto: KernelSU active: selinux=Permissive (after 1s)
+17:57:46  auto: success: root shell ready; KernelSU active (selinux=Permissive (after 1s))
+```
+
+Checked while still locked: `su -c id` → `uid=0(root) ... context=u:r:ksu:s0`,
+`getenforce` → `Permissive`, `kernelsu 565248 0 - Live ... (O)` in
+`/proc/modules`, `/data/adb/ksud` and `/data/adb/ksu/bin` rewritten by that
+boot's late-load, and the live notification became **Jailbreak mode ready**.
+The manager was a repackaged SukiSU (`pewhkk.neduyw.pgwdfo`), found by the
+`/data/app` scan rather than by package name.
+
+The first fake attempt in that log shows the failure mode the replant exists
+for: a plant missed its burst (`burst hit=0`) and parked. The second attempt
+hit both plants and loaded the module. Both attempts' parked processes stay
+alive until the next reboot, by design.
 

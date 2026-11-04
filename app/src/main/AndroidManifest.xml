@@ -62,6 +62,7 @@
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="com.kpgc.timerroot.shizuku"
+            android:directBootAware="true"
             android:enabled="true"
             android:exported="true"
             android:multiprocess="false"

@@ -10,7 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
-import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 
@@ -25,7 +24,12 @@ import rikka.shizuku.Shizuku;
  * Boot-time state machine:
  *
  *   wait for Shizuku -> start it over the local ADB channel if needed ->
- *   bind the shell user service -> install the bundled exploit -> run it once.
+ *   bind the shell user service -> install the bundled exploit -> run it once
+ *   -> late-load KernelSU and re-apply permissive.
+ *
+ * This runs from LOCKED_BOOT_COMPLETED, so it normally completes before the
+ * first unlock (BFU). The Shizuku provider is directBootAware, which is what
+ * lets the server deliver its binder while the user is still locked.
  *
  * The service stays in the foreground after success, because the root shell
  * lives in the Shizuku user service and that service is tied to this app
@@ -47,6 +51,10 @@ public class AutoRootService extends Service {
     private Shizuku.UserServiceArgs boundArgs;
     private ServiceConnection boundConnection;
     private IUserService userService;
+    /** True once this service instance has called startForeground(). */
+    private boolean foregroundStarted;
+    /** True once the exploit has actually been started this boot. */
+    private boolean exploitStarted;
 
     @Override
     public void onCreate() {
@@ -61,8 +69,25 @@ public class AutoRootService extends Service {
             stopSelf(startId);
             return START_NOT_STICKY;
         }
+        /*
+         * A duplicate boot broadcast, or a second start after a successful
+         * run, must not replace the live notification or touch the root
+         * shell. Stop a freshly created service (which also cancels the
+         * startForegroundService deadline); leave an already running one
+         * exactly as it is.
+         */
+        if (!ACTION_RUN_NOW.equals(action)
+                && AutoRoot.isBootClaimed(this)
+                && !AutoRoot.hasPendingRestart(this)) {
+            AutoRoot.log(this, "already attempted this boot, ignoring " + action);
+            if (!foregroundStarted) {
+                stopSelf(startId);
+            }
+            return START_NOT_STICKY;
+        }
         startForeground(NOTIFICATION_ID, notification(
                 "Auto-root", "preparing...", true));
+        foregroundStarted = true;
 
         final boolean force = ACTION_RUN_NOW.equals(action);
         final boolean prestart = ACTION_PRESTART.equals(action);
@@ -77,10 +102,9 @@ public class AutoRootService extends Service {
                     }
                 }
                 if (prestart) {
-                    prestartShizuku();
-                } else {
-                    run(force);
+                    startShizukuEarly();
                 }
+                run(force);
             }, "auto-root");
             next.start();
             worker = next;
@@ -109,20 +133,19 @@ public class AutoRootService extends Service {
     // ------------------------------------------------------------- worker
 
     /**
-     * Starts Shizuku as early as possible (LOCKED_BOOT_COMPLETED) so it is
-     * already up when the user unlocks and the binder can be delivered. It
-     * does not touch the boot guard and does not bind: Shizuku's permission
-     * check needs the credential-encrypted user, which is still locked.
+     * Starts Shizuku as early as possible (LOCKED_BOOT_COMPLETED), before the
+     * normal boot attempt. The service then continues straight into
+     * {@link #run(boolean)}: with a direct-boot-aware provider the server can
+     * hand over its binder while the credential-encrypted user is still
+     * locked, so there is no reason to wait for the unlock.
      */
-    private void prestartShizuku() {
+    private void startShizukuEarly() {
         if (!AutoRoot.isEnabled(this)) {
-            stopSelf();
             return;
         }
         AutoRoot.log(this, "prestart: looking for Shizuku");
         if (waitForShizuku(5000)) {
             AutoRoot.log(this, "prestart: Shizuku is already running");
-            show("Auto-root", "Shizuku is up - waiting for unlock");
             return;
         }
         acquireWakeLock();
@@ -146,7 +169,7 @@ public class AutoRootService extends Service {
                         break;
                     }
                     if (shizukuServerRunning()) {
-                        AutoRoot.log(this, "prestart: server is up, waiting for unlock");
+                        AutoRoot.log(this, "prestart: server is up, waiting for its binder");
                         up = true;
                         break;
                     }
@@ -161,8 +184,6 @@ public class AutoRootService extends Service {
         } finally {
             releaseWakeLock();
         }
-        // Keep the service alive so the BOOT_COMPLETED attempt can reuse it.
-        show("Auto-root", "Shizuku is up - waiting for unlock");
     }
 
     private void run(boolean force) {
@@ -172,11 +193,21 @@ public class AutoRootService extends Service {
             finish("Auto-root is off", "Enable it in TimerRoot first.", false);
             return;
         }
-        boolean restarted = AutoRoot.isRestart(this);
+        boolean restarted = AutoRoot.consumeRestart(this);
         boolean firstAttempt = AutoRoot.claimBoot(this);
         if (!force && !restarted && !firstAttempt) {
             AutoRoot.log(this, "already attempted this boot, skipping");
-            finish("Auto-root", "Already ran this boot.", false);
+            if (userService != null
+                    && AutoRoot.lastResult(this).startsWith("root shell ready")) {
+                // Keep the successful run, its root shell and its FGS alive.
+                String last = AutoRoot.lastResult(this);
+                finish(last.contains("KernelSU active")
+                                ? "Jailbreak mode ready" : "Root shell ready",
+                        last, true);
+            } else {
+                finish("Auto-root", "Already ran this boot.", false);
+                stopSelf();
+            }
             return;
         }
         if (restarted) {
@@ -185,6 +216,7 @@ public class AutoRootService extends Service {
         acquireWakeLock();
 
         String result;
+        exploitStarted = false;
         try {
             result = attempt();
         } catch (Throwable t) {
@@ -196,13 +228,24 @@ public class AutoRootService extends Service {
             // The process is about to die so the uid can go active again.
             return;
         }
+        if (!exploitStarted) {
+            /*
+             * Nothing destructive ran, so this boot may still try again after
+             * the unlock (or when the user presses Run auto-root now). The
+             * one-exploit-per-boot guard is only spent by the exploit itself.
+             */
+            AutoRoot.releaseBoot(this);
+        }
         AutoRoot.clearRestart(this);
         AutoRoot.record(this, result);
         boolean success = result.startsWith("root shell ready");
         AutoRoot.log(this, (success ? "success: " : "failed: ") + result);
         if (success) {
+            boolean ksu = result.contains("KernelSU active");
             // Stay alive to keep the Shizuku user service (and the root shell).
-            finish("Root shell ready", "The exploit reached uid=0.", true);
+            finish(ksu ? "Jailbreak mode ready" : "Root shell ready",
+                    ksu ? "KernelSU late-loaded; su works in u:r:ksu:s0."
+                            : summary(result), true);
         } else {
             stopForeground(STOP_FOREGROUND_DETACH);
             finish("Auto-root failed", summary(result), false);
@@ -213,20 +256,12 @@ public class AutoRootService extends Service {
     private String attempt() throws Exception {
         String started = null;
         /*
-         * Shizuku's binder cannot reach us before the first unlock: its
-         * BinderSender checks the permission against the credential-
-         * encrypted user. BOOT_COMPLETED normally arrives after the unlock
-         * on Android 17, so this is only a safety net for the case where it
-         * is delivered while the device is still at the lock screen. The
-         * foreground service keeps the process alive while waiting.
+         * No unlock wait here. The provider is directBootAware, so
+         * shizuku_server can deliver its binder to this app while the
+         * credential-encrypted user is still locked, and the shell user
+         * service lives in device-encrypted storage as well. Running the
+         * exploit at BFU is the whole point of the boot path.
          */
-        releaseWakeLock(); // do not hold a 10 min lock through a long wait
-        if (!waitForUnlock(30 * 60 * 1000L)) {
-            // Do not burn this boot's one attempt on a device left locked.
-            AutoRoot.releaseBoot(this);
-            return "user is still locked after 30 min; unlock and press Run auto-root now";
-        }
-        acquireWakeLock();
         boolean binder = waitForShizuku(15000);
         boolean serverUp = false;
         if (binder) {
@@ -265,6 +300,17 @@ public class AutoRootService extends Service {
             if (!serverUp) {
                 return "Shizuku did not start ("
                         + (started == null ? "already running" : started) + ")";
+            }
+            if (!userUnlocked()) {
+                /*
+                 * The server hands its binder to every permission-holding
+                 * app when it starts, through the direct-boot-aware
+                 * provider. If it is still missing, do not rely on a
+                 * JobScheduler restart that Android may defer until the
+                 * unlock; leave the boot claim free so the post-unlock
+                 * BOOT_COMPLETED can try again in a fresh process.
+                 */
+                return "Shizuku is up but its binder has not arrived; retrying after unlock";
             }
             /*
              * The server is up but has no idea this app exists: it only
@@ -310,35 +356,188 @@ public class AutoRootService extends Service {
 
         show("Auto-root", "running the exploit...");
         AutoRoot.log(this, "timer shell");
+        exploitStarted = true;
         String output = service.openRoot();
-        if (output.startsWith("root shell ready")) {
-            return "root shell ready";
+        if (!output.startsWith("root shell ready")) {
+            return "exploit did not reach uid=0: " + tail(output);
         }
-        return "exploit did not reach uid=0: " + tail(output);
+        /*
+         * The shell-domain root cannot keep KernelSU loaded across a boot, so
+         * the chain does not stop here: the fake-credential endgame late-loads
+         * the installed manager's module, exactly like the manual "Get root
+         * shell" button does. A KSU failure must not throw away the working
+         * root shell, hence the separate result suffix.
+         */
+        AutoRoot.log(this, "root shell ready; loading KernelSU");
+        show("Auto-root", "loading KernelSU...");
+        return "root shell ready; " + loadKernelSu(service);
+    }
+
+    /** How many times the racy late-load stage may be replanted. */
+    private static final int KSU_ATTEMPTS = 3;
+
+    private static final class KsuStage {
+        boolean loaded;
+        String failure;
+        /** True when the plant lost its race and nothing was loaded yet. */
+        boolean replant;
     }
 
     /**
-     * True once the user has unlocked at least once since boot. The data
-     * directory of the credential-encrypted user only becomes readable then.
+     * Runs `timer fake`, which points the child's credentials at a fake
+     * full-capability cred and execs ksud late-load. That same plant also
+     * clears the kernel's SELinux enforcing flag, so no separate
+     * `timer permissive` run is needed.
+     *
+     * The stage shell can be torn down by the loader (SukiSU Ultra) before it
+     * prints KSU_LOADED, so `su -c id` in u:r:ksu:s0 is the authoritative
+     * success signal. KernelSU re-enables SELinux about 0.4s after it loads,
+     * which is why keepPermissive() runs afterwards.
+     *
+     * A plant can miss its burst and park a zombie; the exploit itself
+     * replants up to three times in `shell`/`permissive` mode for exactly
+     * that reason, so the whole stage is replanted here too. A parked
+     * process keeps its fake cred page pinned, which is the pristine state
+     * between attempts.
+     */
+    private String loadKernelSu(IUserService service) {
+        String failure = "no attempt was made";
+        try {
+            for (int attempt = 1; attempt <= KSU_ATTEMPTS; attempt++) {
+                if (attempt > 1) {
+                    AutoRoot.log(this, "KernelSU attempt " + attempt + ": "
+                            + failure);
+                    show("Auto-root", "retrying KernelSU (" + attempt + "/"
+                            + KSU_ATTEMPTS + ")...");
+                }
+                KsuStage stage = runKsuStage(service, attempt);
+                if (stage.loaded) {
+                    String selinux = service.keepPermissive();
+                    AutoRoot.log(this, "KernelSU active: " + selinux);
+                    AutoRoot.log(this, tail(service.readLog()));
+                    return "KernelSU active (" + selinux + ")";
+                }
+                AutoRoot.log(this, tail(service.readLog()));
+                failure = stage.failure;
+                if (!stage.replant) {
+                    break;
+                }
+            }
+        } catch (Throwable t) {
+            AutoRoot.log(this, "KernelSU step failed: " + t);
+            return "KernelSU failed: " + t;
+        }
+        return "KernelSU failed: " + failure;
+    }
+
+    private KsuStage runKsuStage(IUserService service, int attempt) {
+        KsuStage stage = new KsuStage();
+        try {
+            /*
+             * runDetached() truncates /data/local/tmp/timer.log, so anything
+             * read from here on belongs to this run.
+             */
+            String started = service.runDetached("fake");
+            AutoRoot.log(this, "timer fake");
+            if (started.startsWith("start failed")) {
+                stage.failure = tail(started);
+                return stage;
+            }
+            final long startedAt = System.currentTimeMillis();
+            long lastChange = startedAt;
+            long lastProgress = 0;
+            int lastLength = -1;
+            boolean sawLateLoad = false;
+            while (System.currentTimeMillis() - startedAt < 90000) {
+                Thread.sleep(1000);
+                String log = service.readLog();
+                if (log.length() != lastLength) {
+                    lastLength = log.length();
+                    lastChange = System.currentTimeMillis();
+                }
+                if (log.contains("KSU_LOADED")) {
+                    stage.loaded = true;
+                    return stage;
+                }
+                if (log.contains("selinux write failed")) {
+                    stage.failure = "the selinux stage missed its race";
+                    stage.replant = true;
+                    return stage;
+                }
+                if (log.contains("KSU_STALE")) {
+                    stage.failure = "an old KernelSU module is still loaded";
+                    return stage;
+                }
+                if (log.contains("[ksu] ksud missing")) {
+                    stage.failure = "no supported manager (KernelSU,"
+                            + " KernelSU-Next, SukiSU)";
+                    return stage;
+                }
+                if (log.contains("KSU_MISSING")) {
+                    stage.failure = "ksud late-load failed - see the [ksu]"
+                            + " log lines";
+                    return stage;
+                }
+                if (log.contains("[ksu] late-load rc=0")) {
+                    sawLateLoad = true;
+                }
+                /*
+                 * The exploit parent always parks, even on success, so the
+                 * parking line alone means nothing. Once the late-load has
+                 * run, ask the kernel whether root actually works.
+                 */
+                if (log.contains("parking without reap")) {
+                    if (sawLateLoad && service.ksuActive()) {
+                        stage.loaded = true;
+                    } else if (sawLateLoad) {
+                        stage.failure = "ksud finished but su is not available";
+                    } else {
+                        stage.failure = "the exploit parked before loading"
+                                + " ksud";
+                        stage.replant = true;
+                    }
+                    return stage;
+                }
+                if (sawLateLoad
+                        && System.currentTimeMillis() - lastChange > 5000) {
+                    if (service.ksuActive()) {
+                        stage.loaded = true;
+                    } else {
+                        stage.failure = "ksud late-load finished but su is"
+                                + " not available";
+                    }
+                    return stage;
+                }
+                long secs = (System.currentTimeMillis() - startedAt) / 1000;
+                if (secs - lastProgress >= 5) {
+                    lastProgress = secs;
+                    String label = attempt > 1 ? " (" + attempt + "/"
+                            + KSU_ATTEMPTS + ")" : "";
+                    show("Auto-root", "loading KernelSU... " + secs + "s" + label);
+                }
+            }
+            if (service.ksuActive()) {
+                // Last chance: the stage may have lost its output.
+                stage.loaded = true;
+                return stage;
+            }
+            stage.failure = "timed out after 90s";
+            return stage;
+        } catch (Throwable t) {
+            AutoRoot.log(this, "KernelSU step failed: " + t);
+            stage.failure = String.valueOf(t);
+            return stage;
+        }
+    }
+
+    /**
+     * True once the user has unlocked at least once since boot. Used only to
+     * decide whether the binder restart fallback can run; the normal BFU path
+     * does not depend on it.
      */
     private boolean userUnlocked() {
         android.os.UserManager um = getSystemService(android.os.UserManager.class);
         return um == null || um.isUserUnlocked();
-    }
-
-    private boolean waitForUnlock(long timeoutMs) {
-        long deadline = System.currentTimeMillis() + timeoutMs;
-        while (System.currentTimeMillis() < deadline) {
-            if (userUnlocked()) {
-                return true;
-            }
-            try {
-                Thread.sleep(1000);
-            } catch (InterruptedException e) {
-                return false;
-            }
-        }
-        return userUnlocked();
     }
 
     private boolean waitForShizuku(long timeoutMs) {

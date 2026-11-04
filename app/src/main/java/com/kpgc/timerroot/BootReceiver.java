@@ -9,12 +9,15 @@ import android.os.Build;
  * Starts auto-root on a real boot only. Activity starts and force-stops never
  * send these broadcasts, so a soft restart cannot trip it.
  *
- * Two stages, because Shizuku's binder cannot be delivered while the user is
- * locked (its permission check reads the credential-encrypted user):
+ * Two stages, both attempt the exploit:
  *
- *   LOCKED_BOOT_COMPLETED -> start Shizuku now, so it is already up later
- *   BOOT_COMPLETED        -> bind it and run the exploit (delivered after
- *                            the first unlock on Android 17)
+ *   LOCKED_BOOT_COMPLETED -> start Shizuku early, then run at BFU
+ *   BOOT_COMPLETED        -> retry only if the BFU attempt failed before the
+ *                            exploit ran (the per-boot guard prevents a
+ *                            second exploit run)
+ *
+ * The Shizuku provider is directBootAware, so the server can hand over its
+ * binder while the credential-encrypted user is still locked.
  */
 public class BootReceiver extends BroadcastReceiver {
 
@@ -30,6 +33,18 @@ public class BootReceiver extends BroadcastReceiver {
             return;
         }
         AutoRoot.log(context, "received " + action);
+        /*
+         * The exploit is one-shot per boot. If the locked-boot stage already
+         * claimed this boot (or is still running it), do not start the
+         * service again just to have it skip: that would replace the live
+         * "Root shell ready" notification with "preparing..." for a moment.
+         * A pending binder restart is the one case that must be allowed
+         * through.
+         */
+        if (AutoRoot.isBootClaimed(context) && !AutoRoot.hasPendingRestart(context)) {
+            AutoRoot.log(context, action + ": already handled this boot, ignoring");
+            return;
+        }
         Intent service = new Intent(context, AutoRootService.class)
                 .setAction(locked
                         ? AutoRootService.ACTION_PRESTART

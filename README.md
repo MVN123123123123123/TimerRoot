@@ -30,7 +30,8 @@ MainActivity (untrusted_app)
   via wireless debugging, or over ADB)
 - For unattended boots: one **Install channel** while a root shell is open, then
   one *Always allow* tap for TimerRoot's ADB key. After that the exploit runs on
-  its own at every unlock (see [Auto-root on boot](#auto-root-on-boot))
+  its own at every boot, before the first unlock (see
+  [Auto-root on boot](#auto-root-on-boot))
 - One supported manager installed, for the `Load KernelSU` path:
   [KernelSU](https://github.com/tiann/KernelSU),
   [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
@@ -272,8 +273,8 @@ to remove parked processes and to unload KernelSU.
 
 After rebooting, TimerRoot can repeat the whole chain by itself: Shizuku is
 stopped and KernelSU is gone, but the auto-root service starts Shizuku over a
-localhost ADB channel while the device is still at the lock screen, binds it
-right after you unlock and runs the exploit once per real boot.
+localhost ADB channel while the device is still at the lock screen, binds it at
+BFU and runs the exploit once per real boot.
 
 ### 6. Auto-root on boot
 
@@ -287,20 +288,44 @@ right after you unlock and runs the exploit once per real boot.
    debugging?* dialog; tap **Always allow**. The key is then in `adb_keys`, so
    later boots use signature auth with no UI.
 
-From then on a foreground service runs on every real boot in two stages.
+From then on a foreground service runs on every real boot.
 `LOCKED_BOOT_COMPLETED` (seconds after the kernel starts) starts Shizuku over
-`127.0.0.1:5555`. Once the device is unlocked, `BOOT_COMPLETED` reuses that
-server, restarts the app's own process once (Shizuku only pushes its binder on
-a uid `gone -> active` transition) and runs `timer shell`. The service stays in
-the foreground to keep the root shell alive. **Run auto-root now** repeats it
-on demand; the history is under **Auto-root log**.
+`127.0.0.1:5555` and runs the exploit right away, before the user unlocks. This
+works because TimerRoot's Shizuku provider is `directBootAware`: when
+`shizuku_server` starts it hands its binder to every app that declares
+`API_V23`, and with a direct-boot-aware provider that delivery also works while
+credential-encrypted storage is still locked. If the binder does not arrive,
+`BOOT_COMPLETED` retries after unlock; the per-boot guard still allows only one
+exploit run. The service stays in the foreground to keep the root shell alive.
+**Run auto-root now** repeats it on demand; the history is under
+**Auto-root log**.
 
-The unlock is a hard requirement, not a design choice: Shizuku checks its
-permission against the credential-encrypted user, so it cannot deliver its
-binder while the device is at the lock screen (and a password-protected device
-needs its password after every reboot). Shizuku itself is already up by then,
-so the exploit starts within seconds of unlocking instead of after a fresh
-Shizuku start.
+After the root shell is up, the boot path continues on its own: it runs
+`timer fake` (the same endgame as **Load KernelSU** in step 4), which
+late-loads the installed manager's module and clears the kernel's SELinux flag
+in the same plant. The loader usually finishes within ~20 s of the exploit and
+the notification changes to **Jailbreak mode ready**:
+
+```
+17:57:07  root shell ready; loading KernelSU
+17:57:27  KernelSU attempt 2: the exploit parked before loading ksud
+17:57:46  KernelSU active: selinux=Permissive (after 1s)
+17:57:46  success: root shell ready; KernelSU active (selinux=Permissive (after 1s))
+```
+
+The plant is a race, so the stage is replanted up to three times; a missed
+burst parks a process and leaves the boot usable, which is exactly what the
+exploit itself does for `shell` and `permissive`. The last line is the result
+stored in the auto-root log: `KernelSU active` means `/system/bin/su -c id`
+reported `u:r:ksu:s0` and `getenforce` stayed `Permissive`. If the manager is
+missing (or its module is incompatible) the root shell is kept and the
+notification says `Root shell ready` with the KernelSU reason instead.
+
+BFU is a normal operating point, not a fallback. A password-protected device
+does not need to be unlocked first: the exploit runs at the lock screen and the
+root shell is already waiting when you unlock. KernelSU is loaded at the same
+point, so SukiSU/SukiSU Ultra and friends report an initialised manager as soon
+as you unlock and open them.
 
 Without the channel, auto-root still works when Shizuku is already running
 (for example started by hand over Wi-Fi).

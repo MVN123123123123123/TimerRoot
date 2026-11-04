@@ -31,6 +31,7 @@ final class AutoRoot {
     static final String KEY_LAST_BOOT = "last_attempt_boot";
     static final String KEY_RESTART_BOOT = "restart_boot";
     static final String KEY_RESTART_COUNT = "restart_count";
+    static final String KEY_RESTART_PENDING = "restart_pending";
     static final int MAX_RESTARTS = 2;
     static final String KEY_LAST_RESULT = "last_result";
     static final String KEY_LAST_RESULT_TIME = "last_result_time";
@@ -53,6 +54,18 @@ final class AutoRoot {
 
     static boolean isEnabled(Context context) {
         return prefs(context).getBoolean(KEY_ENABLED, false);
+    }
+
+    /** True when this boot already owns an attempt (running or finished). */
+    static boolean isBootClaimed(Context context) {
+        return prefs(context).getLong(KEY_LAST_BOOT, Long.MIN_VALUE) == bootId();
+    }
+
+    /** True when a binder-restart has been claimed but not consumed yet. */
+    static boolean hasPendingRestart(Context context) {
+        SharedPreferences prefs = prefs(context);
+        return prefs.getLong(KEY_RESTART_BOOT, Long.MIN_VALUE) == bootId()
+                && prefs.getBoolean(KEY_RESTART_PENDING, false);
     }
 
     static int adbPort(Context context) {
@@ -80,19 +93,20 @@ final class AutoRoot {
     }
 
     /**
-     * Gives the boot back when the attempt could not even start (the device
-     * was still locked). Without this a device left at the lock screen would
-     * consume its one attempt and never retry that boot.
+     * Gives the boot back when the attempt could not even start the exploit
+     * (no binder, no permission, bind or install failure). Without this a
+     * device left at the lock screen would consume its one attempt and never
+     * retry that boot. An actual exploit run always keeps the claim, because
+     * the exploit is one-shot per boot.
      */
     static void releaseBoot(Context context) {
         prefs(context).edit().remove(KEY_LAST_BOOT).apply();
     }
 
     /**
-     * Claims the one allowed process restart for this boot. The restart is
-     * what makes shizuku_server push its binder: it only reacts to a uid
-     * gone -> active transition, and at boot the app process already exists
-     * when the server starts.
+     * Claims a process restart for this boot. Used only when shizuku_server
+     * is running but its binder never arrived: a fresh process gives the uid
+     * a gone -> active transition, which is when the server pushes it.
      */
     static boolean claimRestart(Context context) {
         SharedPreferences prefs = prefs(context);
@@ -105,19 +119,29 @@ final class AutoRoot {
         prefs.edit()
                 .putLong(KEY_RESTART_BOOT, boot)
                 .putInt(KEY_RESTART_COUNT, count + 1)
+                .putBoolean(KEY_RESTART_PENDING, true)
                 .apply();
         return true;
     }
 
-    static boolean isRestart(Context context) {
-        return prefs(context).getLong(KEY_RESTART_BOOT, Long.MIN_VALUE) == bootId();
+    /**
+     * Takes the pending restart for this boot, if any. Consuming it up front
+     * makes sure the scheduled job and the post-unlock BOOT_COMPLETED cannot
+     * both run the exploit: whichever arrives first proceeds, the other sees
+     * no pending restart and no free boot claim.
+     */
+    static boolean consumeRestart(Context context) {
+        SharedPreferences prefs = prefs(context);
+        if (prefs.getLong(KEY_RESTART_BOOT, Long.MIN_VALUE) != bootId()
+                || !prefs.getBoolean(KEY_RESTART_PENDING, false)) {
+            return false;
+        }
+        prefs.edit().putBoolean(KEY_RESTART_PENDING, false).apply();
+        return true;
     }
 
     static void clearRestart(Context context) {
-        prefs(context).edit()
-                .remove(KEY_RESTART_BOOT)
-                .remove(KEY_RESTART_COUNT)
-                .apply();
+        prefs(context).edit().putBoolean(KEY_RESTART_PENDING, false).apply();
     }
 
     static void record(Context context, String result) {

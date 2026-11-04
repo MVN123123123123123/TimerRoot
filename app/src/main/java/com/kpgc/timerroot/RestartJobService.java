@@ -9,13 +9,12 @@ import android.content.Context;
 import android.content.Intent;
 
 /**
- * Restarts AutoRootService in a fresh process.
+ * Restarts AutoRootService in a fresh process when the Shizuku binder never
+ * arrived. shizuku_server pushes its binder to a uid that goes from gone to
+ * active, so a fresh process start is a reliable way to ask for it again.
  *
- * Shizuku's server can only push its binder to an app when the app's uid or
- * one of its pids changes state. At boot this app starts before the server,
- * so it never receives that push. Killing the process and letting the job
- * start it again gives the uid a gone -> active transition, which is the one
- * event the server does send the binder for.
+ * This is only a fallback: with a direct-boot-aware provider the server's
+ * normal start-up delivery reaches the app even while the user is locked.
  */
 public class RestartJobService extends JobService {
 
