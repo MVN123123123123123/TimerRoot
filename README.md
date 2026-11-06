@@ -39,11 +39,10 @@ MainActivity (untrusted_app)
   [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
   [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
 - A device running one of the kernels this port covers (see
-  [Supported devices](#supported-devices)):
-  `6.1.162-android14-11-g9dd05ae3a1de-ab16261587` (4K and 16K, Pixel 6 through
-  Pixel 10a) or `6.6.127-android15-8-g91d825611104-ab16252310-4k` (Pixel 10
-  series). The upstream binary targets
-  `6.12.69-android16-6-g242e1a07f878-ab15865446-4k` and will not work here.
+  [Supported devices](#supported-devices)): Pixel 6 through Pixel 11, the
+  Xiaomi 15/17/18 families, the Redmi Note 15/17 families, and the vendor
+  kernels already carried over from `rikumi/TimerRoot`. A kernel with no
+  conf in `conf/` is refused; the app never falls back to another profile.
 
 ## Getting the exploit binary
 
@@ -111,8 +110,10 @@ checks are cheap and side-effect free: the binary is never executed to probe
 it.
 
 The bundled `conf/` covers the 6.1.162 profiles (4K and 16K), the 6.6.127
-Pixel 10 profile, upstream's 6.6/6.12 vendor profiles for other devices, and
-two dirty vendor profiles, all imported from `rikumi/TimerRoot`.
+Pixel 10 profile, a 6.12.69 Pixel 11 profile, the 6.1.138 / 6.6.118 / 6.12.69 /
+6.18.21 profiles for the Xiaomi 15/17/18 and Redmi Note 15/17 families, and
+vendor profiles for other devices carried over from `rikumi/TimerRoot`. See
+[Credits](#credits) for where each profile came from.
 
 The binary is not committed (`assets/timer` is gitignored). Build it and drop it
 in place, or use **Download exploit**, which fetches the release asset,
@@ -140,6 +141,22 @@ whose `target=` line does not match `target=lynx`.
 The port derives every constant from the factory `boot.img` of that build
 (kallsyms + BTF), so re-derive them before using it on a different kernel.
 Adding a kernel means adding one `conf/*.conf`; the source does not change.
+`PORT_LOG.md` records the F1–F6 derivation for each bundled profile.
+
+`timer --conf <profile> selfcheck` re-checks a profile's internal invariants
+without touching the kernel, and is what the F6 gate runs:
+
+```
+[selfcheck] profile=6.18.21-android17-5-g805aa6adea19-abogki565292102-4k.conf
+[selfcheck] ok   slab_size 0x2000 == page_size << slab_order (0x2000)
+[selfcheck] ok   timer_site_low21 0x1a726c == timer_site & 0x1fffff
+...
+[selfcheck] ok   timer_alloc 0x180 <= slab_size 0x2000
+[selfcheck] info last object node=0x1ee0 cred_end=0x1fb0 slab=0x2000 (fits)
+[selfcheck] ok (0 failures)
+```
+
+It exits non-zero on any failure, so it is safe to script.
 
 The binary is MIT licensed by its authors; only use it on hardware you own, and
 only when your kernel matches the build it was ported to.
@@ -212,6 +229,103 @@ bytes, SHA-256 `0226c3be4224b02884d4f9b332aee58ec06c65b2263265e80f2498332ef15c06
 so one profile covers all of them. The 6.6 profile was verified end-to-end
 (`timer verify` and `timer fake`) in a QEMU VM booting the factory kernel; it
 has not been flashed on physical Pixel 10 hardware yet.
+
+### 6.12.69 (4K) — Pixel 11 series
+
+`6.12.69-android16-6-g70777328ed0e-ab16108597-4k`, built into the
+`CD1A.261005.003` and `CD1A.261005.003.b1` factory images. Profile:
+`conf/6.12.69-android16-6-g70777328ed0e-ab16108597-4k.conf`.
+
+| Device | Codename | Factory build | Status |
+|---|---|---|---|
+| Pixel 11 | `cubs` | `CD1A.261005.003` | untested |
+| Pixel 11 Pro | `grizzly` | `CD1A.261005.003` | untested |
+| Pixel 11 Pro XL | `kodiak` | `CD1A.261005.003` | untested |
+| Pixel 11 Pro Fold | `yogi` | `CD1A.261005.003` | untested |
+
+All four images (and both build suffixes) carry a byte-identical kernel payload
+(SHA-256 `4417511834260f72c1b6a5bb9b9f809dfb6734b20fd7e8aa156c3c1f91f0f97b`),
+so one profile covers them. This is the only profile in this repository whose
+`task_alloc_bytes` is not `0x12c0`/`0x1840`: the bootconfig vendor extension is
+`android_arch_task_struct_size=784`, giving `0x1750`.
+
+### 6.1.138 (4K) — Redmi Note 15 Pro series
+
+| Device | Codename | Factory build | Profile | Status |
+|---|---|---|---|---|
+| Redmi Note 15 Pro+ 5G | `flourite` | `OS3.0.318.0.WPRCNXM` | `conf/6.1.138-android14-11-g0c3d559bcd85-ab14529422.conf` | untested |
+| Redmi Note 15 Pro 5G | `lapis` | `OS3.0.309.0.WPPCNXM` | `conf/6.1.138-android14-11-g51f8c580613d-ab13911623.conf` | untested |
+
+These two share the 6.1 `__pi_` VA layout (`0xffffffc008…`) and the 4-byte
+`cred.usage` that shifts the whole fake cred, but they are **different kernel
+payloads** with different `do_timer_create` call sites, so each has its own
+profile. Both set `pcp_free = 1`: 6.1 frees the order-1 slab through the PCP
+lists, which emit no `mm_page_free` event, so the reclaim waits on
+`/proc/slabinfo` instead.
+
+### 6.6.118 (4K) — Xiaomi 15, Redmi Note 15/17
+
+| Device | Codename | Factory build | Profile | Status |
+|---|---|---|---|---|
+| Xiaomi 15 | `dada` | `OS3.0.307.0.WOCCNXM` | `conf/6.6.118-android15-8-gc44b714366cc-abogki519650608-4k.conf` | untested |
+| Redmi Note 15 5G | `kunzite` | `OS3.0.304.0.WPQCNXM` | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | untested |
+| Redmi Note 17 5G | `mist` | `OS3.0.311.0.WPUCNXM` | `conf/6.6.118-android15-8-g666ad52b8230-ab15657065-4k.conf` | untested |
+| Redmi Note 17 Pro 5G | `iolite` | `OS3.0.314.0.WDQCNXM` | `conf/6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k.conf` | untested |
+
+All four are 6.6 GKI kernels with only two distinct text layouts: dada and
+iolite share `do_timer_create` returning at `0xffffffc080195d94`, kunzite and
+mist at `…d48`. `task_alloc_bytes` stays `0x12c0` for all four: these
+`vendor_boot`/`dtb`/`dtbo` images carry no `android_arch_task_struct_size=`
+parameter, and `task_struct_vendor_size_setup()` only adds the extension when
+the parameter is present.
+
+Note that the reference port
+[`quyicheng03-boop/CVE-2026-98260-dada-android`](https://github.com/quyicheng03-boop/CVE-2026-98260-dada-android)
+is titled "dada" but was built for
+`6.6.118-…-gb9cc6ec16bc8-abogki536571621`, i.e. this repository's **iolite**.
+The kernel payload hashes match; the name in that project is a misnomer.
+
+### 6.12.69 (4K) — Xiaomi 17 series
+
+`conf/6.12.69-android16-6-g43b5ab7e247d-abogki558343811-4k.conf` covers the
+Xiaomi 17 Pro Max. The rest of the 17 series ships a different kernel payload
+(`6.12.69-…-abogki561813157`), which is already covered by the upstream profile
+`conf/6.12.69-android16-6-g43b5ab7e247d-abogki561813157-4k.conf` imported from
+`rikumi/TimerRoot`; the factory `boot.img` of each device below was checked to
+confirm it is the same payload that profile was built from.
+
+| Device | Codename | Factory build | Kernel build | Status |
+|---|---|---|---|---|
+| Xiaomi 17 Pro Max | `popsicle` | `OS4.0.5.0.XPBCN` | `…-abogki558343811` | untested |
+| Xiaomi 17 | `pudding` | `OS4.0.5.0.XPCCNXM` | `…-abogki561813157` | untested |
+| Xiaomi 17 Pro | `pandora` | `OS4.0.5.0.XBLCNXM` | `…-abogki561813157` | untested |
+| Xiaomi 17 Ultra | `nezha` | `OS4.0.5.0.XPACNXM` | `…-abogki561813157` | untested |
+| Xiaomi 17 Max | `byron` | `OS4.0.3.0.XAFCNXM` | `…-abogki561813157` | untested |
+
+The `abogki561813157` payload is byte-identical (SHA-256
+`ed9e27aa606772d058684e023fcb2d3dca876505be90227cc8ca5e5d5b95622b`) on
+pudding, pandora, nezha and byron.
+
+### 6.18.21 (4K) — Xiaomi 18 series and Pad 9 Pro Max
+
+| Device | Codename | Factory build | Profile | Status |
+|---|---|---|---|---|
+| Xiaomi 18 Pro | `hongkong` | `OS4.0.29.0.XFRCN` | `conf/6.18.21-android17-5-g284297031c53-abogki555938958-4k.conf` | untested |
+| Xiaomi 18 Pro Max | `madrid` | `OS4.0.27.0.XEOCN` | same as above | untested |
+| Xiaomi 18 Fold | `lhasa` | `OS4.0.26.0.XPNCNXM` | `conf/6.18.21-android17-5-g805aa6adea19-abogki565292102-4k.conf` | untested |
+| Xiaomi Pad 9 Pro Max | `yingtian` | `OS4.0.16.0.XBMCNXM` | same as above | untested |
+
+hongkong and madrid share a byte-identical kernel payload (SHA-256
+`0a3cf0d220490927ce1ee9db380adfdd20930fc0e602b97dd652d610bbe9d3fe`); lhasa and
+yingtian share theirs (SHA-256
+`cde87cd70206f21db4359aa1148f5f68e693ffefb11108dffde99c07c8c5ad88`).
+
+These are the only profiles in this repository with the 6.18 object layout:
+`sizeof(struct k_itimer)` grew to `0x180` and `cpu_timer` moved to `+0xe0`, so
+`timer_alloc` and the new `timer_node_off` field both differ from every other
+profile. `task_alloc_bytes` is `0x1280 + 0x400 = 0x1680`, and
+`selinux_blob_off` is `0x10`, because landlock contributes an 11-byte cred blob
+ahead of SELinux in the runtime `CONFIG_LSM` order.
 
 If your device is not in these tables, or its status is untested, check the
 `kernel=` line first (the app runs `timer --conf ... target` and logs it), and
@@ -569,12 +683,15 @@ p7a/timer_p7a.c                                               exploit source (co
 app/build.gradle                                              packages conf/ as assets/conf/
 scripts/build.ps1                                             Gradle-free build
 docs/auto-root.md                                             research and field notes
+PORT_LOG.md                                                   per-gate port record (F1-F6 evidence)
 ```
 
 ## Credits
 
 - Exploit: [YuKongA/CVE-2026-98260](https://github.com/YuKongA/CVE-2026-98260)
-  (MIT), based on work by woshigenm and the other 98260 ports.
+  (MIT), based on work by woshigenm and the other 98260 ports. Vulnerability
+  discovery and the public analysis come from
+  [InfinityCore](https://github.com/V4bel/InfinityCore).
 - [Shizuku](https://github.com/RikkaApps/Shizuku) and
   [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) (Apache-2.0) by Rikka.
 - KernelSU (GPL-2.0), KernelSU-Next, and SukiSU Ultra for the late-load path.
@@ -583,6 +700,41 @@ docs/auto-root.md                                             research and field
   dirty-device identity checks), and the vendor profiles under `conf/` were
   ported from this project.
 - Original repository that this fork based on: [kpgc10kai/TimerRoot](https://github.com/kpgc10kai/TimerRoot)
+
+The Xiaomi / Redmi profiles below were derived from each device's own factory
+`boot.img` (kallsyms + BTF) with the port procedure in [SKILL.md](SKILL.md), and
+cross-checked against these target-specific ports. None of their code is
+vendored; they are credited as the source of the object layout, the page-reuse
+strategy and the constant tables that were re-derived and verified here.
+
+- [zsw125/o3root](https://github.com/zsw125/o3root) — Xiaomi `yingtian` /
+  `lhasa`, kernel `6.18.21-android17-5-g805aa6adea19-abogki565292102`. Source
+  of the 6.18 object layout (`k_itimer` `0x180`, `cpu_timer` at `+0xe0`),
+  the extended `cred_security_struct`, the `selinux_state - 7` write and the
+  `init_user_ns` slide derivation. Basis for
+  `conf/6.18.21-android17-5-g805aa6adea19-abogki565292102-4k.conf`.
+- [quyicheng03-boop/CVE-2026-98260-popsicle-android](https://github.com/quyicheng03-boop/CVE-2026-98260-popsicle-android)
+  — Xiaomi `popsicle`, kernel `6.12.69-android16-6-g43b5ab7e247d-abogki558343811`.
+  Source of the 6.12 order-1 slab geometry (32 objects of `0x100`) and the
+  three-stage SELinux / UID / capabilities chain. Basis for
+  `conf/6.12.69-android16-6-g43b5ab7e247d-abogki558343811-4k.conf`.
+- [starriv/CVE-2026-98260-Xiaomi-17-Pro-Max](https://github.com/starriv/CVE-2026-98260-Xiaomi-17-Pro-Max)
+  — second reference for the same `6.12.69-…-abogki558343811` kernel; used to
+  cross-check the `popsicle` constants.
+- [quyicheng03-boop/CVE-2026-98260-nezha-android](https://github.com/quyicheng03-boop/CVE-2026-98260-nezha-android)
+  and [4627488/cve-2026-98260-nezha](https://github.com/4627488/cve-2026-98260-nezha)
+  — Xiaomi `nezha`, kernel `6.12.69-android16-6-g43b5ab7e247d-abogki561813157`.
+  Used to confirm that `pudding` / `pandora` / `nezha` / `byron` share this
+  payload and the upstream `…-abogki561813157` profile.
+- [addxemmm/CVE-2026-98260-pudding-android](https://github.com/addxemmm/CVE-2026-98260-pudding-android)
+  — Xiaomi `pudding`, same `…-abogki561813157` kernel; source of the
+  `libc`-free syscall path and the identity gate used while validating that
+  profile.
+- [quyicheng03-boop/CVE-2026-98260-dada-android](https://github.com/quyicheng03-boop/CVE-2026-98260-dada-android)
+  — despite the name, built for `6.6.118-…-gb9cc6ec16bc8-abogki536571621`,
+  which is the kernel of this repository's `iolite`. Source of the 6.6
+  order-1 slot count (31) and the `free_slab` correlation approach. Basis for
+  `conf/6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k.conf`.
 
 ## License
 
