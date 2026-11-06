@@ -149,10 +149,15 @@ public class BootStatusActivity extends Activity {
         super.onCreate(savedInstanceState);
         setShowWhenLocked(true);
         setTurnScreenOn(true);
-        hideSystemBars();
 
         userUnlocked = isUserUnlocked();
         buildUi();
+        /*
+         * getInsetsController() reaches through the DecorView, so it only
+         * works once setContentView() (inside buildUi) has created it. On
+         * Android 16 the controller is null before that and throws.
+         */
+        hideSystemBars();
         update();
     }
 
@@ -224,10 +229,14 @@ public class BootStatusActivity extends Activity {
         window.setNavigationBarColor(0xFF000000);
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             window.setDecorFitsSystemWindows(false);
-            window.getInsetsController().hide(WindowInsets.Type.systemBars());
-            window.getInsetsController().setSystemBarsBehavior(
-                    android.view.WindowInsetsController
-                            .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            android.view.WindowInsetsController controller =
+                    window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.systemBars());
+                controller.setSystemBarsBehavior(
+                        android.view.WindowInsetsController
+                                .BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
         }
     }
 

@@ -289,12 +289,14 @@ the server is **not** running; the exploit cannot start until it is.
 2. When Shizuku asks *Allow TimerRoot to access Shizuku?*, choose
    **Allow all the time**.
 3. The card turns **Ready** (Shizuku connected, no root yet). If it still says
-   `Not connected`, press `Shizuku` in the tools row to request again.
+   `Not connected`, press **Shizuku** under *Tools* on the Home tab, or
+   **Check & grant access** in Settings, to request again.
 
 ### 3. Install the binary
 
-Press **Download exploit** to fetch the release asset, or `Prepare` to extract a
-binary you built into `app/src/main/assets/timer`. Either path installs it to
+Both live in Settings → *Exploit*. Press **Download exploit** to fetch the
+release asset, or **Prepare binary** to extract a binary you built into
+`app/src/main/assets/timer`. Either path installs it to
 `/data/local/tmp/timer`, unpacks the bundled confs to
 `/data/local/tmp/timer-conf`, and then checks the target. **Download exploit**
 publishes the confs from the APK before installing the downloaded binary;
@@ -352,9 +354,9 @@ immediately retries `su -c setenforce 0` (over ~12s) and confirms with
 
 ### 5. Reboot
 
-Use the `Reboot` pill. It goes through the service (`svc power reboot`), so it
-works even when no root shell is open yet. Rebooting is also the only clean way
-to remove parked processes and to unload KernelSU.
+Use **Reboot device** in Settings. It goes through the service (`svc power
+reboot`), so it works even when no root shell is open yet. Rebooting is also the
+only clean way to remove parked processes and to unload KernelSU.
 
 After rebooting, TimerRoot can repeat the whole chain by itself: Shizuku is
 stopped and KernelSU is gone, but the auto-root service starts Shizuku over a
@@ -405,6 +407,44 @@ stored in the auto-root log: `KernelSU active` means `/system/bin/su -c id`
 reported `u:r:ksu:s0` and `getenforce` stayed `Permissive`. If the manager is
 missing (or its module is incompatible) the root shell is kept and the
 notification says `Root shell ready` with the KernelSU reason instead.
+
+### Soft restart after root
+
+A late-loaded KernelSU is in the kernel, but the module's own boot stages never
+ran, so its mounts and Zygisk injection are missing until the next real reboot.
+The boot path therefore ends with a userspace restart, the same thing the
+KernelSU manager's *soft reboot* does:
+
+```
+17:57:46  success: root shell ready; KernelSU active (selinux=Permissive (after 1s))
+17:57:46  soft restart: requesting userspace restart
+17:58:04  LOCKED_BOOT_COMPLETED: resuming after a userspace restart
+17:58:04  after restart: last result=root shell ready; KernelSU active (...)
+```
+
+`Auto soft restart` (on by default) runs `ksud soft-reboot` through the root
+shell once KernelSU verifies. It resets `sys.boot_completed`, runs the
+`emulated-soft-reboot` stage, `stop`, starts init again, then replays
+`post-fs-data`, `services` and `boot-completed`. Root survives because the kernel
+never goes down: `su` still gives `u:r:ksu:s0`, the module stays loaded, and the
+parked exploit processes stay parked. Modules and Zygisk start as they would on a
+real boot.
+
+It is skipped when KernelSU did not load (restarting without a module would cost
+a wait for nothing), when the user turned the toggle off, and on a second
+attempt in the same boot. The boot id survives a soft restart, so that guard is
+per real boot. After the restart the boot broadcasts arrive again; the receiver
+recognises them, never re-runs the exploit, and only brings Shizuku back and
+re-publishes the result, so the status screen shows **Root ready** again.
+
+**Restart Android** next to the toggle does the same thing on demand, after a
+confirmation dialog, and also works after a manual **Load KernelSU**. It closes
+every app; the device returns to the lock screen and TimerRoot is killed while
+it runs.
+
+`ksud soft-reboot` needs KernelSU 3.x. On an older manager the boot path logs
+`soft restart unavailable` and keeps the successful result; the module then
+applies on the next real reboot.
 
 ### Boot status screen
 
@@ -460,6 +500,26 @@ as you unlock and open them.
 Without the channel, auto-root still works when Shizuku is already running
 (for example started by hand over Wi-Fi).
 
+### Update checks
+
+Settings → *Updates* checks GitHub for a newer build automatically, at most
+once a day while the app is open, and a **Check now** button does it on demand.
+
+The release metadata is not usable as a version: the tag is a codename
+(`bingchiling`) and the body is free text. The `TimerRoot.apk` asset is the
+only source of truth, so the checker downloads it and reads its
+`versionCode` with `PackageManager.getPackageArchiveInfo`, comparing that to
+the running build. The download is skipped when the asset's `updated_at` is
+unchanged from the previous check, so repeat checks cost one small API request.
+
+When a newer build is found, Home shows a green banner with the published
+version, the installed version, a **Dismiss** button (per version, so the next
+release shows again) and **Get the update**, which opens the releases page.
+The app never installs anything by itself: reviewing and installing an APK that
+grants root is a deliberate act. Automatic checks can be turned off, and a
+failed check (offline, rate limited) only logs the reason and never blocks
+anything.
+
 The status card reflects what is actually live, detected by running
 `su -c id` and checking for `u:r:ksu:s0`:
 
@@ -480,6 +540,9 @@ This is a kernel exploit. Read this before pressing anything.
   kernel. Reboot is the only clean way to remove it.
 - **A reboot clears everything**: KernelSU, the root shell and the parked
   processes. That is the intended way to stop.
+- **A soft restart is not a reboot**: it restarts Android's userspace only, so
+  the kernel keeps KernelSU loaded and the parked processes stay parked. Use a
+  real reboot when you want the exploit state gone.
 - **SELinux is left permissive** until the next reboot.
 - A failed attempt leaves a stale timerqueue node; other apps may crash until
   you reboot.
@@ -495,7 +558,8 @@ app/src/main/java/com/kpgc/timerroot/BootStatusActivity.java  BFU status screen
 app/src/main/java/com/kpgc/timerroot/AutoRoot.java            guards, key and log
 app/src/main/java/com/kpgc/timerroot/AdbLocal.java            minimal localhost ADB client
 app/src/main/java/com/kpgc/timerroot/AdbKey.java              RSA key generation
-app/src/main/java/com/kpgc/timerroot/BootReceiver.java        BOOT_COMPLETED entry point
+app/src/main/java/com/kpgc/timerroot/UpdateChecker.java       GitHub release version check
+app/src/main/java/com/kpgc/timerroot/BootReceiver.java        boot entry point
 app/src/main/java/com/kpgc/timerroot/RestartJobService.java   binder-push restart
 app/src/main/aidl/com/kpgc/timerroot/IUserService.aidl        service interface
 app/src/main/assets/timer                                     exploit binary (not in git)

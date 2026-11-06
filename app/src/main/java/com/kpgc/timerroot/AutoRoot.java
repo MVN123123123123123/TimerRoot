@@ -45,6 +45,12 @@ final class AutoRoot {
     static final String KEY_BOOT_UI = "boot_ui";
     /** Boot id for which the user tapped Hide; suppresses re-showing it. */
     static final String KEY_BOOT_UI_HIDDEN_BOOT = "boot_ui_hidden_boot";
+    /** Restart the Android userspace once KernelSU is loaded (modules apply). */
+    static final String KEY_SOFT_RESTART = "soft_restart";
+    /** Boot id for which the automatic soft restart was already triggered. */
+    static final String KEY_SOFT_RESTART_BOOT = "soft_restart_boot";
+    /** Boot id for which the post-restart resume already ran. */
+    static final String KEY_RESUME_BOOT = "resume_after_restart_boot";
 
     static final int STAGE_RUNNING = 0;
     static final int STAGE_OK = 1;
@@ -199,6 +205,63 @@ final class AutoRoot {
         return prefs(context).getInt(KEY_STAGE_STATE, STAGE_RUNNING);
     }
 
+    /**
+     * True when the boot chain should soft-restart Android once KernelSU is
+     * loaded. Defaults to on: a late-loaded module only runs its init scripts
+     * and Zygisk after a userspace restart, so this is what turns a working
+     * root shell into a usable rooted system.
+     */
+    static boolean softRestartEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_SOFT_RESTART, true);
+    }
+
+    static void setSoftRestartEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_SOFT_RESTART, enabled).commit();
+    }
+
+    /**
+     * Claims the one soft restart this boot gets. Linux's boot id survives a
+     * userspace restart, and so does this preference, so the restarted system
+     * cannot loop on it.
+     */
+    static boolean claimSoftRestart(Context context) {
+        SharedPreferences prefs = prefs(context);
+        long boot = bootId();
+        if (prefs.getLong(KEY_SOFT_RESTART_BOOT, Long.MIN_VALUE) == boot) {
+            return false;
+        }
+        prefs.edit().putLong(KEY_SOFT_RESTART_BOOT, boot).commit();
+        return true;
+    }
+
+    static boolean softRestartDoneThisBoot(Context context) {
+        return prefs(context).getLong(KEY_SOFT_RESTART_BOOT, Long.MIN_VALUE)
+                == bootId();
+    }
+
+    /** Undoes the claim when the restart turned out to be unavailable. */
+    static void releaseSoftRestart(Context context) {
+        prefs(context).edit()
+                .remove(KEY_SOFT_RESTART_BOOT)
+                .commit();
+    }
+
+    /**
+     * True once for the boot that follows a soft restart. The restarted system
+     * sends both LOCKED_BOOT_COMPLETED and BOOT_COMPLETED, and which of them
+     * arrives first depends on the lock state, so the resume path claims this
+     * instead of relying on one specific broadcast.
+     */
+    static boolean claimResumeAfterRestart(Context context) {
+        SharedPreferences prefs = prefs(context);
+        long boot = bootId();
+        if (prefs.getLong(KEY_RESUME_BOOT, Long.MIN_VALUE) == boot) {
+            return false;
+        }
+        prefs.edit().putLong(KEY_RESUME_BOOT, boot).commit();
+        return true;
+    }
+
     static boolean bootUiEnabled(Context context) {
         return prefs(context).getBoolean(KEY_BOOT_UI, true);
     }
@@ -331,6 +394,12 @@ final class AutoRoot {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(8);
+                /*
+                 * Bump on every AIDL change: Shizuku tears down a cached user
+                 * service whose version differs, so a stale shell from an
+                 * earlier APK can never answer the new transaction ids.
+                 * 8 -> 9 added softRestart().
+                 */
+                .version(9);
     }
 }

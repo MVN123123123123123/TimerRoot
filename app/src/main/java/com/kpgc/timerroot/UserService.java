@@ -38,6 +38,7 @@ public class UserService extends IUserService.Stub {
 
     private static final String BIN = "/data/local/tmp/timer";
     private static final String LOG = "/data/local/tmp/timer.log";
+    private static final String SOFT_RESTART_LOG = "/data/local/tmp/soft_restart.log";
     private static final String CONF_DIR = "/data/local/tmp/timer-conf";
     /** Profiles for "dirty" kernel builds need an extra identity check. */
     private static final String DIRTY_CONF_SUBDIR = "dirty";
@@ -742,6 +743,109 @@ public class UserService extends IUserService.Stub {
             rc = execCode("/system/bin/reboot");
         }
         return rc == 0 ? "rebooting" : "reboot failed (rc=" + rc + ")";
+    }
+
+    /**
+     * Restarts Android's userspace without rebooting the kernel, the same way
+     * the KernelSU manager's "soft reboot" does: reset sys.boot_completed,
+     * stop init services, run post-fs-data / services / boot-completed, start
+     * again. The point is that a late-loaded module only executes its scripts
+     * and starts Zygisk during those stages, so this is what makes the root
+     * that {@link #ksuActive()} reports actually usable (modules mounted,
+     * Zygisk injected) with no real reboot.
+     *
+     * This process (and the whole app) is killed by the "stop" phase, so the
+     * caller must expect the binder call to fail and must not depend on the
+     * return value. Everything needed afterwards lives in device-protected
+     * storage and in the kernel.
+     *
+     * Only KernelSU 3.x+ ships the subcommand, and it daemonizes before doing
+     * anything, so support is probed with "--help" first: a failure after the
+     * daemonize point could not be reported anyway.
+     */
+    @Override
+    public String softRestart() {
+        String ksud = findKsud();
+        if (ksud == null) {
+            return "soft restart unavailable: no ksud found (is KernelSU loaded?)";
+        }
+        if (execStatus("/system/bin/su -c '" + ksud
+                + " soft-reboot --help' >/dev/null 2>&1", 15000) != 0) {
+            return "soft restart unavailable: " + ksud
+                    + " has no soft-reboot subcommand";
+        }
+        /*
+         * Confirm the restart actually began before the caller is torn down.
+         * Both a boot-completed flip and a change of system_server's pid mean
+         * init ran the "stop" phase; at BFU sys.boot_completed is already 0, so
+         * the pid is what makes this reliable there. A silent skip (mismatched
+         * KernelSU uapi, for example) changes neither.
+         */
+        String before = probeBootState();
+        try {
+            /*
+             * setsid + & so the restart survives this process being killed by
+             * its own "stop" phase. su supplies the root the subcommand needs;
+             * the shell-domain root shell is not enough here because ksud
+             * switches mount namespaces.
+             */
+            String cmd = "cd / && setsid /system/bin/su -c '" + ksud
+                    + " soft-reboot' >" + SOFT_RESTART_LOG
+                    + " 2>&1 </dev/null &";
+            Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
+        } catch (Throwable t) {
+            return "soft restart failed: " + t;
+        }
+        for (int i = 0; i < 40; i++) {
+            String now = probeBootState();
+            if (!now.equals(before) && !now.startsWith("error")) {
+                return "soft restart started";
+            }
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException ignored) {
+                break;
+            }
+        }
+        return "soft restart command sent (see " + SOFT_RESTART_LOG + ")";
+    }
+
+    /** One line that changes as soon as init's stop/start phase runs. */
+    private String probeBootState() {
+        return execOutTimeout("getprop sys.boot_completed; pidof system_server", 3000)
+                .trim().replace('\n', '/');
+    }
+
+    /**
+     * Locates a ksud binary through KSU's own su, which is the only shell that
+     * can read /data/adb from the shell uid.
+     */
+    private String findKsud() {
+        String out = execOutTimeout("/system/bin/su -c 'command -v ksud || "
+                + "ls /data/adb/ksud /data/adb/ksu/bin/ksud 2>/dev/null | head -n1'",
+                15000);
+        for (String line : out.split("\n")) {
+            String path = line.trim();
+            if (path.startsWith("/") && !path.contains(" ")) {
+                return path;
+            }
+        }
+        return null;
+    }
+
+    /** Runs a command and returns its exit status, or -1 on any failure. */
+    private int execStatus(String cmd, long ms) {
+        try {
+            Process p = new ProcessBuilder("/system/bin/sh", "-c", cmd)
+                    .redirectErrorStream(true).start();
+            if (!p.waitFor(ms, TimeUnit.MILLISECONDS)) {
+                p.destroy();
+                return -1;
+            }
+            return p.exitValue();
+        } catch (Throwable t) {
+            return -1;
+        }
     }
 
     private int execCode(String cmd) {

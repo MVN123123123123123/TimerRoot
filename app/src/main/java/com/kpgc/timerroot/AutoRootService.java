@@ -42,6 +42,12 @@ public class AutoRootService extends Service {
     static final String ACTION_STOP = "com.kpgc.timerroot.AUTOROOT_STOP";
     static final String ACTION_RUN_NOW = "com.kpgc.timerroot.AUTOROOT_RUN_NOW";
     static final String ACTION_PRESTART = "com.kpgc.timerroot.AUTOROOT_PRESTART";
+    /**
+     * Sent after a userspace restart: root is already in the kernel, so this
+     * only brings Shizuku back and republishes the result. It must never run
+     * the exploit again.
+     */
+    static final String ACTION_AFTER_RESTART = "com.kpgc.timerroot.AUTOROOT_AFTER_RESTART";
 
     private static final String CHANNEL = "auto_root";
     /** High-importance channel so the status notification may use a full-screen intent. */
@@ -80,6 +86,7 @@ public class AutoRootService extends Service {
          * exactly as it is.
          */
         if (!ACTION_RUN_NOW.equals(action)
+                && !ACTION_AFTER_RESTART.equals(action)
                 && AutoRoot.isBootClaimed(this)
                 && !AutoRoot.hasPendingRestart(this)) {
             AutoRoot.log(this, "already attempted this boot, ignoring " + action);
@@ -88,12 +95,20 @@ public class AutoRootService extends Service {
             }
             return START_NOT_STICKY;
         }
-        boolean bootUi = AutoRoot.bootUiWanted(this);
+        final boolean force = ACTION_RUN_NOW.equals(action);
+        final boolean prestart = ACTION_PRESTART.equals(action);
+        final boolean afterRestart = ACTION_AFTER_RESTART.equals(action);
+        /*
+         * The resume path republishes the recorded result immediately, so it
+         * must not reset the stage to "waiting" or replace the outcome text
+         * with "preparing...".
+         */
+        boolean bootUi = AutoRoot.bootUiWanted(this) && !afterRestart;
         if (bootUi) {
             AutoRoot.stage(this, "waiting for the boot…", AutoRoot.STAGE_RUNNING);
         }
         startForeground(NOTIFICATION_ID, notification(
-                "Auto-root", "preparing...", true, bootUi));
+                "Auto-root", afterRestart ? "restored" : "preparing...", true, bootUi));
         foregroundStarted = true;
         /*
          * Attach the status screen through the overlay exemption when it is
@@ -101,12 +116,10 @@ public class AutoRootService extends Service {
          * which case the full-screen intent on the notification is the path
          * that actually shows it. Both are opportunistic and harmless.
          */
-        if (bootUi && !ACTION_RUN_NOW.equals(action)) {
+        if (AutoRoot.bootUiWanted(this) && !ACTION_RUN_NOW.equals(action)) {
             BootStatusActivity.maybeShow(this);
         }
 
-        final boolean force = ACTION_RUN_NOW.equals(action);
-        final boolean prestart = ACTION_PRESTART.equals(action);
         synchronized (this) {
             Thread previous = worker;
             Thread next = new Thread(() -> {
@@ -120,12 +133,37 @@ public class AutoRootService extends Service {
                 if (prestart) {
                     startShizukuEarly();
                 }
-                run(force);
+                if (afterRestart) {
+                    resumeAfterRestart();
+                } else {
+                    run(force);
+                }
             }, "auto-root");
             next.start();
             worker = next;
         }
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Post-soft-restart re-entry: the module is already in the kernel and the
+     * exploit must not run again (its parked processes are gone from the
+     * process table, but the boot claim still holds). All that is missing
+     * after a userspace restart is Shizuku, so start it and republish the
+     * previous success.
+     */
+    private void resumeAfterRestart() {
+        String last = AutoRoot.lastResult(this);
+        AutoRoot.log(this, "after restart: last result=" + summary(last));
+        AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
+        if (!AutoRoot.isEnabled(this)) {
+            finish("Auto-root is off", "Enable it in TimerRoot first.", false);
+            return;
+        }
+        startShizukuEarly();
+        finish(last.contains("KernelSU active")
+                        ? "Jailbreak mode ready" : "Root shell ready",
+                last, true);
     }
 
     @Override
@@ -262,6 +300,14 @@ public class AutoRootService extends Service {
             finish(ksu ? "Jailbreak mode ready" : "Root shell ready",
                     ksu ? "KernelSU late-loaded; su works in u:r:ksu:s0."
                             : summary(result), true);
+            if (ksu && userService != null) {
+                /*
+                 * Last step, and deliberately after record() + finish(): the
+                 * restart kills this process, so the outcome must already be
+                 * on disk for the status screen and the restarted system.
+                 */
+                maybeSoftRestart(userService);
+            }
         } else {
             stopForeground(STOP_FOREGROUND_DETACH);
             finish("Auto-root failed", summary(result), false);
@@ -387,6 +433,7 @@ public class AutoRootService extends Service {
         AutoRoot.log(this, "root shell ready; loading KernelSU");
         show("Auto-root", "loading KernelSU...");
         String ksu = loadKernelSu(service);
+        boolean loaded = ksu.startsWith("KernelSU active");
         /*
          * The boot status screen needs either "display over other apps" or
          * the "full-screen notifications" special access. Both are app-ops
@@ -398,6 +445,63 @@ public class AutoRootService extends Service {
         AutoRoot.log(this, "boot UI grants: "
                 + tail(service.execRoot(grantBootUiAccess())));
         return "root shell ready; " + ksu;
+    }
+
+    /**
+     * Restarts the Android userspace after a successful late-load, so the
+     * just-loaded module runs its boot stages and Zygisk - what the manager's
+     * "soft reboot" button does. The kernel keeps KernelSU loaded, so su
+     * survives; only the app processes are replaced.
+     *
+     * A soft restart throws this process away, so it must run last, after the
+     * result is already recorded and published. Skipped when the user turned
+     * it off, when a previous attempt this boot already did it, or when
+     * KernelSU did not load - restarting without a module would only cost the
+     * user a wait.
+     */
+    private void maybeSoftRestart(IUserService service) {
+        if (!AutoRoot.softRestartEnabled(this)) {
+            AutoRoot.log(this, "soft restart disabled");
+            return;
+        }
+        if (!AutoRoot.claimSoftRestart(this)) {
+            AutoRoot.log(this, "soft restart already done this boot");
+            return;
+        }
+        String last = AutoRoot.lastResult(this);
+        try {
+            show("Auto-root", "restarting Android to load modules...");
+            AutoRoot.stage(this, "Android is restarting with root; "
+                    + "this screen comes back by itself", AutoRoot.STAGE_RUNNING);
+            AutoRoot.log(this, "soft restart: requesting userspace restart");
+            String result = service.softRestart();
+            AutoRoot.log(this, "soft restart: " + result);
+            if (result.startsWith("soft restart unavailable")
+                    || result.startsWith("soft restart failed")) {
+                /*
+                 * Nothing was restarted, so put the success back: the stage is
+                 * what the status screen reads. Free the claim so a restart can
+                 * still be requested by hand.
+                 */
+                AutoRoot.releaseSoftRestart(this);
+                AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
+            } else if (!result.endsWith("started")) {
+                /*
+                 * The command was sent but the system did not visibly go down
+                 * within the probe window. Keep the claim (the restart may
+                 * still be in flight, and the resume path must not re-run the
+                 * exploit) but stop claiming progress on screen.
+                 */
+                AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
+            }
+        } catch (Throwable t) {
+            /*
+             * Expected: "stop" kills this process, so the binder call dies
+             * mid-flight. Anything else means the restart did not start, and
+             * the root shell is still valid.
+             */
+            AutoRoot.log(this, "soft restart call ended: " + t);
+        }
     }
 
     /** How many times the racy late-load stage may be replanted. */

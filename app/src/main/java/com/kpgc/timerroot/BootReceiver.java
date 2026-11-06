@@ -6,8 +6,7 @@ import android.content.Intent;
 import android.os.Build;
 
 /**
- * Starts auto-root on a real boot only. Activity starts and force-stops never
- * send these broadcasts, so a soft restart cannot trip it.
+ * Starts auto-root on a real boot only.
  *
  * Two stages, both attempt the exploit:
  *
@@ -15,6 +14,10 @@ import android.os.Build;
  *   BOOT_COMPLETED        -> retry only if the BFU attempt failed before the
  *                            exploit ran (the per-boot guard prevents a
  *                            second exploit run)
+ *
+ * A third case is a userspace ("soft") restart, which re-sends these same
+ * broadcasts without rebooting the kernel: the exploit must not run again, so
+ * that path only resumes Shizuku and republishes the recorded result.
  *
  * The Shizuku provider is directBootAware, so the server can hand over its
  * binder while the credential-encrypted user is still locked.
@@ -34,6 +37,24 @@ public class BootReceiver extends BroadcastReceiver {
         }
         AutoRoot.log(context, "received " + action);
         /*
+         * A userspace restart re-sends these broadcasts while the kernel (and
+         * KernelSU) never went away. The exploit must not run again - it is
+         * one-shot per boot - so hand off to the resume path instead, which
+         * starts Shizuku and republishes the recorded result.
+         *
+         * Either broadcast may arrive first depending on whether the restart
+         * left the device locked, so claim the resume instead of picking one.
+         */
+        if (AutoRoot.softRestartDoneThisBoot(context)) {
+            if (!AutoRoot.claimResumeAfterRestart(context)) {
+                AutoRoot.log(context, action + ": resume already ran this boot");
+                return;
+            }
+            AutoRoot.log(context, action + ": resuming after a userspace restart");
+            start(context, AutoRootService.ACTION_AFTER_RESTART);
+            return;
+        }
+        /*
          * The exploit is one-shot per boot. If the locked-boot stage already
          * claimed this boot (or is still running it), do not start the
          * service again just to have it skip: that would replace the live
@@ -45,10 +66,13 @@ public class BootReceiver extends BroadcastReceiver {
             AutoRoot.log(context, action + ": already handled this boot, ignoring");
             return;
         }
+        start(context, locked ? AutoRootService.ACTION_PRESTART
+                : AutoRootService.ACTION_START);
+    }
+
+    private static void start(Context context, String action) {
         Intent service = new Intent(context, AutoRootService.class)
-                .setAction(locked
-                        ? AutoRootService.ACTION_PRESTART
-                        : AutoRootService.ACTION_START);
+                .setAction(action);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(service);
