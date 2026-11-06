@@ -2,6 +2,7 @@ package com.kpgc.timerroot;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -10,12 +11,14 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.provider.Settings;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -28,6 +31,9 @@ import android.widget.Toast;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -46,6 +52,7 @@ public class MainActivity extends Activity {
     private static final String TAG = "TimerRoot";
     private static final int REQUEST_CODE = 1001;
     private static final int REQUEST_NOTIFICATIONS = 1002;
+    private static final int REQUEST_BOOT_MEDIA = 1003;
     /**
      * Prebuilt exploit for this exact device build. The upstream timer/timer
      * targets a 6.12.69 OnePlus kernel and must not be used here: its timer
@@ -89,6 +96,7 @@ public class MainActivity extends Activity {
     private TextView tabHome;
     private TextView tabLog;
     private TextView autoToggle;
+    private TextView bootToggle;
     private String ksud = "-";
     private String ksu = "unknown";
     private String selinux = "-";
@@ -252,9 +260,33 @@ public class MainActivity extends Activity {
         body.addView(spacer(8));
         body.addView(bigButton("Run auto-root now", CARD, TEXT, v -> confirmAutoRootNow()));
         body.addView(spacer(8));
+        LinearLayout boot = new LinearLayout(this);
+        boot.setOrientation(LinearLayout.HORIZONTAL);
+        bootToggle = pill("", TEXT, CARD, v -> toggleBootUi());
+        boot.addView(bootToggle, rowParams());
+        boot.addView(pill("Allow overlay", TEXT, CARD, v -> requestOverlay()), rowParams());
+        boot.addView(pill("Full-screen", TEXT, CARD, v -> requestFullScreen()), rowParams());
+        body.addView(boot);
+        body.addView(spacer(8));
+        LinearLayout media = new LinearLayout(this);
+        media.setOrientation(LinearLayout.HORIZONTAL);
+        media.addView(pill("Background", TEXT, CARD, v -> pickBootMedia()), rowParams());
+        media.addView(pill("Preview", TEXT, CARD, v -> previewBootUi()), rowParams());
+        media.addView(pill("Clear", TEXT, CARD, v -> clearBootMedia()), rowParams());
+        body.addView(media);
+        body.addView(spacer(8));
         body.addView(pill("Auto-root log", TEXT, CARD, v -> addLog(
                 AutoRoot.readLog(this).isEmpty() ? "auto-root log is empty"
                         : AutoRoot.readLog(this))));
+        body.addView(spacer(8));
+        body.addView(smallHint("Boot status screen: before the first unlock, "
+                + "TimerRoot can show a full-screen progress screen (with an "
+                + "optional image or video background) while auto-root runs. "
+                + "Android only allows this over the lock screen through "
+                + "\"Allow overlay\" or the full-screen notification access; "
+                + "a root run grants both automatically after the first boot. "
+                + "The background is copied into device-protected storage so it "
+                + "is readable while the device is still locked."));
         body.addView(spacer(8));
         body.addView(smallHint("Auto-root reruns the exploit once per real boot: "
                 + "start Shizuku early, bind it after unlock, install the bundled "
@@ -652,6 +684,10 @@ public class MainActivity extends Activity {
             try {
                 TimerFetcher.Result result = TimerFetcher.download(TIMER_URL, file);
                 addLog("downloaded " + result.bytes + " bytes, sha256 " + result.sha256);
+                // Publish the per-kernel confs from the APK before the binary:
+                // installFd() only replaces /data/local/tmp/timer and leaves
+                // the extracted profiles alone.
+                addLog(svc.install(getPackageCodePath()));
                 String installed;
                 try (ParcelFileDescriptor fd = ParcelFileDescriptor.open(
                         file, ParcelFileDescriptor.MODE_READ_ONLY)) {
@@ -903,6 +939,181 @@ public class MainActivity extends Activity {
         boolean enabled = AutoRoot.isEnabled(this);
         autoToggle.setText("Auto-root: " + (enabled ? "ON" : "OFF"));
         autoToggle.setTextColor(enabled ? GREEN : TEXT);
+        if (bootToggle != null) {
+            boolean boot = AutoRoot.bootUiEnabled(this);
+            bootToggle.setText("Boot screen: " + (boot ? "ON" : "OFF"));
+            bootToggle.setTextColor(boot ? GREEN : TEXT);
+        }
+    }
+
+    private void toggleBootUi() {
+        boolean enabled = !AutoRoot.bootUiEnabled(this);
+        AutoRoot.setBootUiEnabled(this, enabled);
+        updateAutoRootUi();
+        addLog("boot status screen " + (enabled ? "enabled" : "disabled"));
+        if (enabled) {
+            requestNotificationPermission();
+            if (!BootStatusActivity.canStartDirectly(this)
+                    && !fullScreenAllowed()) {
+                toast("Allow overlay or full-screen access, or the screen "
+                        + "cannot appear over the lock screen");
+            }
+        }
+    }
+
+    private boolean fullScreenAllowed() {
+        if (Build.VERSION.SDK_INT < 34) {
+            return true;
+        }
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        try {
+            return manager == null || manager.canUseFullScreenIntent();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void requestOverlay() {
+        if (Settings.canDrawOverlays(this)) {
+            toast("Display over other apps is already allowed");
+            return;
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Throwable t) {
+            addLog("overlay settings failed: " + t);
+            toast("Could not open the overlay settings");
+        }
+    }
+
+    private void requestFullScreen() {
+        if (Build.VERSION.SDK_INT < 34) {
+            toast("Full-screen notifications are always allowed before Android 14");
+            return;
+        }
+        if (fullScreenAllowed()) {
+            toast("Full-screen notification access is already allowed");
+            return;
+        }
+        try {
+            startActivity(new Intent(
+                    Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Throwable t) {
+            addLog("full-screen settings failed: " + t);
+            toast("Could not open the full-screen notification settings");
+        }
+    }
+
+    private void previewBootUi() {
+        try {
+            startActivity(BootStatusActivity.intent(this));
+        } catch (Throwable t) {
+            addLog("boot screen preview failed: " + t);
+            toast("Could not open the boot screen");
+        }
+    }
+
+    private void pickBootMedia() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                new String[]{"image/*", "video/*"});
+        try {
+            startActivityForResult(intent, REQUEST_BOOT_MEDIA);
+        } catch (Throwable t) {
+            addLog("media picker failed: " + t);
+            toast("No file picker available");
+        }
+    }
+
+    private void clearBootMedia() {
+        File[] files = AutoRoot.bootUiDir(this)
+                .listFiles((dir, name) -> name.startsWith("background."));
+        int removed = 0;
+        if (files != null) {
+            for (File file : files) {
+                //noinspection ResultOfMethodCallIgnored
+                if (file.delete()) {
+                    removed++;
+                }
+            }
+        }
+        toast(removed > 0 ? "Boot background cleared" : "No boot background set");
+        addLog("boot background cleared (" + removed + " file(s))");
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_BOOT_MEDIA && resultCode == RESULT_OK
+                && data != null && data.getData() != null) {
+            copyBootMedia(data.getData());
+        }
+    }
+
+    /**
+     * Copies the chosen image or video into device-protected storage. The
+     * boot status screen runs before the first unlock, when normal app files
+     * (credential-encrypted) are not readable.
+     */
+    private void copyBootMedia(Uri uri) {
+        final String type;
+        try {
+            type = getContentResolver().getType(uri);
+        } catch (Throwable t) {
+            toast("Could not read the selected file");
+            return;
+        }
+        final boolean video = type != null && type.startsWith("video/");
+        addLog("copying boot background (" + (video ? "video" : "image") + ")...");
+        new Thread(() -> {
+            File dest = null;
+            try {
+                File dir = AutoRoot.bootUiDir(this);
+                File[] old = dir.listFiles((d, name) -> name.startsWith("background."));
+                if (old != null) {
+                    for (File file : old) {
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                    }
+                }
+                dest = new File(dir, video ? "background.video"
+                        : "background.image0");
+                InputStream in = getContentResolver().openInputStream(uri);
+                if (in == null) {
+                    throw new IllegalStateException("no stream for " + uri);
+                }
+                try (InputStream source = in;
+                     OutputStream out = new FileOutputStream(dest)) {
+                    byte[] buffer = new byte[1 << 16];
+                    int read;
+                    while ((read = source.read(buffer)) > 0) {
+                        out.write(buffer, 0, read);
+                    }
+                }
+                long size = dest.length();
+                final File saved = dest;
+                ui.post(() -> {
+                    toast("Boot background set");
+                    addLog("boot background ready: " + saved.getName()
+                            + " (" + (size / 1024) + " KiB)");
+                });
+            } catch (Throwable t) {
+                AutoRoot.log(this, "boot background copy failed: " + t);
+                final File failed = dest;
+                ui.post(() -> {
+                    toast("Could not save the boot background");
+                    addLog("boot background copy failed: " + t);
+                    if (failed != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        failed.delete();
+                    }
+                });
+            }
+        }).start();
     }
 
     private void toggleAutoRoot() {
@@ -1038,6 +1249,8 @@ public class MainActivity extends Activity {
                         + "grep -qF \"$K\" \"$A\" 2>/dev/null || "
                         + "echo \"$K\" >> \"$A\" 2>/dev/null; "
                         + "echo key_count=$(grep -cF timerroot \"$A\" 2>/dev/null); "
+                        + "appops set com.kpgc.timerroot android:use_full_screen_intent allow; "
+                        + "appops set com.kpgc.timerroot android:system_alert_window allow; "
                         + "echo CHANNEL_DONE";
                 String result = service.execRoot(command);
                 addLog(result);
@@ -1153,7 +1366,7 @@ public class MainActivity extends Activity {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(7);
+                .version(8);
     }
 
     private void copyLog() {

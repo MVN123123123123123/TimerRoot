@@ -15,6 +15,7 @@ import android.os.PowerManager;
 
 import java.security.KeyPair;
 import java.security.interfaces.RSAPublicKey;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -43,6 +44,8 @@ public class AutoRootService extends Service {
     static final String ACTION_PRESTART = "com.kpgc.timerroot.AUTOROOT_PRESTART";
 
     private static final String CHANNEL = "auto_root";
+    /** High-importance channel so the status notification may use a full-screen intent. */
+    private static final String CHANNEL_BOOT = "auto_root_boot";
     private static final int NOTIFICATION_ID = 41;
     private static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
 
@@ -85,9 +88,22 @@ public class AutoRootService extends Service {
             }
             return START_NOT_STICKY;
         }
+        boolean bootUi = AutoRoot.bootUiWanted(this);
+        if (bootUi) {
+            AutoRoot.stage(this, "waiting for the boot…", AutoRoot.STAGE_RUNNING);
+        }
         startForeground(NOTIFICATION_ID, notification(
-                "Auto-root", "preparing...", true));
+                "Auto-root", "preparing...", true, bootUi));
         foregroundStarted = true;
+        /*
+         * Attach the status screen through the overlay exemption when it is
+         * available. On Android 15+ this background start may be refused, in
+         * which case the full-screen intent on the notification is the path
+         * that actually shows it. Both are opportunistic and harmless.
+         */
+        if (bootUi && !ACTION_RUN_NOW.equals(action)) {
+            BootStatusActivity.maybeShow(this);
+        }
 
         final boolean force = ACTION_RUN_NOW.equals(action);
         final boolean prestart = ACTION_PRESTART.equals(action);
@@ -370,7 +386,18 @@ public class AutoRootService extends Service {
          */
         AutoRoot.log(this, "root shell ready; loading KernelSU");
         show("Auto-root", "loading KernelSU...");
-        return "root shell ready; " + loadKernelSu(service);
+        String ksu = loadKernelSu(service);
+        /*
+         * The boot status screen needs either "display over other apps" or
+         * the "full-screen notifications" special access. Both are app-ops
+         * that a shell-domain root can grant without touching the UI, so
+         * take them now (after the time-sensitive KernelSU stage); the user
+         * can still revoke them in Settings. Install channel does the same, so
+         * the first boot after setup already has them.
+         */
+        AutoRoot.log(this, "boot UI grants: "
+                + tail(service.execRoot(grantBootUiAccess())));
+        return "root shell ready; " + ksu;
     }
 
     /** How many times the racy late-load stage may be replanted. */
@@ -664,15 +691,30 @@ public class AutoRootService extends Service {
         channel.enableVibration(false);
         channel.setShowBadge(false);
         manager.createNotificationChannel(channel);
+
+        /*
+         * A full-screen intent is only honoured from a high-importance
+         * channel. Keep it silent: the screen is the point, not the alert.
+         */
+        NotificationChannel boot = new NotificationChannel(CHANNEL_BOOT,
+                "Boot status screen", NotificationManager.IMPORTANCE_HIGH);
+        boot.setDescription("Shows the auto-root progress over the lock screen");
+        boot.setSound(null, null);
+        boot.enableVibration(false);
+        boot.setShowBadge(false);
+        boot.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        manager.createNotificationChannel(boot);
     }
 
-    private Notification notification(String title, String text, boolean ongoing) {
+    private Notification notification(String title, String text, boolean ongoing,
+                                      boolean fullScreen) {
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                                 | Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder builder = new Notification.Builder(this, CHANNEL)
+        Notification.Builder builder = new Notification.Builder(this,
+                fullScreen ? CHANNEL_BOOT : CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle(title)
                 .setContentText(text)
@@ -680,6 +722,15 @@ public class AutoRootService extends Service {
                 .setContentIntent(open)
                 .setOnlyAlertOnce(true)
                 .setOngoing(ongoing);
+        if (fullScreen) {
+            builder.setFullScreenIntent(BootStatusActivity.pendingIntent(this), true)
+                    .setCategory(Notification.CATEGORY_SERVICE)
+                    .setVisibility(Notification.VISIBILITY_PUBLIC);
+        }
+        if (AutoRoot.bootUiWanted(this)) {
+            builder.addAction(new Notification.Action.Builder(null, "Status",
+                    BootStatusActivity.pendingIntent(this)).build());
+        }
         if (ongoing) {
             PendingIntent stop = PendingIntent.getService(this, 1,
                     new Intent(this, AutoRootService.class)
@@ -691,16 +742,36 @@ public class AutoRootService extends Service {
     }
 
     private void show(String title, String text) {
+        AutoRoot.stage(this, text, AutoRoot.STAGE_RUNNING);
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
-            manager.notify(NOTIFICATION_ID, notification(title, text, true));
+            manager.notify(NOTIFICATION_ID, notification(title, text, true,
+                    AutoRoot.bootUiWanted(this)));
         }
     }
 
     private void finish(String title, String text, boolean keepRunning) {
+        int state;
+        String lower = title == null ? "" : title.toLowerCase(Locale.US);
+        if (lower.contains("ready")) {
+            state = AutoRoot.STAGE_OK;
+        } else if (lower.contains("failed") || lower.contains("off")) {
+            state = AutoRoot.STAGE_FAILED;
+        } else {
+            state = AutoRoot.STAGE_RUNNING;
+        }
+        AutoRoot.stage(this, text, state);
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
-            manager.notify(NOTIFICATION_ID, notification(title, text, keepRunning));
+            /*
+             * The full-screen intent is only needed while the run is live and
+             * for the final outcome. "Already ran this boot." should not pop
+             * a screen, so only attach it for a terminal state.
+             */
+            boolean fullScreen = AutoRoot.bootUiWanted(this)
+                    && state != AutoRoot.STAGE_RUNNING;
+            manager.notify(NOTIFICATION_ID, notification(title, text, keepRunning,
+                    fullScreen));
         }
         if (!keepRunning) {
             stopForeground(STOP_FOREGROUND_DETACH);
@@ -709,6 +780,19 @@ public class AutoRootService extends Service {
 
     private static String summary(String result) {
         return result.length() > 120 ? result.substring(0, 117) + "..." : result;
+    }
+
+    /**
+     * Grants the two app-ops the boot status screen can use, from a
+     * shell-domain uid-0 shell. "Display over other apps" is the background
+     * activity launch exemption; USE_FULL_SCREEN_INTENT lets the notification
+     * open the screen over the keyguard on Android 14+. Failures are harmless
+     * (older releases may not have the full-screen op).
+     */
+    static String grantBootUiAccess() {
+        return "appops set com.kpgc.timerroot android:use_full_screen_intent allow; "
+                + "appops set com.kpgc.timerroot android:system_alert_window allow; "
+                + "echo BOOT_UI_GRANTS_DONE";
     }
 
     private static String tail(String output) {

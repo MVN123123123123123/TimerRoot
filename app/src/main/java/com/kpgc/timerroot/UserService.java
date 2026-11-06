@@ -1,5 +1,11 @@
 package com.kpgc.timerroot;
 
+import android.os.Build;
+import android.system.Os;
+import android.system.OsConstants;
+import android.text.TextUtils;
+import android.util.Log;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -10,6 +16,10 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.BufferedWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -24,13 +34,27 @@ import java.util.zip.ZipFile;
  */
 public class UserService extends IUserService.Stub {
 
+    private static final String TAG = "TimerRootService";
+
     private static final String BIN = "/data/local/tmp/timer";
     private static final String LOG = "/data/local/tmp/timer.log";
+    private static final String CONF_DIR = "/data/local/tmp/timer-conf";
+    /** Profiles for "dirty" kernel builds need an extra identity check. */
+    private static final String DIRTY_CONF_SUBDIR = "dirty";
+    /**
+     * App &lt;-&gt; timer interface version. Must match APP_PROTOCOL in
+     * p7a/timer_p7a.c. The binary refuses to run when this is missing, which
+     * is how an old APK that downloads the new timer finds out it has to
+     * update.
+     */
+    private static final int APP_PROTOCOL = 2;
     private static final int MAX_OUTPUT = 20000;
 
     private Process rootProcess;
     private BufferedWriter rootInput;
     private final BlockingQueue<String> rootLines = new LinkedBlockingQueue<>();
+    /** Cached protocol probe result: -1 unknown, 0 legacy binary, 2 current. */
+    private volatile int binaryProtocol = -1;
 
     public UserService() {
     }
@@ -52,10 +76,15 @@ public class UserService extends IUserService.Stub {
     @Override
     public String install(String apk) {
         try {
+            int confCount;
             try (ZipFile zf = new ZipFile(apk)) {
                 ZipEntry entry = zf.getEntry("assets/timer");
                 if (entry == null) {
-                    return "assets/timer not found in " + apk;
+                    // Still publish the confs: the download path installs
+                    // the binary separately through installFd().
+                    confCount = extractConfs(zf);
+                    return "assets/timer not found in " + apk
+                            + " (installed " + confCount + " confs)";
                 }
                 String tmp = BIN + ".new";
                 try (InputStream in = zf.getInputStream(entry);
@@ -71,13 +100,71 @@ public class UserService extends IUserService.Stub {
                 Process move = Runtime.getRuntime().exec(new String[]{"/system/bin/sh",
                         "-c", "chmod 755 " + tmp + " && mv -f " + tmp + " " + BIN
                             + " && sync"});
-                move.waitFor();
+                int rc = move.waitFor();
+                if (rc != 0) {
+                    return "install failed: mv rc=" + rc;
+                }
+                // A replaced binary must be re-identified before the next run.
+                binaryProtocol = -1;
+
+                // Per-kernel profiles. Wipe the directory first: a stale
+                // flat conf would otherwise keep matching by release alone
+                // and bypass the dirty/ identity checks.
+                confCount = extractConfs(zf);
             }
-            return "installed " + new File(BIN).length() + " bytes (uid="
-                    + android.system.Os.getuid() + ")";
+            return "installed " + new File(BIN).length() + " bytes, " + confCount
+                    + " confs (uid=" + Os.getuid() + ")";
         } catch (Throwable t) {
             return "install failed: " + t;
         }
+    }
+
+    /** Extracts APK assets/conf/**.conf into CONF_DIR. */
+    private static int extractConfs(ZipFile zf) throws IOException {
+        File confDir = new File(CONF_DIR);
+        deleteRecursively(confDir);
+        //noinspection ResultOfMethodCallIgnored
+        confDir.mkdirs();
+
+        int count = 0;
+        java.util.Enumeration<? extends ZipEntry> entries = zf.entries();
+        while (entries.hasMoreElements()) {
+            ZipEntry e = entries.nextElement();
+            if (e.isDirectory() || !e.getName().startsWith("assets/conf/")) {
+                continue;
+            }
+            String name = e.getName().substring("assets/conf/".length());
+            if (!name.endsWith(".conf") || name.contains("..")) {
+                continue;
+            }
+            File dst = new File(confDir, name);
+            File parent = dst.getParentFile();
+            if (parent != null) {
+                //noinspection ResultOfMethodCallIgnored
+                parent.mkdirs();
+            }
+            try (InputStream in = zf.getInputStream(e);
+                 FileOutputStream out = new FileOutputStream(dst)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    out.write(buf, 0, n);
+                }
+            }
+            count++;
+        }
+        return count;
+    }
+
+    private static void deleteRecursively(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) {
+            for (File k : kids) {
+                deleteRecursively(k);
+            }
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
     }
 
     /**
@@ -106,6 +193,8 @@ public class UserService extends IUserService.Stub {
             if (rc != 0) {
                 return "install failed: mv rc=" + rc;
             }
+            // A freshly installed binary must be re-probed before use.
+            binaryProtocol = -1;
             return "installed " + new File(BIN).length() + " bytes (uid="
                     + android.system.Os.getuid() + ")";
         } catch (Throwable t) {
@@ -113,11 +202,285 @@ public class UserService extends IUserService.Stub {
         }
     }
 
+    private static String kernelRelease() {
+        try {
+            return Os.uname().release;
+        } catch (Throwable t) {
+            return "unknown";
+        }
+    }
+
+    /**
+     * True when the installed timer speaks this app's protocol.
+     *
+     * The app and the binary are installed independently, so the reverse of
+     * the old-app case is possible too: an updated APK can meet a timer that
+     * is still the pre-conf binary (its /data/local/tmp/timer survives an app
+     * update). That binary has no argument parser, so handing it
+     * "--conf &lt;path&gt;" would be read as an unknown mode and run a legacy
+     * plant with the wrong kernel constants.
+     *
+     * The check reads the file instead of running it: the conf-driven binary
+     * embeds the literal marker "TIMER_PROTOCOL=&lt;n&gt;" in its read-only data,
+     * so a byte scan is side-effect free. Refusing on a missing marker is the
+     * safe direction: the user is told to reinstall.
+     */
+    private boolean binarySpeaksProtocol() {
+        if (binaryProtocol >= 0) {
+            return binaryProtocol == APP_PROTOCOL;
+        }
+        binaryProtocol = 0;
+        byte[] want = ("TIMER_PROTOCOL=" + APP_PROTOCOL).getBytes(StandardCharsets.US_ASCII);
+        try (InputStream in = new FileInputStream(BIN)) {
+            byte[] buf = new byte[1 << 16];
+            int keep = want.length - 1;
+            int carry = 0;
+            int n;
+            while ((n = in.read(buf, carry, buf.length - carry)) > 0) {
+                int len = carry + n;
+                if (indexOf(buf, len, want) >= 0) {
+                    binaryProtocol = APP_PROTOCOL;
+                    break;
+                }
+                carry = Math.min(keep, len);
+                System.arraycopy(buf, len - carry, buf, 0, carry);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "protocol probe failed: " + t);
+        }
+        return binaryProtocol == APP_PROTOCOL;
+    }
+
+    /** Plain substring search over the first {@code len} bytes of a buffer. */
+    private static int indexOf(byte[] hay, int len, byte[] needle) {
+        int last = len - needle.length;
+        outer:
+        for (int i = 0; i <= last; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (hay[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    /** The message shown when the installed binary predates the conf rewrite. */
+    private static String oldBinaryMessage() {
+        return "BREAKING CHANGE: the installed timer is too old for this app.\n"
+                + "It does not understand --conf, so it cannot be given a kernel\n"
+                + "profile. Press \"Download exploit\" (or Prepare) to reinstall\n"
+                + "the current timer, then try again.";
+    }
+
+    /**
+     * Returns "--conf &lt;path&gt;" for the profile that applies to this
+     * device, or null when none matches.
+     *
+     * Two tiers:
+     *  - confs directly under CONF_DIR match on {@code release == uname -r}
+     *    (and, when present, {@code page_size}) alone. Stock GKI release
+     *    strings are unique enough.
+     *  - confs under CONF_DIR/dirty/ additionally check the device identity
+     *    ({@code device_model}, {@code android_release}, optional
+     *    {@code sdk_int}). A dirty build's release string is not unique to
+     *    one vendor build, so the extra check keeps another device's
+     *    constants from being applied.
+     *
+     * This selection logic is ported from rikumi/TimerRoot.
+     */
+    private String confArg() {
+        String release;
+        long pageSize;
+        try {
+            release = Os.uname().release;
+            pageSize = Os.sysconf(OsConstants._SC_PAGESIZE);
+        } catch (Throwable t) {
+            Log.w(TAG, "cannot read kernel identity: " + t);
+            return null;
+        }
+
+        File dir = new File(CONF_DIR);
+        for (File f : listConfFiles(dir)) {
+            if (!confMatches(f, release, pageSize)) {
+                continue;
+            }
+            Log.i(TAG, "using conf " + f);
+            return "--conf " + f.getAbsolutePath()
+                    + " --protocol " + APP_PROTOCOL;
+        }
+
+        File dirtyDir = new File(dir, DIRTY_CONF_SUBDIR);
+        for (File f : listConfFiles(dirtyDir)) {
+            if (!confMatches(f, release, pageSize)) {
+                continue;
+            }
+            if (!deviceIdentityMatches(f)) {
+                Log.w(TAG, "skipping dirty conf " + f + ": device identity mismatch");
+                continue;
+            }
+            Log.i(TAG, "using dirty conf " + f);
+            return "--conf " + f.getAbsolutePath()
+                    + " --protocol " + APP_PROTOCOL;
+        }
+        Log.w(TAG, "no conf matched uname -r = " + release
+                + ", page size = " + pageSize);
+        return null;
+    }
+
+    /** Regular .conf files directly inside {@code dir} (no recursion). */
+    private static File[] listConfFiles(File dir) {
+        File[] files = dir.listFiles((d, name) -> name.endsWith(".conf"));
+        if (files == null) {
+            return new File[0];
+        }
+        ArrayList<File> out = new ArrayList<>();
+        for (File f : files) {
+            if (f.isFile()) {
+                out.add(f);
+            }
+        }
+        return out.toArray(new File[0]);
+    }
+
+    private static boolean confMatches(File conf, String release, long pageSize) {
+        Map<String, String> fields = readConfFields(conf);
+        if (!releaseMatches(fields.get("release"), release)) {
+            return false;
+        }
+        String wantPage = fields.get("page_size");
+        if (TextUtils.isEmpty(wantPage)) {
+            return true;
+        }
+        try {
+            return Long.decode(wantPage) == pageSize;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** A kernel release may or may not carry the "-4k" userspace suffix. */
+    private static boolean releaseMatches(String configured, String running) {
+        if (TextUtils.isEmpty(configured) || TextUtils.isEmpty(running)) {
+            return false;
+        }
+        if (configured.equals(running)) {
+            return true;
+        }
+        String a = configured.endsWith("-4k")
+                ? configured.substring(0, configured.length() - 3) : configured;
+        String b = running.endsWith("-4k")
+                ? running.substring(0, running.length() - 3) : running;
+        return a.equals(b);
+    }
+
+    /**
+     * Identity gate for dirty confs. {@code device_model} and
+     * {@code android_release} are required; {@code sdk_int} is compared when
+     * present. A conf that omits a required field is rejected rather than
+     * trusted, so an incomplete profile can never be selected.
+     */
+    private static boolean deviceIdentityMatches(File conf) {
+        Map<String, String> fields = readConfFields(conf);
+        String wantModel = fields.get("device_model");
+        String wantRelease = fields.get("android_release");
+        String wantSdk = fields.get("sdk_int");
+        if (TextUtils.isEmpty(wantModel) || TextUtils.isEmpty(wantRelease)) {
+            return false;
+        }
+        if (!wantModel.equals(Build.MODEL)) {
+            return false;
+        }
+        if (!wantRelease.equals(Build.VERSION.RELEASE)) {
+            return false;
+        }
+        return TextUtils.isEmpty(wantSdk)
+                || wantSdk.equals(String.valueOf(Build.VERSION.SDK_INT));
+    }
+
+    /**
+     * Minimal conf reader: {@code key = value} lines with {@code #} and
+     * {@code //} comments stripped and surrounding quotes removed.
+     */
+    private static Map<String, String> readConfFields(File f) {
+        Map<String, String> out = new HashMap<>();
+        try (BufferedReader r = new BufferedReader(new InputStreamReader(
+                new FileInputStream(f)))) {
+            String line;
+            while ((line = r.readLine()) != null) {
+                int hash = line.indexOf('#');
+                if (hash >= 0) {
+                    line = line.substring(0, hash);
+                }
+                int dsl = line.indexOf("//");
+                if (dsl >= 0) {
+                    line = line.substring(0, dsl);
+                }
+                int eq = line.indexOf('=');
+                if (eq < 0) {
+                    continue;
+                }
+                String key = line.substring(0, eq).trim();
+                String val = line.substring(eq + 1).trim();
+                if (val.length() >= 2 && val.startsWith("\"") && val.endsWith("\"")) {
+                    val = val.substring(1, val.length() - 1);
+                }
+                if (!key.isEmpty() && !val.isEmpty()) {
+                    out.put(key, val);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return out;
+    }
+
+    /**
+     * Result of resolving the run arguments: exactly one field is set.
+     */
+    private static final class ConfCheck {
+        final String args;
+        final String error;
+
+        ConfCheck(String args, String error) {
+            this.args = args;
+            this.error = error;
+        }
+    }
+
+    /**
+     * Returns the {@code --conf ... --protocol ...} argument for this device,
+     * or the reason it is unavailable. The binary is verified first: an
+     * installed binary from before the conf rewrite must never be handed
+     * {@code --conf}.
+     */
+    private ConfCheck resolveConfArg() {
+        if (!new File(BIN).isFile()) {
+            return new ConfCheck(null,
+                    "timer is not installed - press \"Download exploit\""
+                            + " (or Prepare) first");
+        }
+        if (!binarySpeaksProtocol()) {
+            return new ConfCheck(null, oldBinaryMessage());
+        }
+        String conf = confArg();
+        if (conf == null) {
+            return new ConfCheck(null, "no kernel conf matched uname -r = "
+                    + kernelRelease() + " (install the app or press Prepare again)");
+        }
+        return new ConfCheck(conf, null);
+    }
+
     @Override
     public String run(String args) {
+        ConfCheck check = resolveConfArg();
+        if (check.error != null) {
+            return check.error;
+        }
+        String conf = check.args;
         try {
             ProcessBuilder pb = new ProcessBuilder(
-                    "/system/bin/sh", "-c", BIN + " " + args + " 2>&1");
+                    "/system/bin/sh", "-c", BIN + " " + conf + " " + args + " 2>&1");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
             Process p = pb.start();
@@ -134,9 +497,14 @@ public class UserService extends IUserService.Stub {
 
     @Override
     public String runDetached(String args) {
+        ConfCheck check = resolveConfArg();
+        if (check.error != null) {
+            return "start failed: " + check.error;
+        }
+        String conf = check.args;
         try {
-            String cmd = "cd /data/local/tmp && setsid " + BIN + " " + args
-                    + " >" + LOG + " 2>&1 </dev/null &";
+            String cmd = "cd /data/local/tmp && setsid " + BIN + " " + conf
+                    + " " + args + " >" + LOG + " 2>&1 </dev/null &";
             Runtime.getRuntime().exec(new String[]{"/system/bin/sh", "-c", cmd});
             Thread.sleep(2000);
             return readLog();
@@ -159,8 +527,14 @@ public class UserService extends IUserService.Stub {
         if (rootProcess != null && rootProcess.isAlive()) {
             return "root shell already open";
         }
+        ConfCheck check = resolveConfArg();
+        if (check.error != null) {
+            return "root shell failed: " + check.error;
+        }
+        String conf = check.args;
         try {
-            ProcessBuilder pb = new ProcessBuilder(BIN, "shell");
+            ProcessBuilder pb = new ProcessBuilder(
+                    "/system/bin/sh", "-c", BIN + " " + conf + " shell");
             pb.directory(new File("/data/local/tmp"));
             pb.redirectErrorStream(true);
             rootProcess = pb.start();

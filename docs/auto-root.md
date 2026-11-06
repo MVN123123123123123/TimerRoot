@@ -562,3 +562,68 @@ for: a plant missed its burst (`burst hit=0`) and parked. The second attempt
 hit both plants and loaded the module. Both attempts' parked processes stay
 alive until the next reboot, by design.
 
+
+---
+
+## Boot status screen (BFU)
+
+The boot path can display a full-screen status page while it runs, so the
+user can see whether auto-root is still working or already done without
+unlocking. It is implemented as `BootStatusActivity`, a `directBootAware`
+activity with `showWhenLocked` and `turnScreenOn`, and it reads all of its
+state from device-protected storage.
+
+What it shows:
+
+- a self-drawn animated gradient background, a still-image slideshow, or a
+  muted looping video copied by the user into
+  `files/bootui/background.video` / `background.image0`;
+- a spinner while running, a green check on success, a red cross on failure;
+- the current stage (`starting Shizuku...`, `running the exploit...`,
+  `loading KernelSU... 20s`, ...) and how long that stage has been running;
+- a short hint that unlocking is allowed at any time, plus **Hide** and
+  **Open TimerRoot** actions.
+
+### How it gets on screen
+
+Android blocks background activity starts. Two exemptions are used:
+
+1. **Full-screen intent** (primary). The ongoing notification lives on a
+   separate high-importance, silent channel and carries
+   `setFullScreenIntent(BootStatusActivity.pendingIntent(this), true)`.
+   Android 14+ gates this behind the `USE_FULL_SCREEN_INTENT` app-op and the
+   *full-screen notifications* special access; before 14 the permission is
+   granted at install.
+2. **Display over other apps** (opportunistic). `SYSTEM_ALERT_WINDOW` is a
+   background-activity-launch exemption, so `maybeShow()` can call
+   `startActivity` directly. Newer releases may still refuse this, which is
+   why the full-screen intent is the real path.
+
+`AutoRootService` grants both app-ops from its own uid-0 shell after
+`openRoot()` succeeds (`appops set com.kpgc.timerroot ... allow`). The same
+commands run from **Install channel**, and **Allow overlay** / **Full-screen**
+open the corresponding Settings pages for the first run. Without either
+access the ordinary progress notification remains the fallback; auto-root
+itself does not depend on the screen.
+
+### State transport
+
+`AutoRoot.stage()` / `stageText()` / `stageTime()` / `stageState()` keep the
+current line, timestamp and 0/1/-1 state in the `auto_root` device-protected
+SharedPreferences. The service publishes with `commit()` (the activity polls
+every 500 ms) and `AutoRootService.show()` / `finish()` update it on every
+stage change, so the screen and the notification never disagree.
+
+### Limits
+
+- This is not a replacement for `/system/media/bootanimation.zip`: that file
+  lives on a read-only partition, and AOSP's boot animation only reads
+  `/product`, `/system`, `/oem` and `/apex` paths.
+- It cannot be a true live wallpaper over the keyguard; the activity paints
+  its own background instead.
+- It appears when TimerRoot's process starts (`LOCKED_BOOT_COMPLETED`), not
+  during the kernel/init boot animation.
+- It never traps the user: `Hide` finishes the activity and returns to the
+  keyguard (so a PIN or pattern can be entered), biometric unlock works while
+  it is visible, and after a terminal state on an unlocked device it closes
+  itself after ~6 s.

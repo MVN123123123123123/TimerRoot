@@ -36,6 +36,19 @@ final class AutoRoot {
     static final String KEY_LAST_RESULT = "last_result";
     static final String KEY_LAST_RESULT_TIME = "last_result_time";
     static final String KEY_PRIVATE = "private_key";
+    /** Live stage text for the boot status screen (device protected). */
+    static final String KEY_STAGE = "stage";
+    static final String KEY_STAGE_TIME = "stage_time";
+    /** 0 = running, 1 = success, -1 = failure. */
+    static final String KEY_STAGE_STATE = "stage_state";
+    /** Show the full-screen status activity over the lock screen. */
+    static final String KEY_BOOT_UI = "boot_ui";
+    /** Boot id for which the user tapped Hide; suppresses re-showing it. */
+    static final String KEY_BOOT_UI_HIDDEN_BOOT = "boot_ui_hidden_boot";
+
+    static final int STAGE_RUNNING = 0;
+    static final int STAGE_OK = 1;
+    static final int STAGE_FAILED = -1;
 
     static final int DEFAULT_ADB_PORT = AdbLocal.DEFAULT_PORT;
 
@@ -155,6 +168,76 @@ final class AutoRoot {
         return prefs(context).getString(KEY_LAST_RESULT, "");
     }
 
+    // ------------------------------------------------------- boot status UI
+
+    /**
+     * Publishes the current boot stage for the status activity. Uses
+     * commit() rather than apply(): the value has to be on disk before the
+     * activity reads it, and the stage changes only a handful of times per
+     * boot.
+     */
+    static void stage(Context context, String text, int state) {
+        if (text == null) {
+            text = "";
+        }
+        prefs(context).edit()
+                .putString(KEY_STAGE, text)
+                .putLong(KEY_STAGE_TIME, System.currentTimeMillis())
+                .putInt(KEY_STAGE_STATE, state)
+                .commit();
+    }
+
+    static String stageText(Context context) {
+        return prefs(context).getString(KEY_STAGE, "waiting for the boot…");
+    }
+
+    static long stageTime(Context context) {
+        return prefs(context).getLong(KEY_STAGE_TIME, 0);
+    }
+
+    static int stageState(Context context) {
+        return prefs(context).getInt(KEY_STAGE_STATE, STAGE_RUNNING);
+    }
+
+    static boolean bootUiEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_BOOT_UI, true);
+    }
+
+    static void setBootUiEnabled(Context context, boolean enabled) {
+        SharedPreferences.Editor editor = prefs(context).edit()
+                .putBoolean(KEY_BOOT_UI, enabled);
+        if (enabled) {
+            // Turning it back on also clears a Hide from earlier this boot.
+            editor.putLong(KEY_BOOT_UI_HIDDEN_BOOT, Long.MIN_VALUE);
+        }
+        editor.commit();
+    }
+
+    /**
+     * True when the status screen should be shown now: enabled and the user
+     * has not hidden it on this boot. Hide is per boot, so the next auto-root
+     * run may show it again.
+     */
+    static boolean bootUiWanted(Context context) {
+        return bootUiEnabled(context)
+                && prefs(context).getLong(KEY_BOOT_UI_HIDDEN_BOOT, Long.MIN_VALUE)
+                != bootId();
+    }
+
+    static void hideBootUi(Context context) {
+        prefs(context).edit()
+                .putLong(KEY_BOOT_UI_HIDDEN_BOOT, bootId()).commit();
+    }
+
+    /** Directory for the optional boot screen background, readable at BFU. */
+    static File bootUiDir(Context context) {
+        File dir = new File(context.createDeviceProtectedStorageContext()
+                .getFilesDir(), "bootui");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        return dir;
+    }
+
     // ------------------------------------------------------------- adb key
 
     static synchronized KeyPair keyPair(Context context) throws Exception {
@@ -248,6 +331,6 @@ final class AutoRoot {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(7);
+                .version(8);
     }
 }
