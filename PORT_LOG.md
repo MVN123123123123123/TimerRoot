@@ -3,11 +3,12 @@
 Per-gate evidence for every profile added to `conf/`. The procedure is
 [`SKILL.md`](SKILL.md); this file is the record that it was followed.
 
-A gate is only marked **pass** when it was actually run. Gates that need a
-booted kernel (F7–F15) are marked **pending** and the profiles are listed as
-`untested` in the README.
+A gate is only marked **pass** when it was actually run. F7–F11 were run
+against the factory kernels in QEMU. Gates that need real userspace or
+hardware (F12–F16) stay **pending**, and the README separates
+`verified in QEMU` from `tested`.
 
-Two things were run on the build host, and neither replaces a device run:
+Two things were run before the QEMU pass, and neither replaced a device run:
 
 - `validate_conf.py` re-derives every constant from the factory `vmlinux` +
   BTF and diffs it against the conf.
@@ -18,8 +19,11 @@ Two things were run on the build host, and neither replaces a device run:
   the page-size check, the F6 invariants and the `target=` output — but it is
   **not** the aarch64 binary, and it does not touch a real kernel.
 
-The shipped aarch64 binary was compiled with the NDK and is clean, but has not
-been executed anywhere.
+The shipped aarch64 binary was then run against the factory kernels in
+`qemu-system-aarch64`: 18 of the 22 profiles pass F7–F11 there, including
+every profile added for the Redmi Note 15/17 ports. Section
+[F14](#f14--qemu-mass-run) has the per-profile table and the procedure.
+F12 and F13 need a device.
 
 Everything below was derived from the **factory `boot.img` of the exact build**
 named in each section, never from a running device.
@@ -534,17 +538,83 @@ image has no vendor-size setup and keeps `0x1200`.
 | F4 cred / task geometry | pass | BTF + `cred_init` / `task_vendor_size_setup` disassembly |
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors; `--selfcheck` 0 failures (host build) |
-| F7 `timer target` | pending | parser + banner match + page size exercised on host; needs the device |
-| F8–F13 | pending | needs a booted kernel |
-| F14 QEMU | pending | no aarch64 user-mode emulation on the build host |
+| F7 `timer target` | pass (QEMU) | all 18 profiles print their own `timer_site`, exit 0 |
+| F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
+| F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
+| F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
+| F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
+| F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
+| F13 `timer fake` | pending | needs KernelSU present |
+| F14 QEMU | pass | 18/18 profiles, see below |
 | F15 hardware | pending | no device |
-| F16 app | defer | tables added as `untested`; flip to `tested` only after F15 |
+| F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
 
-F2's `slabinfo` lines (`object_size`, `objs_per_slab`, `order`) are the one F2
-item that needs a running device, so they are part of the pending set. The
-profile values they would confirm (`timer_alloc`, `task_alloc_bytes`) are
-already derived twice from the image: once from the struct sizes + the
-`kmem_cache_create` argument and once from the BTF layout.
+### F14 — QEMU mass run
+
+Every conf whose factory Image is in the workspace was booted in
+`qemu-system-aarch64 -M virt` at the profile's page size and driven through
+the shipped aarch64 binary. **18 of 22 profiles ran and all 18 passed every
+gate.** The other four are the imported OPPO/realme profiles
+(`6.12.58-…-ab15213644-4k`, `6.12.69-…-g242e1a07f878-ab15865446-4k`,
+`6.6.118-…-g9bc34d5b0c79-abogki537459655-4k`,
+`6.6.66-…-abogki428889875-4k`), which have no factory artifact in the
+workspace — one of them was derived from a device dump, so there is no image
+to boot. `logs/mass-final.json` holds the per-profile detail.
+
+| profile | device | slabinfo | F7 | F8 | F9 | F10 | F11 |
+|---|---|---|---|---|---|---|---|
+| 5.15.194-…-ab15004895 | zephyr | pass | pass | pass | pass | pass | pass |
+| 6.1.138-…-ab14529422 | flourite | pass | pass | pass | pass | pass | pass |
+| 6.1.138-…-ab13911623 | lapis | pass | pass | pass | pass | pass | pass |
+| 6.1.162-…-ab16261587 | tegu (Pixel 8/9) | pass | pass | pass | pass | pass | pass |
+| 6.1.162-…-ab16261587-16k | tegu 16K | pass | pass | pass | pass | pass | pass (retry) |
+| 6.12.30-…-ab13847919-4k | charoite | pass | pass | pass | pass | pass | pass |
+| 6.12.69-…-ab15889839-4k | spinel | pass | pass | pass | pass | pass | pass |
+| 6.12.69-…-abogki558343811-4k | popsicle | pass | pass | pass | pass | pass | pass |
+| 6.12.69-…-abogki561813157-4k | byron/pudding/nezha | pass | pass | pass | pass | pass | pass |
+| 6.12.69-…-abogki537510563-4k | brussels | pass | pass | pass | pass | pass | pass |
+| 6.12.69-…-ab16108597-4k | cubs (Pixel 11) | pass | pass | pass | pass | pass | pass |
+| 6.18.21-…-abogki555938958-4k | hongkong/madrid | pass | pass | pass | pass | pass | pass |
+| 6.18.21-…-abogki565292102-4k | lhasa/yingtian | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-ab15657065-4k | mist | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-abogki536571621-4k | iolite | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-abogki519650608-4k | dada | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-ab15511674-4k | kunzite | pass | pass | pass | pass | pass | pass |
+| 6.6.127-…-ab16252310-4k | frankel (Pixel 10) | pass | pass | pass | pass | pass | pass |
+
+This run also supplies the F2 `slabinfo` item that a device was previously
+needed for. The booted kernel reports, per profile, a
+`posix_timers_cache` object size equal to `timer_alloc` at the conf's
+`slab_order`, and a `task_struct` object size equal to `task_alloc_bytes`
+once SLUB's alignment padding is taken into account. Two numbers needed
+interpretation rather than a raw comparison:
+
+- `task_alloc_bytes` is the *requested* size. SLUB rounds the object up to
+  `s->align`, so cubs reports `0x1780` for a requested `0x1750` (alignment
+  64). Everything else is already aligned and matches exactly.
+- `slab_order` comes from the online CPU count via SLUB's `min_objects`
+  heuristic, so the VM is booted with `slub_min_order=<conf slab_order>`
+  rather than hoping `-smp` lands on the phone's value.
+
+Five confs omit `page_size`/`slab_order`/`slab_size` and rely on the
+documented `conf_defaults()` values; the harness applies the same defaults,
+so they are complete profiles, not drafts. The four OPPO/realme confs above
+are the only ones still without an image.
+
+A caveat on the F11 rate: the harness runs at `-j 2` on the 12-core build
+host. Oversubscribing the vCPUs makes the spray burst miss its 15 s window
+(`plant1 burst hit=0 after 15004ms`), and at the extreme it surfaces the
+exploit's own `timerqueue_del` → `rb_next` race. Both reproduce at ~10 % under
+heavy oversubscription and at 0/40 when the host is not oversubscribed, on
+`spinel` as well as `brussels`, so they are pre-existing timing behaviour of
+the exploit rather than anything a profile controls. The harness retries F11
+once and records both outcomes in `f11_attempts`; the single retry in this
+run was the tegu 16K profile, which then passed.
+
+F2's `slabinfo` lines are now confirmed for every profile that has an image.
+F12 and F13 stay pending because the QEMU initramfs has neither an SELinux
+policy nor KernelSU; those two are the remaining gates that a device has to
+supply.
 
 ### What has been verified without a device
 
@@ -560,6 +630,11 @@ already derived twice from the image: once from the struct sizes + the
   the *voted base* with that range (`plant_base()` then maps the vote through
   `g_slide`), so the profiles were fine and the check was fixed.
 - The aarch64 build is clean with the NDK (`-static -O2 -pthread -Wall`).
+- The shipped aarch64 binary itself now runs: F7–F11 pass on all 18 profiles
+  that have a factory Image, in `qemu-system-aarch64` at the profile's page
+  size. That includes the four Redmi Note 15/17 standalone-payload variants
+  and the first 16K boot. See the F14 section above for the per-profile
+  table and the two boot parameters the harness has to derive.
 
 ### Known follow-ups
 
@@ -567,6 +642,21 @@ already derived twice from the image: once from the struct sizes + the
   `…-abogki561813157` profile; they were checked to be the same payload rather
   than given their own confs.
 - Running F7–F13 on one device per family would let the rows move from
-  `untested` to `tested`. This now includes the four Redmi Note 15/17
+  `verified in QEMU` to `tested`. This now includes the four Redmi Note 15/17
   standalone-payload variants (three 4G, plus the 5G `brussels`), whose
-  profiles are derived but have not run on hardware.
+  profiles are derived and pass F7–F11 in QEMU but have not run on hardware.
+- The QEMU harness cannot cover F12/F13: it has no SELinux policy and no
+  KernelSU. F12 needs a device whose policy actually enforces, and F13 needs
+  a working KSU installation for the matching `ksu_kmi`.
+- Four confs are imported OPPO/realme profiles with no factory artifact in
+  the workspace (`6.12.58-…-ab15213644-4k`,
+  `6.12.69-…-g242e1a07f878-ab15865446-4k`,
+  `6.6.118-…-g9bc34d5b0c79-abogki537459655-4k`,
+  `6.6.66-…-abogki428889875-4k`). One was derived from a device dump, so
+  there is no image to boot and the QEMU pass cannot reach them. Fetching
+  the vendor `boot.img` would let them join the run.
+- The dirty Meizu 21 Pro/22 confs have no factory artifacts in the workspace
+  either. They now pass the F6 invariants (`validate_conf.py` applies
+  `conf_defaults()` instead of demanding every field be written out), but
+  there is no vmlinux to cross-check their symbols against, so their F2/F3
+  rows remain unverified.

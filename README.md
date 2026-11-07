@@ -174,6 +174,15 @@ every profile below; the app selects the `conf/*.conf` that matches the running
 kernel release and userspace page size, and refuses to run when nothing
 matches.
 
+Status legend:
+
+- **tested** — run on physical hardware.
+- **verified in QEMU** — the shipped aarch64 binary ran against that factory
+  kernel under `qemu-system-aarch64`, through `target`, `ids`, `probe`, `leak`
+  and `verify` (F7–F11). The kernel is the real one; the userspace, SELinux
+  policy and KernelSU are not, so this does not replace a hardware run.
+- **untested** — derived from the factory image only.
+
 ### 6.1.162 (4K and 16K)
 
 `6.1.162-android14-11-g9dd05ae3a1de-ab16261587`, the GKI kernel shipped in the
@@ -181,28 +190,29 @@ matches.
 table ships that exact kernel payload.
 
 **Only the Pixel 7a and Pixel 9a have actually been run on hardware.**
-Everything else in this table ships the same kernel and is expected to work,
-but has not been run, so treat it as untested.
+Everything else in this table ships the same kernel and is expected to work;
+the 4K and 16K profiles both pass F7–F11 under QEMU, but no other device in
+this table has been run on hardware.
 
 | Device | Codename | Factory build | Status |
 |---|---|---|---|
-| Pixel 6 | `oriole` | `CP3A.261005.002.A1` | untested |
-| Pixel 6 Pro | `raven` | `CP3A.261005.002.A1` | untested |
-| Pixel 6a | `bluejay` | `CP3A.261005.002.A1` | untested |
-| Pixel 7 | `panther` | `CP3A.261005.002.A1` | untested |
-| Pixel 7 Pro | `cheetah` | `CP3A.261005.002.A1` | untested |
+| Pixel 6 | `oriole` | `CP3A.261005.002.A1` | verified in QEMU |
+| Pixel 6 Pro | `raven` | `CP3A.261005.002.A1` | verified in QEMU |
+| Pixel 6a | `bluejay` | `CP3A.261005.002.A1` | verified in QEMU |
+| Pixel 7 | `panther` | `CP3A.261005.002.A1` | verified in QEMU |
+| Pixel 7 Pro | `cheetah` | `CP3A.261005.002.A1` | verified in QEMU |
 | **Pixel 7a** | `lynx` | `CP3A.261005.002.A1` | **tested** |
-| Pixel Fold | `felix` | `CP3A.261005.002.A1` | untested |
-| Pixel Tablet | `tangorpro` | `CP3A.261005.002.A1` | untested |
-| Pixel 8 | `shiba` | `CP3A.261005.005` | untested |
-| Pixel 8 Pro | `husky` | `CP3A.261005.005` | untested |
-| Pixel 8a | `akita` | `CP3A.261005.005` | untested |
-| Pixel 9 | `tokay` | `CP3A.261005.005` | untested |
-| Pixel 9 Pro | `caiman` | `CP3A.261005.005` | untested |
-| Pixel 9 Pro XL | `komodo` | `CP3A.261005.005` | untested |
-| Pixel 9 Pro Fold | `comet` | `CP3A.261005.005` | untested |
+| Pixel Fold | `felix` | `CP3A.261005.002.A1` | verified in QEMU |
+| Pixel Tablet | `tangorpro` | `CP3A.261005.002.A1` | verified in QEMU |
+| Pixel 8 | `shiba` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 8 Pro | `husky` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 8a | `akita` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 9 | `tokay` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 9 Pro | `caiman` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 9 Pro XL | `komodo` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 9 Pro Fold | `comet` | `CP3A.261005.005` | verified in QEMU |
 | **Pixel 9a** | `tegu` | `CP3A.261005.005` | **tested** |
-| Pixel 10a | `stallion` | `CP3A.261005.005` | untested |
+| Pixel 10a | `stallion` | `CP3A.261005.005` | verified in QEMU |
 
 Every factory image in this table contains the same kernel payload: the 4K
 `boot.img` kernel is byte-identical (16,637,222 bytes) across all 17 devices,
@@ -225,16 +235,17 @@ series in the same `CP3A.261005.005` build number. The profile is
 
 | Device | Codename | Status |
 |---|---|---|
-| **Pixel 10** | `frankel` | **verified in QEMU** |
-| **Pixel 10 Pro** | `blazer` | **verified in QEMU** |
-| **Pixel 10 Pro XL** | `mustang` | **verified in QEMU** |
-| **Pixel 10 Pro Fold** | `rango` | **verified in QEMU** |
+| Pixel 10 | `frankel` | verified in QEMU |
+| Pixel 10 Pro | `blazer` | verified in QEMU |
+| Pixel 10 Pro XL | `mustang` | verified in QEMU |
+| Pixel 10 Pro Fold | `rango` | verified in QEMU |
 
 All four factory images contain a byte-identical kernel payload (36,866,560
 bytes, SHA-256 `0226c3be4224b02884d4f9b332aee58ec06c65b2263265e80f2498332ef15c06`),
 so one profile covers all of them. The 6.6 profile was verified end-to-end
 (`timer verify` and `timer fake`) in a QEMU VM booting the factory kernel; it
-has not been flashed on physical Pixel 10 hardware yet.
+has not been flashed on physical Pixel 10 hardware yet. The 2026-11 mass run
+re-ran it from the factory `boot.img` and it passes F7–F11.
 
 ### 6.12.69 (4K) — Pixel 11 series
 
@@ -244,10 +255,10 @@ has not been flashed on physical Pixel 10 hardware yet.
 
 | Device | Codename | Factory build | Status |
 |---|---|---|---|
-| Pixel 11 | `cubs` | `CD1A.261005.003` | untested |
-| Pixel 11 Pro | `grizzly` | `CD1A.261005.003` | untested |
-| Pixel 11 Pro XL | `kodiak` | `CD1A.261005.003` | untested |
-| Pixel 11 Pro Fold | `yogi` | `CD1A.261005.003` | untested |
+| Pixel 11 | `cubs` | `CD1A.261005.003` | verified in QEMU |
+| Pixel 11 Pro | `grizzly` | `CD1A.261005.003` | verified in QEMU |
+| Pixel 11 Pro XL | `kodiak` | `CD1A.261005.003` | verified in QEMU |
+| Pixel 11 Pro Fold | `yogi` | `CD1A.261005.003` | verified in QEMU |
 
 All four images (and both build suffixes) carry a byte-identical kernel payload
 (SHA-256 `4417511834260f72c1b6a5bb9b9f809dfb6734b20fd7e8aa156c3c1f91f0f97b`),
@@ -259,8 +270,8 @@ so one profile covers them. This is the only profile in this repository whose
 
 | Device | Codename | Factory build | Profile | Status |
 |---|---|---|---|---|
-| Redmi Note 15 Pro+ 5G | `flourite` | `OS3.0.318.0.WPRCNXM` | `conf/6.1.138-android14-11-g0c3d559bcd85-ab14529422.conf` | untested |
-| Redmi Note 15 Pro 5G | `lapis` | `OS3.0.309.0.WPPCNXM` | `conf/6.1.138-android14-11-g51f8c580613d-ab13911623.conf` | untested |
+| Redmi Note 15 Pro+ 5G | `flourite` | `OS3.0.318.0.WPRCNXM` | `conf/6.1.138-android14-11-g0c3d559bcd85-ab14529422.conf` | verified in QEMU |
+| Redmi Note 15 Pro 5G | `lapis` | `OS3.0.309.0.WPPCNXM` | `conf/6.1.138-android14-11-g51f8c580613d-ab13911623.conf` | verified in QEMU |
 
 These two share the 6.1 `__pi_` VA layout (`0xffffffc008…`) and the 4-byte
 `cred.usage` that shifts the whole fake cred, but they are **different kernel
@@ -273,10 +284,10 @@ the tested 6.1.162 Pixel profile.
 
 | Device | Codename | Factory build | Profile | Status |
 |---|---|---|---|---|
-| Xiaomi 15 | `dada` | `OS3.0.307.0.WOCCNXM` | `conf/6.6.118-android15-8-gc44b714366cc-abogki519650608-4k.conf` | untested |
-| Redmi Note 15 5G | `kunzite` | `OS3.0.304.0.WPQCNXM` | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | untested |
-| Redmi Note 17 5G | `mist` | `OS3.0.311.0.WPUCNXM` | `conf/6.6.118-android15-8-g666ad52b8230-ab15657065-4k.conf` | untested |
-| Redmi Note 17 Pro 5G | `iolite` | `OS3.0.314.0.WDQCNXM` | `conf/6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k.conf` | untested |
+| Xiaomi 15 | `dada` | `OS3.0.307.0.WOCCNXM` | `conf/6.6.118-android15-8-gc44b714366cc-abogki519650608-4k.conf` | verified in QEMU |
+| Redmi Note 15 5G | `kunzite` | `OS3.0.304.0.WPQCNXM` | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | verified in QEMU |
+| Redmi Note 17 5G | `mist` | `OS3.0.311.0.WPUCNXM` | `conf/6.6.118-android15-8-g666ad52b8230-ab15657065-4k.conf` | verified in QEMU |
+| Redmi Note 17 Pro 5G | `iolite` | `OS3.0.314.0.WDQCNXM` | `conf/6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k.conf` | verified in QEMU |
 
 All four are 6.6 GKI kernels with only two distinct text layouts: dada and
 iolite share `do_timer_create` returning at `0xffffffc080195d94`, kunzite and
@@ -303,10 +314,10 @@ size of `0x1200`.
 
 | Device | Codename | Factory build | Kernel | Profile | Status |
 |---|---|---|---|---|---|
-| Redmi Note 15 4G | `spinel` | `OS3.0.303.0.WPGMIXM` | `6.12.69-…-ab15889839-4k` | `conf/6.12.69-android16-6-g014ca48a80ee-ab15889839-4k.conf` | untested |
-| Redmi Note 15 Pro 4G | `charoite` | `OS3.0.304.0.WPFMIXM` | `6.12.30-…-ab13847919-4k` | `conf/6.12.30-android16-5-g6e872b4863d6-ab13847919-4k.conf` | untested |
-| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | `5.15.194-…-ab15004895` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | untested |
-| Redmi Note 17 Pro Max 5G | `brussels` | `OS3.0.311.0.WDRMIXM` | `6.12.69-…-abogki537510563-4k` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | untested |
+| Redmi Note 15 4G | `spinel` | `OS3.0.303.0.WPGMIXM` | `6.12.69-…-ab15889839-4k` | `conf/6.12.69-android16-6-g014ca48a80ee-ab15889839-4k.conf` | verified in QEMU |
+| Redmi Note 15 Pro 4G | `charoite` | `OS3.0.304.0.WPFMIXM` | `6.12.30-…-ab13847919-4k` | `conf/6.12.30-android16-5-g6e872b4863d6-ab13847919-4k.conf` | verified in QEMU |
+| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | `5.15.194-…-ab15004895` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | verified in QEMU |
+| Redmi Note 17 Pro Max 5G | `brussels` | `OS3.0.311.0.WDRMIXM` | `6.12.69-…-abogki537510563-4k` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | verified in QEMU |
 
 `spinel` and `brussels` share a kernel version but not a payload, so they have
 separate profiles. `charoite` is 6.12.30 and has no landlock cred blob
@@ -314,8 +325,8 @@ separate profiles. `charoite` is 6.12.30 and has no landlock cred blob
 4-byte `atomic_t`, `timer_alloc` is `0x108`, and it sets `pcp_free = 1` because
 5.15 frees the order-1 slab through the PCP lists (the same slabinfo gate as
 the 6.1 profiles). All four were checked for
-the `begin_new_exec()` call order (F1) and derive their constants from the
-factory `boot.img`/`vendor_boot.img`.
+the `begin_new_exec()` call order (F1), derive their constants from the
+factory `boot.img`/`vendor_boot.img`, and pass F7–F11 in QEMU.
 
 ### 6.12.69 (4K) — Xiaomi 17 series
 
@@ -328,11 +339,11 @@ confirm it is the same payload that profile was built from.
 
 | Device | Codename | Factory build | Kernel build | Status |
 |---|---|---|---|---|
-| Xiaomi 17 Pro Max | `popsicle` | `OS4.0.5.0.XPBCN` | `…-abogki558343811` | untested |
-| Xiaomi 17 | `pudding` | `OS4.0.5.0.XPCCNXM` | `…-abogki561813157` | untested |
-| Xiaomi 17 Pro | `pandora` | `OS4.0.5.0.XBLCNXM` | `…-abogki561813157` | untested |
-| Xiaomi 17 Ultra | `nezha` | `OS4.0.5.0.XPACNXM` | `…-abogki561813157` | untested |
-| Xiaomi 17 Max | `byron` | `OS4.0.3.0.XAFCNXM` | `…-abogki561813157` | untested |
+| Xiaomi 17 Pro Max | `popsicle` | `OS4.0.5.0.XPBCN` | `…-abogki558343811` | verified in QEMU |
+| Xiaomi 17 | `pudding` | `OS4.0.5.0.XPCCNXM` | `…-abogki561813157` | verified in QEMU |
+| Xiaomi 17 Pro | `pandora` | `OS4.0.5.0.XBLCNXM` | `…-abogki561813157` | verified in QEMU |
+| Xiaomi 17 Ultra | `nezha` | `OS4.0.5.0.XPACNXM` | `…-abogki561813157` | verified in QEMU |
+| Xiaomi 17 Max | `byron` | `OS4.0.3.0.XAFCNXM` | `…-abogki561813157` | verified in QEMU |
 
 The `abogki561813157` payload is byte-identical (SHA-256
 `ed9e27aa606772d058684e023fcb2d3dca876505be90227cc8ca5e5d5b95622b`) on
@@ -342,10 +353,10 @@ pudding, pandora, nezha and byron.
 
 | Device | Codename | Factory build | Profile | Status |
 |---|---|---|---|---|
-| Xiaomi 18 Pro | `hongkong` | `OS4.0.29.0.XFRCN` | `conf/6.18.21-android17-5-g284297031c53-abogki555938958-4k.conf` | untested |
-| Xiaomi 18 Pro Max | `madrid` | `OS4.0.27.0.XEOCN` | same as above | untested |
-| Xiaomi 18 Fold | `lhasa` | `OS4.0.26.0.XPNCNXM` | `conf/6.18.21-android17-5-g805aa6adea19-abogki565292102-4k.conf` | untested |
-| Xiaomi Pad 9 Pro Max | `yingtian` | `OS4.0.16.0.XBMCNXM` | same as above | untested |
+| Xiaomi 18 Pro | `hongkong` | `OS4.0.29.0.XFRCN` | `conf/6.18.21-android17-5-g284297031c53-abogki555938958-4k.conf` | verified in QEMU |
+| Xiaomi 18 Pro Max | `madrid` | `OS4.0.27.0.XEOCN` | same as above | verified in QEMU |
+| Xiaomi 18 Fold | `lhasa` | `OS4.0.26.0.XPNCNXM` | `conf/6.18.21-android17-5-g805aa6adea19-abogki565292102-4k.conf` | verified in QEMU |
+| Xiaomi Pad 9 Pro Max | `yingtian` | `OS4.0.16.0.XBMCNXM` | same as above | verified in QEMU |
 
 hongkong and madrid share a byte-identical kernel payload (SHA-256
 `0a3cf0d220490927ce1ee9db380adfdd20930fc0e602b97dd652d610bbe9d3fe`); lhasa and
