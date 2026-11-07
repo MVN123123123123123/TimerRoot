@@ -472,7 +472,15 @@ public class AutoRootService extends Service {
         try {
             show("Auto-root", "restarting Android to load modules...");
             AutoRoot.stage(this, "Android is restarting with root; "
-                    + "this screen comes back by itself", AutoRoot.STAGE_RUNNING);
+                    + "it returns to the lock screen when done", AutoRoot.STAGE_RUNNING);
+            /*
+             * The completed result is on screen right now, so the user already
+             * knows the phone is rooted. After the userspace restart the device
+             * is back at the lock screen and the same boot id comes with it;
+             * record that so the resumed process does not show the finished
+             * page again and the user simply gets the lock screen.
+             */
+            AutoRoot.markBootUiSeen(this);
             AutoRoot.log(this, "soft restart: requesting userspace restart");
             String result = service.softRestart();
             AutoRoot.log(this, "soft restart: " + result);
@@ -481,16 +489,18 @@ public class AutoRootService extends Service {
                 /*
                  * Nothing was restarted, so put the success back: the stage is
                  * what the status screen reads. Free the claim so a restart can
-                 * still be requested by hand.
+                 * still be requested by hand, and let the screen show again
+                 * since the user never left it.
                  */
                 AutoRoot.releaseSoftRestart(this);
+                AutoRoot.clearBootUiSeen(this);
                 AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
             } else if (!result.endsWith("started")) {
                 /*
                  * The command was sent but the system did not visibly go down
-                 * within the probe window. Keep the claim (the restart may
-                 * still be in flight, and the resume path must not re-run the
-                 * exploit) but stop claiming progress on screen.
+                 * within the probe window. Keep the claim and the seen mark
+                 * (the restart may still be in flight, and the resume path must
+                 * not re-run the exploit) but stop claiming progress on screen.
                  */
                 AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
             }
@@ -831,7 +841,7 @@ public class AutoRootService extends Service {
                     .setCategory(Notification.CATEGORY_SERVICE)
                     .setVisibility(Notification.VISIBILITY_PUBLIC);
         }
-        if (AutoRoot.bootUiWanted(this)) {
+        if (AutoRoot.bootUiWanted(this) || AutoRoot.bootUiSkippedAfterRestart(this)) {
             builder.addAction(new Notification.Action.Builder(null, "Status",
                     BootStatusActivity.pendingIntent(this)).build());
         }

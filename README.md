@@ -592,7 +592,10 @@ a wait for nothing), when the user turned the toggle off, and on a second
 attempt in the same boot. The boot id survives a soft restart, so that guard is
 per real boot. After the restart the boot broadcasts arrive again; the receiver
 recognises them, never re-runs the exploit, and only brings Shizuku back and
-re-publishes the result, so the status screen shows **Root ready** again.
+re-publishes the result. The status screen is **not** shown again: it was
+already on screen when the restart was requested, so the resumed device simply
+returns to the lock screen, and only the notification is updated to **Jailbreak
+mode ready**.
 
 **Restart Android** next to the toggle does the same thing on demand, after a
 confirmation dialog, and also works after a manual **Load KernelSU**. It closes

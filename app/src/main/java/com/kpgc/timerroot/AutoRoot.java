@@ -45,6 +45,13 @@ final class AutoRoot {
     static final String KEY_BOOT_UI = "boot_ui";
     /** Boot id for which the user tapped Hide; suppresses re-showing it. */
     static final String KEY_BOOT_UI_HIDDEN_BOOT = "boot_ui_hidden_boot";
+    /**
+     * Boot id for which the status screen was already acknowledged by a
+     * restart: the completed result was on screen before the userspace
+     * restart, so the resumed system must not show it again. The boot id
+     * survives a soft restart, which is why this covers the resumed process.
+     */
+    static final String KEY_BOOT_UI_SEEN_BOOT = "boot_ui_seen_boot";
     /** Restart the Android userspace once KernelSU is loaded (modules apply). */
     static final String KEY_SOFT_RESTART = "soft_restart";
     /** Boot id for which the automatic soft restart was already triggered. */
@@ -270,26 +277,59 @@ final class AutoRoot {
         SharedPreferences.Editor editor = prefs(context).edit()
                 .putBoolean(KEY_BOOT_UI, enabled);
         if (enabled) {
-            // Turning it back on also clears a Hide from earlier this boot.
-            editor.putLong(KEY_BOOT_UI_HIDDEN_BOOT, Long.MIN_VALUE);
+            // Turning it back on also clears a Hide or a restart mark from
+            // earlier this boot.
+            editor.putLong(KEY_BOOT_UI_HIDDEN_BOOT, Long.MIN_VALUE)
+                    .remove(KEY_BOOT_UI_SEEN_BOOT);
         }
         editor.commit();
     }
 
     /**
-     * True when the status screen should be shown now: enabled and the user
-     * has not hidden it on this boot. Hide is per boot, so the next auto-root
-     * run may show it again.
+     * True when the status screen should be shown now: enabled, the user has
+     * not hidden it on this boot, and this boot's completed result has not
+     * already been acknowledged by a userspace restart. Hide and the restart
+     * mark are per boot, so the next auto-root run may show it again.
      */
     static boolean bootUiWanted(Context context) {
+        SharedPreferences prefs = prefs(context);
+        long boot = bootId();
         return bootUiEnabled(context)
-                && prefs(context).getLong(KEY_BOOT_UI_HIDDEN_BOOT, Long.MIN_VALUE)
-                != bootId();
+                && prefs.getLong(KEY_BOOT_UI_HIDDEN_BOOT, Long.MIN_VALUE) != boot
+                && prefs.getLong(KEY_BOOT_UI_SEEN_BOOT, Long.MIN_VALUE) != boot;
     }
 
     static void hideBootUi(Context context) {
         prefs(context).edit()
                 .putLong(KEY_BOOT_UI_HIDDEN_BOOT, bootId()).commit();
+    }
+
+    /**
+     * Records that the completed result was on screen before a userspace
+     * restart. The boot id survives the restart, so the resumed system sees
+     * this and keeps the status screen away: the user already saw that the
+     * phone is rooted and only gains a lock screen to unlock from here.
+     */
+    static void markBootUiSeen(Context context) {
+        prefs(context).edit()
+                .putLong(KEY_BOOT_UI_SEEN_BOOT, bootId()).commit();
+    }
+
+    /** Drops the mark when the restart did not actually happen. */
+    static void clearBootUiSeen(Context context) {
+        prefs(context).edit()
+                .remove(KEY_BOOT_UI_SEEN_BOOT).commit();
+    }
+
+    /**
+     * True when this boot's completed page was already seen and a userspace
+     * restart suppressed it. The notification keeps its explicit **Status**
+     * action in that case, so the user can still open the page on purpose.
+     */
+    static boolean bootUiSkippedAfterRestart(Context context) {
+        return bootUiEnabled(context)
+                && prefs(context).getLong(KEY_BOOT_UI_SEEN_BOOT, Long.MIN_VALUE)
+                == bootId();
     }
 
     /** Directory for the optional boot screen background, readable at BFU. */

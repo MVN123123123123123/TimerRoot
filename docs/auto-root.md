@@ -512,10 +512,17 @@ Behaviour:
 - A userspace restart re-sends `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED`
   while the exploit must not run again. The receiver detects
   `soft_restart_boot == bootId` and takes `ACTION_AFTER_RESTART` instead, which
-  only starts Shizuku and republishes `last_result`, so the status screen shows
-  the recorded outcome. `claimResumeAfterRestart()` makes sure only the first
-  of the two broadcasts acts, since which arrives first depends on the lock
-  state.
+  only starts Shizuku and republishes `last_result` in the notification.
+  `claimResumeAfterRestart()` makes sure only the first of the two broadcasts
+  acts, since which arrives first depends on the lock state. The status screen
+  is deliberately *not* brought back: the completed result was already on
+  screen (or in the notification) before the restart, and the device comes
+  back to the lock screen, so `maybeSoftRestart()` records
+  `boot_ui_seen_boot` for this boot id. `bootUiWanted()` returns false for the
+  resumed process, which keeps both `maybeShow()` and the full-screen intent
+  away while still updating the notification to **Jailbreak mode ready**. The
+  mark is cleared if the restart turns out to be unavailable, so the page can
+  still show when nothing happened.
 - The ADB starter command is the same one Shizuku uses:
   `<nativeLibraryDir>/libshizuku.so --apk=<base.apk>`, located with
   `pm path` so no package-visibility or cross-app file access is needed.
@@ -653,9 +660,12 @@ stage change, so the screen and the notification never disagree.
 
 A soft restart kills the activity with the rest of the app, and the resumed
 system re-sends `LOCKED_BOOT_COMPLETED` / `BOOT_COMPLETED`. The receiver takes
-the resume path, which republishes `last_result` and starts Shizuku, so the page
-comes back on its own already showing **Root ready** with an empty "completed"
-line. Nothing on the page says "restarting" after the fact: the stage text set
-just before the restart is replaced by the recorded result the moment the
-restarted process publishes it, and if the restart never begins the service
-restores the success text itself.
+the resume path, which republishes `last_result` and starts Shizuku. The page
+does **not** come back: the completed result was on screen before the restart,
+so the user already knows the phone is rooted and only needs the lock screen.
+`maybeSoftRestart()` records `boot_ui_seen_boot` for this boot id (which
+survives a userspace restart), `bootUiWanted()` then returns false, and both
+`maybeShow()` and the notification's full-screen intent stay away for the
+resumed process. The notification still becomes **Jailbreak mode ready**, so a
+pull-down is enough to confirm the outcome. If the restart turns out to be
+unavailable, the mark is cleared and the success page stays visible.
