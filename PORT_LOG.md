@@ -168,7 +168,7 @@ for the Pixel 11), so those caches are bigger:
 | 6.1 | `0x12c0` | — | `0x12c0` |
 | 6.6 | `0x12c0` | none in image | `0x12c0` |
 | 6.18 | `0x1280` | `1024` | `0x1680` |
-| 6.12 4G (spinel/charoite/brussels) | `0x1440` | `512` | `0x1640` |
+| 6.12 4G/5G (spinel/charoite/brussels) | `0x1440` | `512` | `0x1640` |
 | 6.12 popsicle | `0x1440` | `1024` | `0x1840` |
 | 6.12 Pixel 11 | `0x1440` | `784` | `0x1750` |
 
@@ -410,10 +410,11 @@ the `do_timer_create` call sites differ, which is exactly the kind of near-miss
 
 ---
 
-## Redmi Note 15/17 4G variants
+## Redmi Note 15/17 standalone-payload variants
 
-Four devices, four distinct kernel payloads. All are 4K-page builds and all
-were checked for the F1 vulnerability (`posix_cpu_timers_exit` before
+Four devices, four distinct kernel payloads. Three are 4G models; `brussels` is
+the 5G Redmi Note 17 Pro Max. All are 4K-page builds and all were checked for
+the F1 vulnerability (`posix_cpu_timers_exit` before
 `exit_itimers` in `begin_new_exec`). The three 6.12 images carry
 `android_arch_task_struct_size=512` in their vendor `dtb`/bootconfig, so
 `task_struct_vendor_size_setup()` computes `0x1440 + 0x200 = 0x1640`; the 5.15
@@ -503,7 +504,7 @@ image has no vendor-size setup and keeps `0x1200`.
 
 ### brussels — `6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k`
 
-- **F1** `brussels` (Redmi Note 17 Pro Max) `OS3.0.311.0.WDRMIXM`. 4K pages.
+- **F1** `brussels` (Redmi Note 17 Pro Max 5G) `OS3.0.311.0.WDRMIXM`. 4K pages.
 - **F2** kernel `sha256 604c9daab8b9f9889a23b31659f8f9f5e3488350218a3fa88c84e192f0460c3b`;
   133 582 symbols; BTF present.
 - **F3** `init_posix_timers` → cache `size=0x100`; `alloc_posix_timer` →
@@ -566,5 +567,6 @@ already derived twice from the image: once from the struct sizes + the
   `…-abogki561813157` profile; they were checked to be the same payload rather
   than given their own confs.
 - Running F7–F13 on one device per family would let the rows move from
-  `untested` to `tested`. This now includes the four Redmi Note 15/17 4G
-  variants, whose profiles are derived but have not run on hardware.
+  `untested` to `tested`. This now includes the four Redmi Note 15/17
+  standalone-payload variants (three 4G, plus the 5G `brussels`), whose
+  profiles are derived but have not run on hardware.

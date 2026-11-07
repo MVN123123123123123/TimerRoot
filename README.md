@@ -113,8 +113,9 @@ it.
 The bundled `conf/` covers the 6.1.162 profiles (4K and 16K), the 6.6.127
 Pixel 10 profile, a 6.12.69 Pixel 11 profile, the 6.1.138 / 6.6.118 / 6.12.69 /
 6.18.21 profiles for the Xiaomi 15/17/18 and Redmi Note 15/17 families, the
-6.12.30 / 6.12.69 / 5.15.194 profiles for the Redmi Note 15/17 4G variants,
-and vendor profiles for other devices carried over from `rikumi/TimerRoot`. See
+6.12.30 / 6.12.69 / 5.15.194 profiles for the Redmi Note 15/17 models that
+ship standalone payloads, and vendor profiles for other devices carried over
+from `rikumi/TimerRoot`. See
 [Credits](#credits) for where each profile came from.
 
 The binary is not committed (`assets/timer` is gitignored). Build it and drop it
@@ -287,10 +288,11 @@ is titled "dada" but was built for
 `6.6.118-…-gb9cc6ec16bc8-abogki536571621`, i.e. this repository's **iolite**.
 The kernel payload hashes match; the name in that project is a misnomer.
 
-### 4G variants (6.12.30, 6.12.69, 5.15.194) — Redmi Note 15/17
+### Standalone-payload variants (6.12.30, 6.12.69, 5.15.194) — Redmi Note 15/17
 
-The four 4G models do not ship the GKI payloads above, so each has its own
-profile. All are 4K-page builds. The three 6.12 kernels carry
+These four models do not ship the shared payloads above, so each has its own
+profile. Three are 4G models; `brussels` is the 5G Redmi Note 17 Pro Max. All
+are 4K-page builds. The three 6.12 kernels carry
 `android_arch_task_struct_size=512` in their vendor boot configuration, so
 `task_alloc_bytes` is `0x1440 + 0x200 = 0x1640`; zephyr is the repository's
 only 5.15 profile, has no vendor-size extension, and keeps the `fork_init()`
@@ -301,7 +303,7 @@ size of `0x1200`.
 | Redmi Note 15 4G | `spinel` | `OS3.0.303.0.WPGMIXM` | `6.12.69-…-ab15889839-4k` | `conf/6.12.69-android16-6-g014ca48a80ee-ab15889839-4k.conf` | untested |
 | Redmi Note 15 Pro 4G | `charoite` | `OS3.0.304.0.WPFMIXM` | `6.12.30-…-ab13847919-4k` | `conf/6.12.30-android16-5-g6e872b4863d6-ab13847919-4k.conf` | untested |
 | Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | `5.15.194-…-ab15004895` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | untested |
-| Redmi Note 17 Pro Max | `brussels` | `OS3.0.311.0.WDRMIXM` | `6.12.69-…-abogki537510563-4k` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | untested |
+| Redmi Note 17 Pro Max 5G | `brussels` | `OS3.0.311.0.WDRMIXM` | `6.12.69-…-abogki537510563-4k` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | untested |
 
 `spinel` and `brussels` share a kernel version but not a payload, so they have
 separate profiles. `charoite` is 6.12.30 and has no landlock cred blob
