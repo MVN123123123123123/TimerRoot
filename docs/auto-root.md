@@ -438,13 +438,14 @@ Files:
 
 | File | Purpose |
 | --- | --- |
-| `BootReceiver.java` | `directBootAware`; `LOCKED_BOOT_COMPLETED` starts Shizuku early and runs the exploit at BFU, `BOOT_COMPLETED` only retries when the BFU attempt failed before the exploit. |
-| `AutoRootService.java` | `specialUse` FGS state machine: at locked boot reuse/start Shizuku → bind at BFU → install asset → check `target=lynx` → `openRoot()` → `timer fake` → `keepPermissive()`. Stays alive after success so the root shell survives. |
+| `BootReceiver.java` | `directBootAware`; `LOCKED_BOOT_COMPLETED` starts Shizuku early and runs the exploit at BFU, `BOOT_COMPLETED` only retries when the BFU attempt failed before the exploit. After a soft restart both broadcasts only resume Shizuku and republish the result. |
+| `AutoRootService.java` | `specialUse` FGS state machine: at locked boot reuse/start Shizuku → bind at BFU → install asset → check `target=lynx` → `openRoot()` → `timer fake` → `keepPermissive()` → `ksud soft-reboot`. Stays alive after success so the root shell survives. |
 | `RestartJobService.java` | Fallback binder-push restart when the server is up but its binder never arrived (used after unlock, not at BFU). |
 | `AutoRoot.java` | Device-protected prefs, per-boot and restart guards, key pair, rotating log. |
 | `AdbKey.java` | RSA 2048 generation and the exact 524-byte public blob / key line. |
 | `AdbLocal.java` | CNXN/AUTH/OPEN/WRTE/CLSE only; no TLS, mDNS or pairing. |
-| `MainActivity` | Auto-root toggle, notification permission, "Install channel", "Run auto-root now", log viewer. |
+| `MainActivity` | Home tab (status, root/KernelSU actions, device details, update banner), Log tab, and a Settings tab for Shizuku, the exploit binary, auto-root, the boot screen, restarts and update checks. |
+| `UpdateChecker.java` | Reads the `TimerRoot.apk` asset's `versionCode` from the GitHub releases API and caches the result; never installs anything. |
 | `p7a/timer_p7a.c` | Adds the `permissive` mode: one plant writes `selinux_state`, retried three times. |
 
 Behaviour:
@@ -495,6 +496,26 @@ Behaviour:
   `setenforce 0` because the module forces enforcing back ~0.4 s after load.
   A KernelSU failure keeps the working root shell and is reported as
   `root shell ready; KernelSU failed: ...`.
+- Soft restart after success (`softRestart()` in `UserService`, driven by
+  `maybeSoftRestart()`). A late-loaded module is in the kernel but its boot
+  stages never ran, so its mounts and Zygisk are missing until a real reboot.
+  The service ends the run with `ksud soft-reboot`, which is exactly what the
+  manager's *soft reboot* button does: reset `sys.boot_completed`, run the
+  `emulated-soft-reboot` stage scripts, `stop`, `start`, then replay
+  `post-fs-data` / `services` / `boot-completed`. The kernel never goes down,
+  so `su` keeps returning `u:r:ksu:s0`, the module stays loaded and the parked
+  exploit processes stay parked. It runs only after a successful late-load
+  (`KernelSU active`), once per real boot: `soft_restart_boot` stores the boot
+  id, which survives a userspace restart, so the resumed system cannot loop.
+  A missing `soft-reboot` subcommand (KernelSU < 3.x) is logged and the claim is
+  released; the success stays valid.
+- A userspace restart re-sends `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED`
+  while the exploit must not run again. The receiver detects
+  `soft_restart_boot == bootId` and takes `ACTION_AFTER_RESTART` instead, which
+  only starts Shizuku and republishes `last_result`, so the status screen shows
+  the recorded outcome. `claimResumeAfterRestart()` makes sure only the first
+  of the two broadcasts acts, since which arrives first depends on the lock
+  state.
 - The ADB starter command is the same one Shizuku uses:
   `<nativeLibraryDir>/libshizuku.so --apk=<base.apk>`, located with
   `pm path` so no package-visibility or cross-app file access is needed.
@@ -562,3 +583,79 @@ for: a plant missed its burst (`burst hit=0`) and parked. The second attempt
 hit both plants and loaded the module. Both attempts' parked processes stay
 alive until the next reboot, by design.
 
+
+---
+
+## Boot status screen (BFU)
+
+The boot path can display a full-screen status page while it runs, so the
+user can see whether auto-root is still working or already done without
+unlocking. It is implemented as `BootStatusActivity`, a `directBootAware`
+activity with `showWhenLocked` and `turnScreenOn`, and it reads all of its
+state from device-protected storage.
+
+What it shows:
+
+- a self-drawn animated gradient background, a still-image slideshow, or a
+  muted looping video copied by the user into
+  `files/bootui/background.video` / `background.image0`;
+- a spinner while running, a green check on success, a red cross on failure;
+- the current stage (`starting Shizuku...`, `running the exploit...`,
+  `loading KernelSU... 20s`, ...) and how long that stage has been running;
+- a short hint that unlocking is allowed at any time, plus **Hide** and
+  **Open TimerRoot** actions.
+
+### How it gets on screen
+
+Android blocks background activity starts. Two exemptions are used:
+
+1. **Full-screen intent** (primary). The ongoing notification lives on a
+   separate high-importance, silent channel and carries
+   `setFullScreenIntent(BootStatusActivity.pendingIntent(this), true)`.
+   Android 14+ gates this behind the `USE_FULL_SCREEN_INTENT` app-op and the
+   *full-screen notifications* special access; before 14 the permission is
+   granted at install.
+2. **Display over other apps** (opportunistic). `SYSTEM_ALERT_WINDOW` is a
+   background-activity-launch exemption, so `maybeShow()` can call
+   `startActivity` directly. Newer releases may still refuse this, which is
+   why the full-screen intent is the real path.
+
+`AutoRootService` grants both app-ops from its own uid-0 shell after
+`openRoot()` succeeds (`appops set com.kpgc.timerroot ... allow`). The same
+commands run from **Install channel**, and **Allow overlay** / **Full-screen**
+open the corresponding Settings pages for the first run. Without either
+access the ordinary progress notification remains the fallback; auto-root
+itself does not depend on the screen.
+
+### State transport
+
+`AutoRoot.stage()` / `stageText()` / `stageTime()` / `stageState()` keep the
+current line, timestamp and 0/1/-1 state in the `auto_root` device-protected
+SharedPreferences. The service publishes with `commit()` (the activity polls
+every 500 ms) and `AutoRootService.show()` / `finish()` update it on every
+stage change, so the screen and the notification never disagree.
+
+### Limits
+
+- This is not a replacement for `/system/media/bootanimation.zip`: that file
+  lives on a read-only partition, and AOSP's boot animation only reads
+  `/product`, `/system`, `/oem` and `/apex` paths.
+- It cannot be a true live wallpaper over the keyguard; the activity paints
+  its own background instead.
+- It appears when TimerRoot's process starts (`LOCKED_BOOT_COMPLETED`), not
+  during the kernel/init boot animation.
+- It never traps the user: `Hide` finishes the activity and returns to the
+  keyguard (so a PIN or pattern can be entered), biometric unlock works while
+  it is visible, and after a terminal state on an unlocked device it closes
+  itself after ~6 s.
+
+### Across a soft restart
+
+A soft restart kills the activity with the rest of the app, and the resumed
+system re-sends `LOCKED_BOOT_COMPLETED` / `BOOT_COMPLETED`. The receiver takes
+the resume path, which republishes `last_result` and starts Shizuku, so the page
+comes back on its own already showing **Root ready** with an empty "completed"
+line. Nothing on the page says "restarting" after the fact: the stage text set
+just before the restart is replaced by the recorded result the moment the
+restarted process publishes it, and if the restart never begins the service
+restores the success text itself.

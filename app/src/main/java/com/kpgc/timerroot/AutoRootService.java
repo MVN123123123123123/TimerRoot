@@ -15,6 +15,7 @@ import android.os.PowerManager;
 
 import java.security.KeyPair;
 import java.security.interfaces.RSAPublicKey;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -41,8 +42,16 @@ public class AutoRootService extends Service {
     static final String ACTION_STOP = "com.kpgc.timerroot.AUTOROOT_STOP";
     static final String ACTION_RUN_NOW = "com.kpgc.timerroot.AUTOROOT_RUN_NOW";
     static final String ACTION_PRESTART = "com.kpgc.timerroot.AUTOROOT_PRESTART";
+    /**
+     * Sent after a userspace restart: root is already in the kernel, so this
+     * only brings Shizuku back and republishes the result. It must never run
+     * the exploit again.
+     */
+    static final String ACTION_AFTER_RESTART = "com.kpgc.timerroot.AUTOROOT_AFTER_RESTART";
 
     private static final String CHANNEL = "auto_root";
+    /** High-importance channel so the status notification may use a full-screen intent. */
+    private static final String CHANNEL_BOOT = "auto_root_boot";
     private static final int NOTIFICATION_ID = 41;
     private static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
 
@@ -77,6 +86,7 @@ public class AutoRootService extends Service {
          * exactly as it is.
          */
         if (!ACTION_RUN_NOW.equals(action)
+                && !ACTION_AFTER_RESTART.equals(action)
                 && AutoRoot.isBootClaimed(this)
                 && !AutoRoot.hasPendingRestart(this)) {
             AutoRoot.log(this, "already attempted this boot, ignoring " + action);
@@ -85,12 +95,31 @@ public class AutoRootService extends Service {
             }
             return START_NOT_STICKY;
         }
-        startForeground(NOTIFICATION_ID, notification(
-                "Auto-root", "preparing...", true));
-        foregroundStarted = true;
-
         final boolean force = ACTION_RUN_NOW.equals(action);
         final boolean prestart = ACTION_PRESTART.equals(action);
+        final boolean afterRestart = ACTION_AFTER_RESTART.equals(action);
+        /*
+         * The resume path republishes the recorded result immediately, so it
+         * must not reset the stage to "waiting" or replace the outcome text
+         * with "preparing...".
+         */
+        boolean bootUi = AutoRoot.bootUiWanted(this) && !afterRestart;
+        if (bootUi) {
+            AutoRoot.stage(this, "waiting for the boot…", AutoRoot.STAGE_RUNNING);
+        }
+        startForeground(NOTIFICATION_ID, notification(
+                "Auto-root", afterRestart ? "restored" : "preparing...", true, bootUi));
+        foregroundStarted = true;
+        /*
+         * Attach the status screen through the overlay exemption when it is
+         * available. On Android 15+ this background start may be refused, in
+         * which case the full-screen intent on the notification is the path
+         * that actually shows it. Both are opportunistic and harmless.
+         */
+        if (AutoRoot.bootUiWanted(this) && !ACTION_RUN_NOW.equals(action)) {
+            BootStatusActivity.maybeShow(this);
+        }
+
         synchronized (this) {
             Thread previous = worker;
             Thread next = new Thread(() -> {
@@ -104,12 +133,37 @@ public class AutoRootService extends Service {
                 if (prestart) {
                     startShizukuEarly();
                 }
-                run(force);
+                if (afterRestart) {
+                    resumeAfterRestart();
+                } else {
+                    run(force);
+                }
             }, "auto-root");
             next.start();
             worker = next;
         }
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Post-soft-restart re-entry: the module is already in the kernel and the
+     * exploit must not run again (its parked processes are gone from the
+     * process table, but the boot claim still holds). All that is missing
+     * after a userspace restart is Shizuku, so start it and republish the
+     * previous success.
+     */
+    private void resumeAfterRestart() {
+        String last = AutoRoot.lastResult(this);
+        AutoRoot.log(this, "after restart: last result=" + summary(last));
+        AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
+        if (!AutoRoot.isEnabled(this)) {
+            finish("Auto-root is off", "Enable it in TimerRoot first.", false);
+            return;
+        }
+        startShizukuEarly();
+        finish(last.contains("KernelSU active")
+                        ? "Jailbreak mode ready" : "Root shell ready",
+                last, true);
     }
 
     @Override
@@ -246,6 +300,14 @@ public class AutoRootService extends Service {
             finish(ksu ? "Jailbreak mode ready" : "Root shell ready",
                     ksu ? "KernelSU late-loaded; su works in u:r:ksu:s0."
                             : summary(result), true);
+            if (ksu && userService != null) {
+                /*
+                 * Last step, and deliberately after record() + finish(): the
+                 * restart kills this process, so the outcome must already be
+                 * on disk for the status screen and the restarted system.
+                 */
+                maybeSoftRestart(userService);
+            }
         } else {
             stopForeground(STOP_FOREGROUND_DETACH);
             finish("Auto-root failed", summary(result), false);
@@ -370,7 +432,76 @@ public class AutoRootService extends Service {
          */
         AutoRoot.log(this, "root shell ready; loading KernelSU");
         show("Auto-root", "loading KernelSU...");
-        return "root shell ready; " + loadKernelSu(service);
+        String ksu = loadKernelSu(service);
+        boolean loaded = ksu.startsWith("KernelSU active");
+        /*
+         * The boot status screen needs either "display over other apps" or
+         * the "full-screen notifications" special access. Both are app-ops
+         * that a shell-domain root can grant without touching the UI, so
+         * take them now (after the time-sensitive KernelSU stage); the user
+         * can still revoke them in Settings. Install channel does the same, so
+         * the first boot after setup already has them.
+         */
+        AutoRoot.log(this, "boot UI grants: "
+                + tail(service.execRoot(grantBootUiAccess())));
+        return "root shell ready; " + ksu;
+    }
+
+    /**
+     * Restarts the Android userspace after a successful late-load, so the
+     * just-loaded module runs its boot stages and Zygisk - what the manager's
+     * "soft reboot" button does. The kernel keeps KernelSU loaded, so su
+     * survives; only the app processes are replaced.
+     *
+     * A soft restart throws this process away, so it must run last, after the
+     * result is already recorded and published. Skipped when the user turned
+     * it off, when a previous attempt this boot already did it, or when
+     * KernelSU did not load - restarting without a module would only cost the
+     * user a wait.
+     */
+    private void maybeSoftRestart(IUserService service) {
+        if (!AutoRoot.softRestartEnabled(this)) {
+            AutoRoot.log(this, "soft restart disabled");
+            return;
+        }
+        if (!AutoRoot.claimSoftRestart(this)) {
+            AutoRoot.log(this, "soft restart already done this boot");
+            return;
+        }
+        String last = AutoRoot.lastResult(this);
+        try {
+            show("Auto-root", "restarting Android to load modules...");
+            AutoRoot.stage(this, "Android is restarting with root; "
+                    + "this screen comes back by itself", AutoRoot.STAGE_RUNNING);
+            AutoRoot.log(this, "soft restart: requesting userspace restart");
+            String result = service.softRestart();
+            AutoRoot.log(this, "soft restart: " + result);
+            if (result.startsWith("soft restart unavailable")
+                    || result.startsWith("soft restart failed")) {
+                /*
+                 * Nothing was restarted, so put the success back: the stage is
+                 * what the status screen reads. Free the claim so a restart can
+                 * still be requested by hand.
+                 */
+                AutoRoot.releaseSoftRestart(this);
+                AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
+            } else if (!result.endsWith("started")) {
+                /*
+                 * The command was sent but the system did not visibly go down
+                 * within the probe window. Keep the claim (the restart may
+                 * still be in flight, and the resume path must not re-run the
+                 * exploit) but stop claiming progress on screen.
+                 */
+                AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
+            }
+        } catch (Throwable t) {
+            /*
+             * Expected: "stop" kills this process, so the binder call dies
+             * mid-flight. Anything else means the restart did not start, and
+             * the root shell is still valid.
+             */
+            AutoRoot.log(this, "soft restart call ended: " + t);
+        }
     }
 
     /** How many times the racy late-load stage may be replanted. */
@@ -664,15 +795,30 @@ public class AutoRootService extends Service {
         channel.enableVibration(false);
         channel.setShowBadge(false);
         manager.createNotificationChannel(channel);
+
+        /*
+         * A full-screen intent is only honoured from a high-importance
+         * channel. Keep it silent: the screen is the point, not the alert.
+         */
+        NotificationChannel boot = new NotificationChannel(CHANNEL_BOOT,
+                "Boot status screen", NotificationManager.IMPORTANCE_HIGH);
+        boot.setDescription("Shows the auto-root progress over the lock screen");
+        boot.setSound(null, null);
+        boot.enableVibration(false);
+        boot.setShowBadge(false);
+        boot.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        manager.createNotificationChannel(boot);
     }
 
-    private Notification notification(String title, String text, boolean ongoing) {
+    private Notification notification(String title, String text, boolean ongoing,
+                                      boolean fullScreen) {
         PendingIntent open = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                                 | Intent.FLAG_ACTIVITY_CLEAR_TOP),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder builder = new Notification.Builder(this, CHANNEL)
+        Notification.Builder builder = new Notification.Builder(this,
+                fullScreen ? CHANNEL_BOOT : CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle(title)
                 .setContentText(text)
@@ -680,6 +826,15 @@ public class AutoRootService extends Service {
                 .setContentIntent(open)
                 .setOnlyAlertOnce(true)
                 .setOngoing(ongoing);
+        if (fullScreen) {
+            builder.setFullScreenIntent(BootStatusActivity.pendingIntent(this), true)
+                    .setCategory(Notification.CATEGORY_SERVICE)
+                    .setVisibility(Notification.VISIBILITY_PUBLIC);
+        }
+        if (AutoRoot.bootUiWanted(this)) {
+            builder.addAction(new Notification.Action.Builder(null, "Status",
+                    BootStatusActivity.pendingIntent(this)).build());
+        }
         if (ongoing) {
             PendingIntent stop = PendingIntent.getService(this, 1,
                     new Intent(this, AutoRootService.class)
@@ -691,16 +846,36 @@ public class AutoRootService extends Service {
     }
 
     private void show(String title, String text) {
+        AutoRoot.stage(this, text, AutoRoot.STAGE_RUNNING);
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
-            manager.notify(NOTIFICATION_ID, notification(title, text, true));
+            manager.notify(NOTIFICATION_ID, notification(title, text, true,
+                    AutoRoot.bootUiWanted(this)));
         }
     }
 
     private void finish(String title, String text, boolean keepRunning) {
+        int state;
+        String lower = title == null ? "" : title.toLowerCase(Locale.US);
+        if (lower.contains("ready")) {
+            state = AutoRoot.STAGE_OK;
+        } else if (lower.contains("failed") || lower.contains("off")) {
+            state = AutoRoot.STAGE_FAILED;
+        } else {
+            state = AutoRoot.STAGE_RUNNING;
+        }
+        AutoRoot.stage(this, text, state);
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
-            manager.notify(NOTIFICATION_ID, notification(title, text, keepRunning));
+            /*
+             * The full-screen intent is only needed while the run is live and
+             * for the final outcome. "Already ran this boot." should not pop
+             * a screen, so only attach it for a terminal state.
+             */
+            boolean fullScreen = AutoRoot.bootUiWanted(this)
+                    && state != AutoRoot.STAGE_RUNNING;
+            manager.notify(NOTIFICATION_ID, notification(title, text, keepRunning,
+                    fullScreen));
         }
         if (!keepRunning) {
             stopForeground(STOP_FOREGROUND_DETACH);
@@ -709,6 +884,19 @@ public class AutoRootService extends Service {
 
     private static String summary(String result) {
         return result.length() > 120 ? result.substring(0, 117) + "..." : result;
+    }
+
+    /**
+     * Grants the two app-ops the boot status screen can use, from a
+     * shell-domain uid-0 shell. "Display over other apps" is the background
+     * activity launch exemption; USE_FULL_SCREEN_INTENT lets the notification
+     * open the screen over the keyguard on Android 14+. Failures are harmless
+     * (older releases may not have the full-screen op).
+     */
+    static String grantBootUiAccess() {
+        return "appops set com.kpgc.timerroot android:use_full_screen_intent allow; "
+                + "appops set com.kpgc.timerroot android:system_alert_window allow; "
+                + "echo BOOT_UI_GRANTS_DONE";
     }
 
     private static String tail(String output) {

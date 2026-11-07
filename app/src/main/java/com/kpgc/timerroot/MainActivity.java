@@ -2,20 +2,26 @@ package com.kpgc.timerroot;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.res.ColorStateList;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.provider.Settings;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -28,6 +34,9 @@ import android.widget.Toast;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -46,6 +55,7 @@ public class MainActivity extends Activity {
     private static final String TAG = "TimerRoot";
     private static final int REQUEST_CODE = 1001;
     private static final int REQUEST_NOTIFICATIONS = 1002;
+    private static final int REQUEST_BOOT_MEDIA = 1003;
     /**
      * Prebuilt exploit for this exact device build. The upstream timer/timer
      * targets a 6.12.69 OnePlus kernel and must not be used here: its timer
@@ -56,13 +66,16 @@ public class MainActivity extends Activity {
     private static final String TIMER_TARGET = "target=lynx";
 
     private static final int BG = 0xFF0B0B0B;
-    private static final int CARD = 0xFF1C1C1E;
-    private static final int LINE = 0xFF2A2A2C;
+    private static final int CARD = 0xFF1A1A1C;
+    private static final int CARD_RAISED = 0xFF232326;
+    private static final int LINE = 0xFF2C2C30;
     private static final int TEXT = 0xFFFFFFFF;
-    private static final int MUTED = 0xFF9A9A9A;
+    private static final int MUTED = 0xFF8E8E96;
     private static final int GREEN = 0xFF2FD06B;
+    private static final int ON_GREEN = 0xFF04140A;
     private static final int GREEN_DARK = 0xFF123D24;
     private static final int RED = 0xFFFF5C5C;
+    private static final int TAB_BAR_HEIGHT = 62;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss", Locale.US);
@@ -84,11 +97,23 @@ public class MainActivity extends Activity {
     private TextView detailSelinux;
     private TextView detailSeccomp;
     private TextView logText;
+    private ScrollView logScroll;
     private LinearLayout homePage;
     private LinearLayout logPage;
-    private TextView tabHome;
-    private TextView tabLog;
+    private LinearLayout settingsPage;
+    private final TextView[] tabLabels = new TextView[3];
+    private final View[] tabIndicators = new View[3];
     private TextView autoToggle;
+    private TextView bootToggle;
+    private TextView softToggle;
+    private TextView updateToggle;
+    private TextView updateStatus;
+    private TextView updateBannerTitle;
+    private TextView updateBannerDetail;
+    private LinearLayout updateBanner;
+    private volatile int latestKnownCode;
+    private boolean updateChecking;
+    private String installedVersion = "?";
     private String ksud = "-";
     private String ksu = "unknown";
     private String selinux = "-";
@@ -132,17 +157,20 @@ public class MainActivity extends Activity {
 
         homePage = buildHome();
         logPage = buildLog();
+        settingsPage = buildSettings();
         logPage.setVisibility(View.GONE);
+        settingsPage.setVisibility(View.GONE);
 
         FrameLayout.LayoutParams fill = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        fill.bottomMargin = dp(58);
+        fill.bottomMargin = dp(TAB_BAR_HEIGHT);
         root.addView(homePage, fill);
         root.addView(logPage, fill);
+        root.addView(settingsPage, fill);
 
         LinearLayout bottom = buildBottomBar();
         FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(58), Gravity.BOTTOM);
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(TAB_BAR_HEIGHT), Gravity.BOTTOM);
         root.addView(bottom, barParams);
 
         setContentView(root);
@@ -150,6 +178,8 @@ public class MainActivity extends Activity {
         refreshDetails();
         addLog("TimerRoot ready");
         updateAutoRootUi();
+        updateUpdateUi();
+        maybeAutoCheckUpdates();
         if (safePing() && safePermission() == 0) {
             bindService();
         }
@@ -158,160 +188,249 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------------ UI
 
     private LinearLayout buildHome() {
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(BG);
+        LinearLayout page = page();
 
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(16), dp(12), dp(16), dp(16));
-        scroll.addView(body);
-        page.addView(scroll, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        LinearLayout body = scrollBody(page);
+        body.addView(pageHeader("TimerRoot",
+                "CVE-2026-98260 · root shell & KernelSU"));
 
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = new TextView(this);
-        title.setText("TimerRoot");
-        title.setTextColor(TEXT);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        header.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(pill("Reboot", RED, CARD, v -> reboot()));
-        body.addView(header);
-        body.addView(spacer(12));
+        body.addView(spacer(20));
+        updateBanner = buildUpdateBanner();
+        updateBanner.setVisibility(View.GONE);
+        body.addView(updateBanner);
+
+        body.addView(spacer(20));
 
         statusCard = new LinearLayout(this);
         statusCard.setOrientation(LinearLayout.HORIZONTAL);
         statusCard.setGravity(Gravity.CENTER_VERTICAL);
-        statusCard.setPadding(dp(18), dp(18), dp(18), dp(18));
+        statusCard.setPadding(dp(20), dp(20), dp(20), dp(20));
         statusCard.setBackground(cardBackground(CARD));
+
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
+        TextView label = new TextView(this);
+        label.setText("STATUS");
+        label.setTextColor(0x99FFFFFF);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        label.setTypeface(Typeface.DEFAULT_BOLD);
+        label.setLetterSpacing(0.16f);
         statusTitle = new TextView(this);
         statusTitle.setText("Not connected");
         statusTitle.setTextColor(TEXT);
-        statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 22);
+        statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         statusTitle.setTypeface(Typeface.DEFAULT_BOLD);
         statusSubtitle = new TextView(this);
         statusSubtitle.setText("Start Shizuku first");
-        statusSubtitle.setTextColor(0xFFBFD8C6);
-        statusSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        statusSubtitle.setTextColor(0xFFB8B8C0);
+        statusSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        statusSubtitle.setLineSpacing(dp(2), 1f);
+        texts.addView(label);
+        texts.addView(spacer(6));
         texts.addView(statusTitle);
         texts.addView(spacer(4));
         texts.addView(statusSubtitle);
         statusCard.addView(texts, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
         statusBadge = new TextView(this);
-        statusBadge.setText("?");
-        statusBadge.setTextColor(GREEN);
-        statusBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 44);
+        statusBadge.setGravity(Gravity.CENTER);
+        statusBadge.setMinWidth(dp(58));
+        statusBadge.setMinHeight(dp(58));
+        statusBadge.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
         statusBadge.setTypeface(Typeface.DEFAULT_BOLD);
-        statusCard.addView(statusBadge);
+        LinearLayout.LayoutParams badgeParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        badgeParams.leftMargin = dp(14);
+        statusCard.addView(statusBadge, badgeParams);
         body.addView(statusCard);
-        body.addView(spacer(14));
 
-        LinearLayout details = new LinearLayout(this);
-        details.setOrientation(LinearLayout.VERTICAL);
-        details.setBackground(cardBackground(CARD));
-        detailModel = addRow(details, "Device", "-", true);
-        detailKernel = addRow(details, "Kernel", "-", true);
-        detailKsud = addRow(details, "ksud", "-", true);
-        detailKsu = addRow(details, "KernelSU", "-", true);
-        detailSelinux = addRow(details, "SELinux", "-", true);
-        detailSeccomp = addRow(details, "Seccomp", "-", false);
+        addSection(body, "Actions");
+        body.addView(primaryButton("Get root shell", v -> confirmRoot()));
+        body.addView(spacer(10));
+        body.addView(secondaryButton("Load KernelSU", v -> confirmKsu()));
+        body.addView(spacer(10));
+        body.addView(dangerButton("Stop root", v -> stopRoot()));
+
+        addSection(body, "Device");
+        LinearLayout details = card();
+        detailModel = addRow(details, "MODEL", "-", true);
+        detailKernel = addRow(details, "KERNEL", "-", true);
+        detailKsud = addRow(details, "KSUD", "-", true);
+        detailKsu = addRow(details, "KERNELSU", "-", true);
+        detailSelinux = addRow(details, "SELINUX", "-", true);
+        detailSeccomp = addRow(details, "SECCOMP", "-", false);
         body.addView(details);
-        body.addView(spacer(14));
 
-        LinearLayout tools = new LinearLayout(this);
-        tools.setOrientation(LinearLayout.HORIZONTAL);
-        tools.addView(pill("Shizuku", TEXT, CARD, v -> showShizuku()), rowParams());
-        tools.addView(pill("Prepare", TEXT, CARD, v -> prepare()), rowParams());
-        tools.addView(pill("Diagnose", TEXT, CARD, v -> run("ids", "ids")), rowParams());
-        tools.addView(pill("Log", TEXT, CARD, v -> showTab(1)), rowParams());
-        body.addView(tools);
+        addSection(body, "Tools");
+        body.addView(buttonRow(
+                compactButton("Shizuku", v -> showShizuku()),
+                compactButton("Diagnose", v -> run("ids", "ids"))));
 
-        body.addView(bigButton("Download exploit", CARD, TEXT, v -> downloadTimer()));
-        body.addView(spacer(8));
-        body.addView(bigButton("Get root shell", GREEN, 0xFF04140A, v -> confirmRoot()));
-        body.addView(spacer(8));
-        body.addView(bigButton("Load KernelSU", 0xFF1F7A3D, 0xFFE8FFF0, v -> confirmKsu()));
-        body.addView(spacer(8));
-        body.addView(bigButton("Stop", CARD, RED, v -> stopRoot()));
+        body.addView(spacer(24));
+        body.addView(hintCard("First run: start Shizuku, grant access, then press "
+                + "Get root shell. Prepare or download the exploit binary under Settings."));
 
-        body.addView(spacer(18));
-        LinearLayout auto = new LinearLayout(this);
-        auto.setOrientation(LinearLayout.HORIZONTAL);
-        autoToggle = pill("", TEXT, CARD, v -> toggleAutoRoot());
-        auto.addView(autoToggle, rowParams());
-        auto.addView(pill("Install channel", TEXT, CARD, v -> installChannel()), rowParams());
-        body.addView(auto);
-        body.addView(spacer(8));
-        body.addView(bigButton("Run auto-root now", CARD, TEXT, v -> confirmAutoRootNow()));
-        body.addView(spacer(8));
-        body.addView(pill("Auto-root log", TEXT, CARD, v -> addLog(
-                AutoRoot.readLog(this).isEmpty() ? "auto-root log is empty"
-                        : AutoRoot.readLog(this))));
-        body.addView(spacer(8));
-        body.addView(smallHint("Auto-root reruns the exploit once per real boot: "
-                + "start Shizuku early, bind it after unlock, install the bundled "
-                + "timer and run it. "
-                + "Press Install channel once so later boots can reach Shizuku "
-                + "without Wi-Fi (it clears SELinux, opens a root shell and pins "
-                + "a persistent localhost ADB port). Unlocking is still required: "
-                + "Shizuku cannot hand out its binder to a locked user."));
+        return page;
+    }
 
-        body.addView(spacer(18));
-        body.addView(smallHint("First run: allow Shizuku, then press Prepare for the "
-                + "bundled binary or Download exploit to fetch timer/timer from GitHub. "
-                + "The exploit needs the shell user, which is why it runs through Shizuku."));
+    private LinearLayout buildSettings() {
+        LinearLayout page = page();
+
+        LinearLayout body = scrollBody(page);
+        body.addView(pageHeader("Settings",
+                "Automation, boot screen and maintenance"));
+
+        addSection(body, "Shizuku");
+        LinearLayout shizuku = paddedCard();
+        shizuku.addView(bodyText("Shizuku runs the exploit as the shell user. "
+                + "Start it from its app, then grant TimerRoot access here."));
+        shizuku.addView(spacer(14));
+        shizuku.addView(compactButton("Check & grant access", v -> showShizuku()));
+        body.addView(shizuku);
+
+        addSection(body, "Exploit");
+        LinearLayout exploit = paddedCard();
+        exploit.addView(bodyText("The binary is built for this kernel. Prepare "
+                + "installs the copy bundled in the APK; Download fetches the latest "
+                + "build from GitHub."));
+        exploit.addView(spacer(14));
+        exploit.addView(buttonRow(
+                compactButton("Prepare binary", v -> prepare()),
+                compactButton("Download exploit", v -> downloadTimer())));
+        body.addView(exploit);
+
+        addSection(body, "Auto-root");
+        LinearLayout autoCard = card();
+        autoToggle = addToggleRow(autoCard, "Auto-root",
+                "Run the exploit on every boot", v -> toggleAutoRoot());
+        body.addView(autoCard);
+        body.addView(spacer(10));
+        body.addView(buttonRow(
+                compactButton("Run now", v -> confirmAutoRootNow()),
+                compactButton("Install channel", v -> installChannel())));
+        body.addView(spacer(10));
+        body.addView(compactButton("View auto-root log", v -> {
+            addLog(AutoRoot.readLog(this).isEmpty() ? "auto-root log is empty"
+                    : AutoRoot.readLog(this));
+            showTab(1);
+        }));
+        body.addView(spacer(12));
+        body.addView(hintCard("Auto-root reruns the exploit once per real boot. "
+                + "Install the channel once so later boots can reach Shizuku without "
+                + "Wi-Fi; unlocking is still required."));
+
+        addSection(body, "Boot screen");
+        LinearLayout bootCard = card();
+        bootToggle = addToggleRow(bootCard, "Boot status screen",
+                "Show progress over the lock screen", v -> toggleBootUi());
+        body.addView(bootCard);
+        body.addView(spacer(10));
+        body.addView(buttonRow(
+                compactButton("Background", v -> pickBootMedia()),
+                compactButton("Preview", v -> previewBootUi())));
+        body.addView(spacer(10));
+        body.addView(buttonRow(
+                compactButton("Allow overlay", v -> requestOverlay()),
+                compactButton("Full-screen", v -> requestFullScreen())));
+        body.addView(spacer(10));
+        body.addView(compactButton("Clear background", v -> clearBootMedia()));
+        body.addView(spacer(12));
+        body.addView(hintCard("The background is copied into device-protected "
+                + "storage, so it can be shown while the device is still locked."));
+
+        addSection(body, "Restart");
+        LinearLayout softCard = card();
+        softToggle = addToggleRow(softCard, "Auto soft restart",
+                "Restart Android after a successful root", v -> toggleSoftRestart());
+        body.addView(softCard);
+        body.addView(spacer(10));
+        body.addView(secondaryButton("Restart Android", v -> confirmSoftRestart()));
+        body.addView(spacer(10));
+        body.addView(dangerButton("Reboot device", v -> reboot()));
+        body.addView(spacer(12));
+        body.addView(hintCard("A soft restart keeps the kernel and root alive while "
+                + "reloading modules and Zygisk. It closes every app and takes about a minute."));
+
+        addSection(body, "Updates");
+        LinearLayout updateCard = card();
+        updateToggle = addToggleRow(updateCard, "Check for updates",
+                "Look for a newer build once a day", v -> toggleAutoUpdate());
+        body.addView(updateCard);
+        body.addView(spacer(10));
+        updateStatus = bodyText("Not checked yet.");
+        LinearLayout statusCardUpdate = paddedCard();
+        statusCardUpdate.addView(updateStatus);
+        body.addView(statusCardUpdate);
+        body.addView(spacer(10));
+        body.addView(buttonRow(
+                compactButton("Check now", v -> checkForUpdates()),
+                compactButton("Open releases", v -> openReleases())));
+
+        body.addView(spacer(28));
+        TextView footer = new TextView(this);
+        footer.setText("TimerRoot " + versionName() + " · CVE-2026-98260");
+        footer.setTextColor(0xFF6E6E76);
+        footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        footer.setGravity(Gravity.CENTER);
+        body.addView(footer);
         body.addView(spacer(8));
-
-
 
         return page;
     }
 
     private LinearLayout buildLog() {
-        LinearLayout page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(BG);
-        page.setPadding(dp(16), dp(12), dp(16), dp(8));
+        LinearLayout page = page();
+        page.setPadding(dp(20), dp(16), dp(20), dp(16));
 
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout titles = new LinearLayout(this);
+        titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = new TextView(this);
         title.setText("Log");
         title.setTextColor(TEXT);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 26);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        header.addView(title, new LinearLayout.LayoutParams(0,
+        TextView subtitle = new TextView(this);
+        subtitle.setText("App and shell service activity");
+        subtitle.setTextColor(MUTED);
+        subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        titles.addView(title);
+        titles.addView(subtitle);
+        header.addView(titles, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        header.addView(pill("Copy", TEXT, CARD, v -> copyLog()));
-        header.addView(pill("Clear", TEXT, CARD, v -> {
+        header.addView(compactButton("Copy", v -> copyLog()),
+                new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+        header.addView(hspace(8));
+        header.addView(compactButton("Clear", v -> {
             logText.setText("");
             addLog("log cleared");
-        }));
+        }), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
         page.addView(header);
-        page.addView(spacer(12));
+        page.addView(spacer(16));
 
         logText = new TextView(this);
         logText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         logText.setTypeface(Typeface.MONOSPACE);
         logText.setTextColor(0xFFD6D6D6);
         logText.setTextIsSelectable(true);
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(14), dp(14), dp(14));
-        card.setBackground(cardBackground(CARD));
+        logText.setLineSpacing(dp(2), 1f);
+        logScroll = new ScrollView(this);
+        logScroll.setFillViewport(true);
+        logScroll.setVerticalScrollBarEnabled(false);
+        LinearLayout card = card();
+        card.setPadding(dp(16), dp(16), dp(16), dp(16));
         card.addView(logText);
-        scroll.addView(card);
-        page.addView(scroll, new LinearLayout.LayoutParams(
+        logScroll.addView(card, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        page.addView(logScroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         return page;
     }
@@ -319,26 +438,106 @@ public class MainActivity extends Activity {
     private LinearLayout buildBottomBar() {
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setBackgroundColor(0xFF141416);
+        bar.setBackgroundColor(0xFF131315);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        tabHome = tab("Home", v -> showTab(0));
-        tabLog = tab("Log", v -> showTab(1));
-        bar.addView(tabHome, rowParams());
-        bar.addView(tabLog, rowParams());
+        bar.setPadding(dp(8), 0, dp(8), 0);
+        addTab(bar, 0, "Home", v -> showTab(0));
+        addTab(bar, 1, "Log", v -> showTab(1));
+        addTab(bar, 2, "Settings", v -> showTab(2));
         return bar;
+    }
+
+    private void addTab(LinearLayout bar, int index, String label,
+                        View.OnClickListener click) {
+        LinearLayout tab = new LinearLayout(this);
+        tab.setOrientation(LinearLayout.VERTICAL);
+        tab.setGravity(Gravity.CENTER);
+        tab.setOnClickListener(click);
+
+        TextView text = new TextView(this);
+        text.setText(label);
+        text.setTextColor(MUTED);
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        text.setGravity(Gravity.CENTER);
+        tab.addView(text);
+
+        View indicator = new View(this);
+        GradientDrawable dot = new GradientDrawable();
+        dot.setColor(GREEN);
+        dot.setCornerRadius(dp(2));
+        indicator.setBackground(dot);
+        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(
+                dp(18), dp(3));
+        dotParams.topMargin = dp(6);
+        tab.addView(indicator, dotParams);
+
+        bar.addView(tab, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        tabLabels[index] = text;
+        tabIndicators[index] = indicator;
     }
 
     private void showTab(int index) {
         homePage.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         logPage.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
-        tabHome.setTextColor(index == 0 ? GREEN : MUTED);
-        tabLog.setTextColor(index == 1 ? GREEN : MUTED);
+        settingsPage.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
+        for (int i = 0; i < tabLabels.length; i++) {
+            boolean active = i == index;
+            tabLabels[i].setTextColor(active ? GREEN : MUTED);
+            tabLabels[i].setTypeface(active
+                    ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            tabIndicators[i].setVisibility(active
+                    ? View.VISIBLE : View.INVISIBLE);
+        }
     }
 
     // ------------------------------------------------------------ widgets
 
     private int dp(int value) {
         return (int) (value * getResources().getDisplayMetrics().density);
+    }
+
+    private LinearLayout page() {
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setBackgroundColor(BG);
+        return page;
+    }
+
+    private LinearLayout scrollBody(LinearLayout page) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setClipToPadding(false);
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(20), dp(16), dp(20), dp(28));
+        scroll.addView(body, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        page.addView(scroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        return body;
+    }
+
+    private LinearLayout pageHeader(String title, String subtitle) {
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(title);
+        name.setTextColor(TEXT);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        TextView sub = new TextView(this);
+        sub.setText(subtitle);
+        sub.setTextColor(MUTED);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        sub.setLineSpacing(dp(2), 1f);
+        header.addView(name);
+        header.addView(spacer(6));
+        header.addView(sub);
+        return header;
     }
 
     private View spacer(int height) {
@@ -348,15 +547,130 @@ public class MainActivity extends Activity {
         return view;
     }
 
-    private LinearLayout.LayoutParams rowParams() {
-        return new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+    private View hspace(int width) {
+        View view = new View(this);
+        view.setLayoutParams(new LinearLayout.LayoutParams(dp(width), 1));
+        return view;
+    }
+
+    private TextView sectionLabel(String text) {
+        TextView view = new TextView(this);
+        view.setText(text.toUpperCase(Locale.US));
+        view.setTextColor(MUTED);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setLetterSpacing(0.14f);
+        return view;
+    }
+
+    private void addSection(LinearLayout body, String title) {
+        body.addView(spacer(26));
+        body.addView(sectionLabel(title));
+        body.addView(spacer(10));
+    }
+
+    private LinearLayout card() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(cardBackground(CARD));
+        return card;
+    }
+
+    private LinearLayout paddedCard() {
+        LinearLayout card = card();
+        card.setPadding(dp(18), dp(18), dp(18), dp(18));
+        return card;
+    }
+
+    private LinearLayout hintCard(String text) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF141416);
+        bg.setCornerRadius(dp(18));
+        bg.setStroke(dp(1), LINE);
+        card.setBackground(bg);
+        card.setPadding(dp(16), dp(14), dp(16), dp(14));
+        card.addView(bodyText(text));
+        return card;
+    }
+
+    /**
+     * Green-tinted banner on Home announcing a newer release. Hidden until a
+     * check actually finds one, so Home stays unchanged for most users.
+     */
+    private LinearLayout buildUpdateBanner() {
+        LinearLayout banner = new LinearLayout(this);
+        banner.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFF0F2E1E);
+        bg.setCornerRadius(dp(22));
+        bg.setStroke(dp(1), 0xFF24563A);
+        banner.setBackground(bg);
+        banner.setPadding(dp(18), dp(16), dp(18), dp(16));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        updateBannerTitle = new TextView(this);
+        updateBannerTitle.setText("Update available");
+        updateBannerTitle.setTextColor(TEXT);
+        updateBannerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        updateBannerTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        updateBannerDetail = new TextView(this);
+        updateBannerDetail.setText("");
+        updateBannerDetail.setTextColor(0xFFA8CFB8);
+        updateBannerDetail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        updateBannerDetail.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        detailParams.topMargin = dp(3);
+        texts.addView(updateBannerTitle);
+        texts.addView(updateBannerDetail, detailParams);
+        top.addView(texts, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView dismiss = new TextView(this);
+        dismiss.setText("Dismiss");
+        dismiss.setTextColor(0xFFA8CFB8);
+        dismiss.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        dismiss.setTypeface(Typeface.DEFAULT_BOLD);
+        dismiss.setGravity(Gravity.CENTER);
+        dismiss.setPadding(dp(12), dp(8), dp(12), dp(8));
+        dismiss.setBackground(pressable(roundRect(0xFF1D4A32, 14, 0)));
+        dismiss.setOnClickListener(v -> {
+            if (latestKnownCode > 0) {
+                UpdateChecker.dismiss(this, latestKnownCode);
+            }
+            updateBanner.setVisibility(View.GONE);
+        });
+        top.addView(dismiss, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        banner.addView(top);
+
+        banner.addView(spacer(14));
+        banner.addView(primaryButton("Get the update", v -> openReleases()));
+        return banner;
+    }
+
+    private TextView bodyText(String text) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextColor(0xFFB0B0B8);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        view.setLineSpacing(dp(3), 1f);
+        return view;
     }
 
     private GradientDrawable cardBackground(int color) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
-        drawable.setCornerRadius(dp(24));
+        drawable.setCornerRadius(dp(22));
         if (color == GREEN_DARK) {
             drawable.setGradientType(GradientDrawable.LINEAR_GRADIENT);
             drawable.setOrientation(GradientDrawable.Orientation.LEFT_RIGHT);
@@ -365,88 +679,317 @@ public class MainActivity extends Activity {
         return drawable;
     }
 
-    private TextView pill(String text, int color, int background, View.OnClickListener click) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(color);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        view.setPadding(dp(14), dp(8), dp(14), dp(8));
-        view.setGravity(Gravity.CENTER);
+    private GradientDrawable roundRect(int color, int radius, int stroke) {
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(background);
-        bg.setCornerRadius(dp(18));
-        view.setBackground(bg);
-        view.setOnClickListener(click);
-        return view;
+        bg.setColor(color);
+        bg.setCornerRadius(dp(radius));
+        if (stroke != 0) {
+            bg.setStroke(dp(1), stroke);
+        }
+        return bg;
     }
 
-    private TextView tab(String text, View.OnClickListener click) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(MUTED);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        view.setGravity(Gravity.CENTER);
-        view.setOnClickListener(click);
-        return view;
+    private Drawable pressable(Drawable content) {
+        return new RippleDrawable(ColorStateList.valueOf(0x24FFFFFF), content, null);
     }
 
-    private TextView bigButton(String text, int background, int color,
-                               View.OnClickListener click) {
+    private TextView button(String text, int background, int color, int stroke,
+                            int textSize, int padH, int padV, int radius,
+                            int minHeight, View.OnClickListener click) {
         TextView view = new TextView(this);
         view.setText(text);
         view.setTextColor(color);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSize);
         view.setTypeface(Typeface.DEFAULT_BOLD);
         view.setGravity(Gravity.CENTER);
-        view.setPadding(dp(16), dp(16), dp(16), dp(16));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(background);
-        bg.setCornerRadius(dp(26));
-        view.setBackground(bg);
+        view.setPadding(dp(padH), dp(padV), dp(padH), dp(padV));
+        view.setMinHeight(dp(minHeight));
+        view.setBackground(pressable(roundRect(background, radius, stroke)));
         view.setOnClickListener(click);
+        view.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
         return view;
     }
 
-    private TextView smallHint(String text) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(MUTED);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        view.setLineSpacing(dp(3), 1f);
-        return view;
+    private TextView primaryButton(String text, View.OnClickListener click) {
+        return button(text, GREEN, ON_GREEN, 0, 15, 18, 16, 18, 54, click);
+    }
+
+    private TextView secondaryButton(String text, View.OnClickListener click) {
+        return button(text, CARD, TEXT, LINE, 15, 18, 16, 18, 54, click);
+    }
+
+    private TextView dangerButton(String text, View.OnClickListener click) {
+        return button(text, CARD, RED, 0xFF3A2222, 15, 18, 16, 18, 54, click);
+    }
+
+    private TextView compactButton(String text, View.OnClickListener click) {
+        return button(text, CARD_RAISED, TEXT, LINE, 13, 14, 10, 14, 44, click);
+    }
+
+    private LinearLayout buttonRow(TextView left, TextView right) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        leftParams.rightMargin = dp(10);
+        row.addView(left, leftParams);
+        row.addView(right, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
+    }
+
+    private TextView addToggleRow(LinearLayout parent, String title, String subtitle,
+                                  View.OnClickListener click) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(18), dp(15), dp(18), dp(15));
+        row.setOnClickListener(click);
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        TextView name = new TextView(this);
+        name.setText(title);
+        name.setTextColor(TEXT);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        name.setTypeface(Typeface.DEFAULT_BOLD);
+        texts.addView(name);
+
+        TextView sub = new TextView(this);
+        sub.setText(subtitle);
+        sub.setTextColor(MUTED);
+        sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        sub.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        subParams.topMargin = dp(3);
+        texts.addView(sub, subParams);
+        row.addView(texts, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView state = new TextView(this);
+        state.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        state.setTypeface(Typeface.DEFAULT_BOLD);
+        state.setGravity(Gravity.CENTER);
+        state.setPadding(dp(12), dp(6), dp(12), dp(6));
+        state.setMinWidth(dp(52));
+        LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        stateParams.leftMargin = dp(12);
+        row.addView(state, stateParams);
+
+        /*
+         * The card holds a single row, so the press feedback can reuse the
+         * card's own rounded shape as both content and ripple mask.
+         */
+        row.setBackground(new RippleDrawable(
+                ColorStateList.valueOf(0x1FFFFFFF),
+                roundRect(CARD, 22, 0),
+                roundRect(0xFFFFFFFF, 22, 0)));
+        parent.addView(row);
+        setToggleState(state, false);
+        return state;
+    }
+
+    private void setToggleState(TextView view, boolean on) {
+        view.setText(on ? "ON" : "OFF");
+        view.setTextColor(on ? ON_GREEN : MUTED);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(on ? GREEN : CARD_RAISED);
+        bg.setCornerRadius(dp(20));
+        view.setBackground(bg);
+    }
+
+    private void styleBadge(String text, int color) {
+        if (statusBadge == null) {
+            return;
+        }
+        statusBadge.setText(text);
+        statusBadge.setTextColor(color);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.OVAL);
+        // Same hue as the glyph, at a low alpha so the badge stays quiet.
+        bg.setColor((color & 0x00FFFFFF) | 0x33000000);
+        statusBadge.setBackground(bg);
     }
 
     private TextView addRow(LinearLayout parent, String label, String value,
                             boolean divider) {
         LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(16), dp(12), dp(16), dp(12));
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(18), dp(13), dp(18), dp(13));
 
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
         TextView name = new TextView(this);
         name.setText(label);
-        name.setTextColor(TEXT);
-        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        name.setTextColor(MUTED);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         name.setTypeface(Typeface.DEFAULT_BOLD);
+        name.setLetterSpacing(0.1f);
+
         TextView val = new TextView(this);
         val.setText(value);
-        val.setTextColor(MUTED);
-        val.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        texts.addView(name);
-        texts.addView(spacer(2));
-        texts.addView(val);
-        row.addView(texts, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        val.setTextColor(TEXT);
+        val.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        val.setLineSpacing(dp(2), 1f);
+
+        row.addView(name);
+        row.addView(spacer(4));
+        row.addView(val);
         parent.addView(row);
         if (divider) {
             View line = new View(this);
             line.setBackgroundColor(LINE);
-            parent.addView(line, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 1));
+            LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 1);
+            lineParams.leftMargin = dp(18);
+            lineParams.rightMargin = dp(18);
+            parent.addView(line, lineParams);
         }
         return val;
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Throwable t) {
+            return "0.39";
+        }
+    }
+
+    // ------------------------------------------------------------- updates
+
+    /** Reflects the stored update settings; called on create and on resume. */
+    private void updateUpdateUi() {
+        if (updateToggle == null) {
+            return;
+        }
+        setToggleState(updateToggle, UpdateChecker.isAutoEnabled(this));
+        // Paint the banner from the last check so it survives a relaunch even
+        // when the daily interval has not elapsed yet.
+        if (updateBanner != null) {
+            boolean cached = UpdateChecker.hasCachedUpdate(this);
+            if (cached) {
+                latestKnownCode = UpdateChecker.cachedLatestCode(this);
+                showUpdateBanner(UpdateChecker.cachedLatestName(this),
+                        latestKnownCode);
+            }
+            updateBanner.setVisibility(cached ? View.VISIBLE : View.GONE);
+        }
+        if (updateStatus == null) {
+            return;
+        }
+        long last = UpdateChecker.lastCheck(this);
+        String message = UpdateChecker.lastMessage(this);
+        if (last == 0 || message == null) {
+            updateStatus.setText("Installed " + versionName()
+                    + ". Automatic checks run at most once a day while the app "
+                    + "is open.");
+            return;
+        }
+        String when = android.text.format.DateUtils.getRelativeTimeSpanString(
+                last, System.currentTimeMillis(),
+                android.text.format.DateUtils.MINUTE_IN_MILLIS).toString();
+        updateStatus.setText(capitalize(message) + ".\nLast checked " + when
+                + ". Installed " + versionName() + ".");
+    }
+
+    private void toggleAutoUpdate() {
+        boolean enabled = !UpdateChecker.isAutoEnabled(this);
+        UpdateChecker.setAutoEnabled(this, enabled);
+        updateUpdateUi();
+        addLog("automatic update checks " + (enabled ? "enabled" : "disabled"));
+        if (enabled) {
+            maybeAutoCheckUpdates();
+        }
+    }
+
+    /**
+     * Runs a silent check when auto-checks are on and the last one is more
+     * than a day old. A check fetches the small release APK when the release
+     * changed, which is what makes the version comparison trustworthy.
+     */
+    private void maybeAutoCheckUpdates() {
+        if (!UpdateChecker.isAutoEnabled(this) || !UpdateChecker.isCheckDue(this)) {
+            return;
+        }
+        runUpdateCheck(false);
+    }
+
+    /** The manual button: one at a time, with a toast telling it is running. */
+    private void checkForUpdates() {
+        if (updateChecking) {
+            toast("A check is already running");
+            return;
+        }
+        runUpdateCheck(true);
+    }
+
+    private void runUpdateCheck(boolean manual) {
+        if (updateChecking) {
+            return;
+        }
+        updateChecking = true;
+        if (updateStatus != null && manual) {
+            updateStatus.setText("Checking GitHub…");
+        }
+        new Thread(() -> {
+            UpdateChecker.Result result = UpdateChecker.check(this);
+            ui.post(() -> {
+                updateChecking = false;
+                addLog("update check: " + result.message);
+                applyUpdateResult(result, manual);
+                updateUpdateUi();
+            });
+        }).start();
+    }
+
+    private void showUpdateBanner(String remoteVersion, int remoteCode) {
+        if (updateBannerTitle == null || updateBannerDetail == null) {
+            return;
+        }
+        updateBannerTitle.setText("A newer build is available");
+        updateBannerDetail.setText("Version "
+                + UpdateChecker.versionLabel(remoteVersion, remoteCode)
+                + " · you have " + versionName());
+    }
+
+    private void applyUpdateResult(UpdateChecker.Result result, boolean manual) {
+        latestKnownCode = result.remoteCode;
+        boolean show = result.available
+                && !UpdateChecker.isDismissed(this, result.remoteCode);
+        if (updateBanner != null) {
+            if (show) {
+                showUpdateBanner(result.remoteVersion, result.remoteCode);
+            }
+            updateBanner.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
+        if (manual) {
+            toast(result.available
+                    ? "Update available: " + UpdateChecker.versionLabel(
+                    result.remoteVersion, result.remoteCode)
+                    : result.message);
+        }
+    }
+
+    private static String capitalize(String text) {
+        if (text == null || text.isEmpty()) {
+            return "";
+        }
+        return Character.toUpperCase(text.charAt(0)) + text.substring(1);
+    }
+
+    private void openReleases() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW,
+                    Uri.parse(UpdateChecker.RELEASES_PAGE)));
+        } catch (Throwable t) {
+            addLog("could not open the releases page: " + t);
+            toast("No browser available");
+        }
     }
 
     // ------------------------------------------------------------- state
@@ -491,6 +1034,8 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateAutoRootUi();
+        updateUpdateUi();
+        maybeAutoCheckUpdates();
         refreshDetails();
     }
 
@@ -507,18 +1052,15 @@ public class MainActivity extends Activity {
         if ("active".equals(ksu)) {
             statusTitle.setText("Jailbreak mode");
             statusSubtitle.setText("KernelSU loaded · su in u:r:ksu:s0 · gone after reboot");
-            statusBadge.setText("✓");
-            statusBadge.setTextColor(GREEN);
+            styleBadge("\u2713", TEXT);
         } else if (rootOpen) {
             statusTitle.setText("Root shell");
             statusSubtitle.setText("uid=0 · u:r:shell:s0 · gone after reboot");
-            statusBadge.setText("✓");
-            statusBadge.setTextColor(GREEN);
+            styleBadge("\u2713", TEXT);
         } else if (shizuku && bound) {
             statusTitle.setText("Ready");
             statusSubtitle.setText("Shizuku connected · no root yet");
-            statusBadge.setText("•");
-            statusBadge.setTextColor(MUTED);
+            styleBadge("\u2022", MUTED);
         } else {
             statusTitle.setText("Not connected");
             statusSubtitle.setText(shizuku
@@ -526,8 +1068,7 @@ public class MainActivity extends Activity {
                         ? "Shizuku is running · connecting..."
                         : "Shizuku is running · grant permission")
                     : "Start Shizuku first");
-            statusBadge.setText("?");
-            statusBadge.setTextColor(MUTED);
+            styleBadge("?", MUTED);
         }
     }
 
@@ -652,6 +1193,10 @@ public class MainActivity extends Activity {
             try {
                 TimerFetcher.Result result = TimerFetcher.download(TIMER_URL, file);
                 addLog("downloaded " + result.bytes + " bytes, sha256 " + result.sha256);
+                // Publish the per-kernel confs from the APK before the binary:
+                // installFd() only replaces /data/local/tmp/timer and leaves
+                // the extracted profiles alone.
+                addLog(svc.install(getPackageCodePath()));
                 String installed;
                 try (ParcelFileDescriptor fd = ParcelFileDescriptor.open(
                         file, ParcelFileDescriptor.MODE_READ_ONLY)) {
@@ -729,8 +1274,7 @@ public class MainActivity extends Activity {
                     ui.post(() -> {
                         statusTitle.setText("Root failed");
                         statusSubtitle.setText("exploit did not reach uid=0 - reboot, then retry");
-                        statusBadge.setText("!");
-                        statusBadge.setTextColor(RED);
+                        styleBadge("!", RED);
                     });
                 }
             } catch (Throwable t) {
@@ -863,11 +1407,11 @@ public class MainActivity extends Activity {
                     if (ok) {
                         toast("KernelSU loaded: " + selinuxState);
                         refreshDetails();
+                        offerSoftRestart();
                     } else {
                         statusTitle.setText("KernelSU failed");
                         statusSubtitle.setText(reason + " - reboot, then retry");
-                        statusBadge.setText("!");
-                        statusBadge.setTextColor(RED);
+                        styleBadge("!", RED);
                         toast("KernelSU failed: " + reason);
                         addLog("KernelSU failed: " + reason
                                 + " - parked processes remain; reboot to clean up");
@@ -900,9 +1444,261 @@ public class MainActivity extends Activity {
         if (autoToggle == null) {
             return;
         }
-        boolean enabled = AutoRoot.isEnabled(this);
-        autoToggle.setText("Auto-root: " + (enabled ? "ON" : "OFF"));
-        autoToggle.setTextColor(enabled ? GREEN : TEXT);
+        setToggleState(autoToggle, AutoRoot.isEnabled(this));
+        if (bootToggle != null) {
+            setToggleState(bootToggle, AutoRoot.bootUiEnabled(this));
+        }
+        if (softToggle != null) {
+            setToggleState(softToggle, AutoRoot.softRestartEnabled(this));
+        }
+    }
+
+    private void toggleSoftRestart() {
+        boolean enabled = !AutoRoot.softRestartEnabled(this);
+        AutoRoot.setSoftRestartEnabled(this, enabled);
+        updateAutoRootUi();
+        addLog("auto soft restart " + (enabled ? "enabled" : "disabled"));
+        if (!enabled) {
+            toast("Android will not restart after root - modules load on the"
+                    + " next real reboot");
+        }
+    }
+
+    private void confirmSoftRestart() {
+        if (service == null) {
+            toast("bind the service first");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Restart Android?")
+                .setMessage("Restarts the Android userspace, like the KernelSU "
+                        + "manager's soft reboot.\n\n"
+                        + "- Root and the kernel stay up; su keeps working\n"
+                        + "- Modules, Zygisk and the root manager's own service "
+                        + "start as they would on a real boot\n"
+                        + "- Every app closes and the lock screen comes back; "
+                        + "it takes about a minute\n"
+                        + "- TimerRoot is killed while it runs, so this screen "
+                        + "will disappear\n\n"
+                        + "Requires KernelSU 3.x for the 'ksud soft-reboot' "
+                        + "subcommand.")
+                .setPositiveButton("Restart Android", (d, w) -> softRestartNow())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void toggleBootUi() {
+        boolean enabled = !AutoRoot.bootUiEnabled(this);
+        AutoRoot.setBootUiEnabled(this, enabled);
+        updateAutoRootUi();
+        addLog("boot status screen " + (enabled ? "enabled" : "disabled"));
+        if (enabled) {
+            requestNotificationPermission();
+            if (!BootStatusActivity.canStartDirectly(this)
+                    && !fullScreenAllowed()) {
+                toast("Allow overlay or full-screen access, or the screen "
+                        + "cannot appear over the lock screen");
+            }
+        }
+    }
+
+    private boolean fullScreenAllowed() {
+        if (Build.VERSION.SDK_INT < 34) {
+            return true;
+        }
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        try {
+            return manager == null || manager.canUseFullScreenIntent();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Offers the userspace restart after a manual KernelSU load. It is what
+     * makes the module's scripts and Zygisk take effect, but it closes every
+     * app and takes a minute, so it is never done without asking here. The
+     * boot path does it automatically (see AutoRootService).
+     */
+    private void offerSoftRestart() {
+        if (service == null) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("Restart Android now?")
+                .setMessage("KernelSU is loaded, but modules and Zygisk only "
+                        + "start after a userspace restart.\n\n"
+                        + "This closes every app and shows the lock screen again, "
+                        + "like a reboot, but it keeps the kernel running, so root "
+                        + "survives and the parked exploit processes stay parked. "
+                        + "It takes about a minute.\n\n"
+                        + "Skip it if you are only using su on the command line.")
+                .setPositiveButton("Restart Android", (d, w) -> softRestartNow())
+                .setNegativeButton("Not now", null)
+                .show();
+    }
+
+    private void softRestartNow() {
+        if (service == null) {
+            toast("bind the service first");
+            return;
+        }
+        addLog("soft restart: requesting a userspace restart...");
+        toast("Restarting Android...");
+        new Thread(() -> {
+            try {
+                final String result = service.softRestart();
+                addLog("soft restart: " + result);
+            } catch (Throwable t) {
+                /*
+                 * Expected: the restart kills this process, so the binder call
+                 * dies mid-flight. Nothing to report.
+                 */
+                addLog("soft restart returned: " + t);
+            }
+        }).start();
+    }
+
+    private void requestOverlay() {        if (Settings.canDrawOverlays(this)) {
+            toast("Display over other apps is already allowed");
+            return;
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Throwable t) {
+            addLog("overlay settings failed: " + t);
+            toast("Could not open the overlay settings");
+        }
+    }
+
+    private void requestFullScreen() {
+        if (Build.VERSION.SDK_INT < 34) {
+            toast("Full-screen notifications are always allowed before Android 14");
+            return;
+        }
+        if (fullScreenAllowed()) {
+            toast("Full-screen notification access is already allowed");
+            return;
+        }
+        try {
+            startActivity(new Intent(
+                    Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Throwable t) {
+            addLog("full-screen settings failed: " + t);
+            toast("Could not open the full-screen notification settings");
+        }
+    }
+
+    private void previewBootUi() {
+        try {
+            startActivity(BootStatusActivity.intent(this));
+        } catch (Throwable t) {
+            addLog("boot screen preview failed: " + t);
+            toast("Could not open the boot screen");
+        }
+    }
+
+    private void pickBootMedia() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES,
+                new String[]{"image/*", "video/*"});
+        try {
+            startActivityForResult(intent, REQUEST_BOOT_MEDIA);
+        } catch (Throwable t) {
+            addLog("media picker failed: " + t);
+            toast("No file picker available");
+        }
+    }
+
+    private void clearBootMedia() {
+        File[] files = AutoRoot.bootUiDir(this)
+                .listFiles((dir, name) -> name.startsWith("background."));
+        int removed = 0;
+        if (files != null) {
+            for (File file : files) {
+                //noinspection ResultOfMethodCallIgnored
+                if (file.delete()) {
+                    removed++;
+                }
+            }
+        }
+        toast(removed > 0 ? "Boot background cleared" : "No boot background set");
+        addLog("boot background cleared (" + removed + " file(s))");
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_BOOT_MEDIA && resultCode == RESULT_OK
+                && data != null && data.getData() != null) {
+            copyBootMedia(data.getData());
+        }
+    }
+
+    /**
+     * Copies the chosen image or video into device-protected storage. The
+     * boot status screen runs before the first unlock, when normal app files
+     * (credential-encrypted) are not readable.
+     */
+    private void copyBootMedia(Uri uri) {
+        final String type;
+        try {
+            type = getContentResolver().getType(uri);
+        } catch (Throwable t) {
+            toast("Could not read the selected file");
+            return;
+        }
+        final boolean video = type != null && type.startsWith("video/");
+        addLog("copying boot background (" + (video ? "video" : "image") + ")...");
+        new Thread(() -> {
+            File dest = null;
+            try {
+                File dir = AutoRoot.bootUiDir(this);
+                File[] old = dir.listFiles((d, name) -> name.startsWith("background."));
+                if (old != null) {
+                    for (File file : old) {
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                    }
+                }
+                dest = new File(dir, video ? "background.video"
+                        : "background.image0");
+                InputStream in = getContentResolver().openInputStream(uri);
+                if (in == null) {
+                    throw new IllegalStateException("no stream for " + uri);
+                }
+                try (InputStream source = in;
+                     OutputStream out = new FileOutputStream(dest)) {
+                    byte[] buffer = new byte[1 << 16];
+                    int read;
+                    while ((read = source.read(buffer)) > 0) {
+                        out.write(buffer, 0, read);
+                    }
+                }
+                long size = dest.length();
+                final File saved = dest;
+                ui.post(() -> {
+                    toast("Boot background set");
+                    addLog("boot background ready: " + saved.getName()
+                            + " (" + (size / 1024) + " KiB)");
+                });
+            } catch (Throwable t) {
+                AutoRoot.log(this, "boot background copy failed: " + t);
+                final File failed = dest;
+                ui.post(() -> {
+                    toast("Could not save the boot background");
+                    addLog("boot background copy failed: " + t);
+                    if (failed != null) {
+                        //noinspection ResultOfMethodCallIgnored
+                        failed.delete();
+                    }
+                });
+            }
+        }).start();
     }
 
     private void toggleAutoRoot() {
@@ -1038,6 +1834,8 @@ public class MainActivity extends Activity {
                         + "grep -qF \"$K\" \"$A\" 2>/dev/null || "
                         + "echo \"$K\" >> \"$A\" 2>/dev/null; "
                         + "echo key_count=$(grep -cF timerroot \"$A\" 2>/dev/null); "
+                        + "appops set com.kpgc.timerroot android:use_full_screen_intent allow; "
+                        + "appops set com.kpgc.timerroot android:system_alert_window allow; "
                         + "echo CHANNEL_DONE";
                 String result = service.execRoot(command);
                 addLog(result);
@@ -1153,7 +1951,7 @@ public class MainActivity extends Activity {
                 .daemon(false)
                 .processNameSuffix("timer")
                 .debuggable(false)
-                .version(7);
+                .version(8);
     }
 
     private void copyLog() {
@@ -1178,6 +1976,9 @@ public class MainActivity extends Activity {
         ui.post(() -> {
             if (logText != null) {
                 logText.append(sb.toString());
+            }
+            if (logScroll != null) {
+                logScroll.post(() -> logScroll.fullScroll(View.FOCUS_DOWN));
             }
         });
     }

@@ -2,16 +2,31 @@ plugins {
     id 'com.android.application'
 }
 
+// The per-kernel profiles live at the repository root so the exploit can be
+// built and run without the APK. Package them as assets/conf/**, which is
+// where UserService.install() unpacks them from.
+def confAssets = layout.buildDirectory.dir('generated/conf-assets')
+def syncConfAssets = tasks.register('syncConfAssets', Sync) {
+    from rootProject.file('conf')
+    into confAssets.map { it.dir('conf') }
+}
+
 android {
     namespace 'com.kpgc.timerroot'
     compileSdk 36
+
+    sourceSets {
+        main {
+            assets.srcDir confAssets
+        }
+    }
 
     defaultConfig {
         applicationId 'com.kpgc.timerroot'
         minSdk 30
         targetSdk 36
-        versionCode 38
-        versionName '0.38'
+        versionCode 39
+        versionName '0.39'
     }
 
     buildFeatures {
@@ -36,3 +51,13 @@ dependencies {
     implementation 'dev.rikka.shizuku:api:13.1.5'
     implementation 'dev.rikka.shizuku:provider:13.1.5'
 }
+
+// preBuild runs before every build, but merge*Assets is also invoked directly
+// by IDE and unit-test tasks, so wire the copy into it explicitly.
+tasks.named('preBuild').configure {
+    dependsOn syncConfAssets
+}
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }
+        .configureEach {
+            dependsOn syncConfAssets
+        }

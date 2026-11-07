@@ -17,4 +17,5 @@ interface IUserService {
     String installFd(in ParcelFileDescriptor fd) = 11;
     String keepPermissive() = 12;
     boolean ksuActive() = 13;
+    String softRestart() = 14;
 }

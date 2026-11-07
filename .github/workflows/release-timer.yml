@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - p7a/timer_p7a.c
+      - conf/**
       - app/src/main/java/**
       - app/src/main/res/**
       - app/src/main/aidl/**
