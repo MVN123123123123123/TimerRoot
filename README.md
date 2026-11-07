@@ -1,4 +1,7 @@
-# For Research perpose only.
+# Certainly for research perpose only.
+# BIG NOTE: wait for 2-3 minutes after you logged into your device first time since new boot.
+the device needs to stablize itself, background process may eat up ram, swap and cpu ( which is critical for this exploit).
+## SMALL NOTE: To run root automatically, install shizuku-next, and manually run root once.
 # TimerRoot
 
 Android front end for **CVE-2026-98260** (POSIX CPU timer use-after-free), the
