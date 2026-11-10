@@ -91,6 +91,7 @@ public class MainActivity extends Activity {
     private TextView statusSubtitle;
     private TextView statusBadge;
     private TextView detailModel;
+    private TextView detailMode;
     private TextView detailKernel;
     private TextView detailKsud;
     private TextView detailKsu;
@@ -104,6 +105,7 @@ public class MainActivity extends Activity {
     private final TextView[] tabLabels = new TextView[3];
     private final View[] tabIndicators = new View[3];
     private TextView autoToggle;
+    private TextView samsungToggle;
     private TextView bootToggle;
     private TextView softToggle;
     private TextView updateToggle;
@@ -125,6 +127,7 @@ public class MainActivity extends Activity {
             service = IUserService.Stub.asInterface(binder);
             bound = true;
             addLog("user service connected");
+            applySamsungModeToService();
             refreshDetails();
             if (pendingServiceAction != null) {
                 Runnable action = pendingServiceAction;
@@ -255,6 +258,7 @@ public class MainActivity extends Activity {
 
         addSection(body, "Device");
         LinearLayout details = card();
+        detailMode = addRow(details, "MODE", "-", true);
         detailModel = addRow(details, "MODEL", "-", true);
         detailKernel = addRow(details, "KERNEL", "-", true);
         detailKsud = addRow(details, "KSUD", "-", true);
@@ -300,6 +304,24 @@ public class MainActivity extends Activity {
                 compactButton("Prepare binary", v -> prepare()),
                 compactButton("Download exploit", v -> downloadTimer())));
         body.addView(exploit);
+
+        addSection(body, "Device mode");
+        LinearLayout samsungCard = card();
+        samsungToggle = addToggleRow(samsungCard, "Samsung mode",
+                "DEFEX/KDP chain for Samsung kernels (auto-detected)",
+                v -> toggleSamsungMode());
+        body.addView(samsungCard);
+        body.addView(spacer(10));
+        body.addView(compactButton("Use automatic detection",
+                v -> useAutoSamsungMode()));
+        body.addView(spacer(12));
+        body.addView(hintCard("Samsung mode is selected automatically on "
+                + "Samsung devices. It is pinned to the diabl0w/KernelSU "
+                + "Samsung build: the app bundles that ksud, clears the DEFEX "
+                + "creds hash and execs ksud through a KDP-safe mount. A "
+                + "different KernelSU manager is rejected. Turn it off to use "
+                + "the generic profile on a Samsung device, or on to try the "
+                + "Samsung chain elsewhere."));
 
         addSection(body, "Auto-root");
         LinearLayout autoCard = card();
@@ -1044,6 +1066,10 @@ public class MainActivity extends Activity {
             statusCard.setBackground(cardBackground(
                     rootOpen || "active".equals(ksu) ? GREEN_DARK : CARD));
         }
+        if (detailMode != null) {
+            detailMode.setText(AutoRoot.isSamsungMode(this)
+                    ? "Samsung (DEFEX/KDP chain)" : "Generic (kernel conf)");
+        }
         detailKsud.setText(ksud);
         detailKsu.setText("active".equals(ksu) ? "jailbreak mode (u:r:ksu:s0)" : ksu);
         detailSelinux.setText(selinux);
@@ -1241,12 +1267,25 @@ public class MainActivity extends Activity {
     }
 
     private void confirmRoot() {
+        String message;
+        if (AutoRoot.isSamsungMode(this)) {
+            message = "Runs the Samsung DEFEX/KDP chain once.\n\n"
+                    + "- Requires the diabl0w/KernelSU Samsung build\n"
+                    + "- Clears the child's DEFEX creds_fast_hash entry\n"
+                    + "- Moves the worker to u:r:init:s0 and late-loads the bundled"
+                    + " diabl0w/KernelSU ksud through a private logcat bind mount\n"
+                    + "- SELinux is left to ksud's own restore\n"
+                    + "- On a failed attempt the process is parked until you reboot\n"
+                    + "- Do not use the device while it runs";
+        } else {
+            message = "Runs CVE-2026-98260 once and keeps a uid=0 shell open.\n\n"
+                    + "- On a failed attempt the process is parked until you reboot\n"
+                    + "- Root disappears when you reboot\n"
+                    + "- Do not use the device while it runs";
+        }
         new AlertDialog.Builder(this)
                 .setTitle("Get a root shell?")
-                .setMessage("Runs CVE-2026-98260 once and keeps a uid=0 shell open.\n\n"
-                        + "- On a failed attempt the process is parked until you reboot\n"
-                        + "- Root disappears when you reboot\n"
-                        + "- Do not use the device while it runs")
+                .setMessage(message)
                 .setPositiveButton("Run", (d, w) -> runRoot())
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -1259,13 +1298,37 @@ public class MainActivity extends Activity {
         }
         new Thread(() -> {
             try {
+                boolean samsung = AutoRoot.isSamsungMode(this);
+                if (samsung) {
+                    String problem = AutoRoot.samsungManagerProblem(this);
+                    if (problem != null) {
+                        addLog(problem);
+                        ui.post(() -> toast(problem));
+                        return;
+                    }
+                }
+                service.setSamsungMode(samsung);
                 String out = service.openRoot();
                 // Only a real uid=0 shell counts; a failed attempt parks the
                 // exploit and prints diagnostics that must not look like success.
                 rootOpen = out.startsWith("root shell ready");
                 addLog(out);
                 ui.post(this::applyDetails);
-                if (rootOpen && !"active".equals(ksu)) {
+                if (rootOpen && samsung) {
+                    /*
+                     * The Samsung chain has no separate shell-domain stage:
+                     * the same `fake` plant already cleared DEFEX and loaded
+                     * ksud, so openRoot() returned the final KernelSU state.
+                     */
+                    if (out.contains("KernelSU active")) {
+                        ksu = "active";
+                    }
+                    addLog("Samsung chain complete");
+                    ui.post(() -> {
+                        applyDetails();
+                        refreshDetails();
+                    });
+                } else if (rootOpen && !"active".equals(ksu)) {
                     addLog("root shell ready - loading KernelSU...");
                     runKsu();
                 } else if (!rootOpen) {
@@ -1298,6 +1361,17 @@ public class MainActivity extends Activity {
     private void runKsu() {
         if (service == null) {
             addLog("bind the service first");
+            return;
+        }
+        if (AutoRoot.isSamsungMode(this)) {
+            /*
+             * Samsung has one chain, not two: `fake` does the fake cred,
+             * DEFEX clear, SELinux and ksud late-load in a single plant.
+             * Replanting it here would consume another trigger on a kernel
+             * that only tolerates one per boot.
+             */
+            addLog("Samsung mode: KernelSU loads with the main exploit chain");
+            runRoot();
             return;
         }
         new Thread(() -> {
@@ -1445,12 +1519,54 @@ public class MainActivity extends Activity {
             return;
         }
         setToggleState(autoToggle, AutoRoot.isEnabled(this));
+        if (samsungToggle != null) {
+            setToggleState(samsungToggle, AutoRoot.isSamsungMode(this));
+        }
         if (bootToggle != null) {
             setToggleState(bootToggle, AutoRoot.bootUiEnabled(this));
         }
         if (softToggle != null) {
             setToggleState(softToggle, AutoRoot.softRestartEnabled(this));
         }
+    }
+
+    /** Pushes the effective mode to the bound shell service. */
+    private void applySamsungModeToService() {
+        if (service == null) {
+            return;
+        }
+        try {
+            service.setSamsungMode(AutoRoot.isSamsungMode(this));
+        } catch (Throwable t) {
+            addLog("could not set Samsung mode: " + t);
+        }
+    }
+
+    private void toggleSamsungMode() {
+        boolean enabled = !AutoRoot.isSamsungMode(this);
+        AutoRoot.setSamsungMode(this, enabled);
+        applySamsungModeToService();
+        updateAutoRootUi();
+        addLog("Samsung mode " + (enabled ? "enabled" : "disabled")
+                + (AutoRoot.isSamsungDevice() ? "" : " (device is not Samsung)"));
+        if (enabled) {
+            String problem = AutoRoot.samsungManagerProblem(this);
+            if (problem != null) {
+                addLog(problem);
+                toast("Samsung mode needs the diabl0w/KernelSU Samsung build");
+            }
+            if (!AutoRoot.isSamsungDevice()) {
+                toast("Samsung mode needs a matching Samsung kernel profile");
+            }
+        }
+    }
+
+    private void useAutoSamsungMode() {
+        AutoRoot.useAutoSamsungMode(this);
+        applySamsungModeToService();
+        updateAutoRootUi();
+        addLog("Samsung mode follows automatic detection: "
+                + (AutoRoot.isSamsungMode(this) ? "on" : "off"));
     }
 
     private void toggleSoftRestart() {
@@ -1779,27 +1895,46 @@ public class MainActivity extends Activity {
                 String installed = service.install(getPackageCodePath());
                 addLog(installed);
 
-                // 1. SELinux permissive: property_data_file is only writable
-                //    while the kernel's enforcing flag is clear.
-                String info = service.info();
-                addLog(info.trim());
-                if (!info.contains("selinux=Permissive")) {
-                    addLog("clearing SELinux through the exploit"
-                            + " (this can take a few minutes)...");
-                    String out = service.run("permissive");
-                    boolean done = out.contains("permissive done");
-                    addLog(done ? "permissive ok" : tailText(out));
-                    if (!done) {
-                        ui.post(() -> {
-                            toast("Could not clear SELinux - reboot and retry");
-                            addLog("channel install failed before writing the property."
-                                    + " A failed plant parks a zombie, so reboot first.");
-                        });
+                boolean samsung = AutoRoot.isSamsungMode(this);
+                if (samsung) {
+                    String problem = AutoRoot.samsungManagerProblem(this);
+                    if (problem != null) {
+                        addLog(problem);
+                        ui.post(() -> toast(problem));
                         return;
                     }
                 }
+                service.setSamsungMode(samsung);
 
-                // 2. uid-0 shell: owns /data/property but has no capabilities.
+                // 1. SELinux permissive: property_data_file is only writable
+                //    while the kernel's enforcing flag is clear.
+                if (samsung) {
+                    // The Samsung chain leaves SELinux to ksud's own restore;
+                    // the generic "permissive" plant is a second trigger and
+                    // is deliberately not used here.
+                    addLog("Samsung mode: SELinux is managed by the ksud chain");
+                } else {
+                    String info = service.info();
+                    addLog(info.trim());
+                    if (!info.contains("selinux=Permissive")) {
+                        addLog("clearing SELinux through the exploit"
+                                + " (this can take a few minutes)...");
+                        String out = service.run("permissive");
+                        boolean done = out.contains("permissive done");
+                        addLog(done ? "permissive ok" : tailText(out));
+                        if (!done) {
+                            ui.post(() -> {
+                                toast("Could not clear SELinux - reboot and retry");
+                                addLog("channel install failed before writing the property."
+                                        + " A failed plant parks a zombie, so reboot first.");
+                            });
+                            return;
+                        }
+                    }
+                }
+
+                // 2. root shell: generic uses the shell-domain stage, Samsung
+                //    runs the unified fake/DEFEX/KDP chain.
                 String out = service.openRoot();
                 boolean ready = out.startsWith("root shell ready")
                         || out.contains("root shell already open");

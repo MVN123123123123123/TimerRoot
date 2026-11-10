@@ -29,6 +29,39 @@ MainActivity (untrusted_app)
        └─ runs it; on success keeps /system/bin/sh alive
 ```
 
+## Two modes: generic and Samsung
+
+The app and the binary now have two explicit endgames:
+
+- **Generic (others)** — unchanged. The exploit gets a shell-domain `uid=0`
+  (`u:r:shell:s0`), then the app finds the installed KernelSU manager's
+  `ksud`, late-loads it, and re-applies SELinux permissive through `su`.
+- **Samsung** — selected automatically when `Build.MANUFACTURER` or
+  `Build.BRAND` is `samsung`, and available as a manual toggle under
+  **Settings → Device mode** (with **Use automatic detection** to clear the
+  override). It uses `conf/samsung/*.conf`, runs the unified `fake` chain
+  (`--samsung`), clears the child's DEFEX `creds_fast_hash` slot, moves the
+  worker to `u:r:init:s0`, bind-mounts the bundled diabl0w/KernelSU
+  `assets/samsung/libksud.so` over `/system/bin/logcat` (KDP-safe), and
+  leaves SELinux to `ksud`'s own restore. There is no generic manager
+  discovery and no second late-load stage.
+
+Samsung mode is pinned to the
+[diabl0w/KernelSU](https://github.com/diabl0w/KernelSU) Samsung build. That
+build keeps the upstream `me.weishu.kernelsu` package name, so the app
+identifies it by its manager `versionName` prefix (`samsung-v*`, for example
+`samsung-v2.2`). A missing manager, the upstream KernelSU with the same
+package name, KernelSU-Next, or SukiSU Ultra is rejected with an explanation
+instead of late-loading a mismatched module.
+
+The bundled Samsung profile targets kernel `6.1.162-android14-11`
+(SM-S921N Galaxy S24 / SM-S948U Galaxy S26 Ultra), the builds SamTimer
+was tested on and derived its offsets from. A
+Samsung device on an unsupported kernel is refused with a message to turn
+Samsung mode off and use a generic profile. The app rejects a binary that
+does not carry the `TIMER_SAMSUNG=1` marker instead of passing `--samsung`
+to an old generic build.
+
 ## Requirements
 
 - Android 12+ (`minSdk 30`), arm64
@@ -38,10 +71,14 @@ MainActivity (untrusted_app)
   one *Always allow* tap for TimerRoot's ADB key. After that the exploit runs on
   its own at every boot, before the first unlock (see
   [Auto-root on boot](#auto-root-on-boot))
-- One supported manager installed, for the `Load KernelSU` path:
+- One supported manager installed, for the generic `Load KernelSU` path:
   [KernelSU](https://github.com/tiann/KernelSU),
   [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next), or
-  [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
+  [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra).
+  Samsung mode instead requires the
+  [diabl0w/KernelSU](https://github.com/diabl0w/KernelSU) Samsung build
+  (`me.weishu.kernelsu`, manager version `samsung-v*`); TimerRoot bundles
+  that release's ksud.
 - A device running one of the kernels this port covers (see
   [Supported devices](#supported-devices)): Pixel 6 through Pixel 11, the
   Xiaomi 15/17/18 families, the Redmi Note 15/17 families, and the vendor
@@ -81,14 +118,14 @@ useful for probing a profile from `adb shell`:
 timer --conf conf/6.1.162-android14-11-g9dd05ae3a1de-ab16261587.conf target
 ```
 
-The app also passes `--protocol 2`, the app/binary interface version. This is a
+The app also passes `--protocol 3`, the app/binary interface version. This is a
 compatibility handshake: the old TimerRoot APKs predate the conf rewrite, so
 they start the binary without `--conf`/`--protocol`. The new binary then refuses
 to run and prints:
 
 ```
 [!] BREAKING CHANGE: TimerRoot app is too old
-[!] OLD_APP_DETECTED app_protocol=0 required=2
+[!] OLD_APP_DETECTED app_protocol=0 required=3
 ```
 
 The notice is written to the app log and `/data/local/tmp/timer_last.log`. It
@@ -723,8 +760,10 @@ app/src/main/java/com/kpgc/timerroot/BootReceiver.java        boot entry point
 app/src/main/java/com/kpgc/timerroot/RestartJobService.java   binder-push restart
 app/src/main/aidl/com/kpgc/timerroot/IUserService.aidl        service interface
 app/src/main/assets/timer                                     exploit binary (not in git)
+app/src/main/assets/samsung/libksud.so                        bundled diabl0w/KernelSU ksud (Samsung mode)
 conf/*.conf                                                   per-kernel HOCON profiles
 conf/dirty/*.conf                                             profiles with an identity check
+conf/samsung/*.conf                                           Samsung DEFEX/KDP profiles
 p7a/timer_p7a.c                                               exploit source (conf-driven)
 app/build.gradle                                              packages conf/ as assets/conf/
 scripts/build.ps1                                             Gradle-free build
@@ -740,7 +779,9 @@ PORT_LOG.md                                                   per-gate port reco
   [InfinityCore](https://github.com/V4bel/InfinityCore).
 - [Shizuku](https://github.com/RikkaApps/Shizuku) and
   [Shizuku-API](https://github.com/RikkaApps/Shizuku-API) (Apache-2.0) by Rikka.
-- KernelSU (GPL-2.0), KernelSU-Next, and SukiSU Ultra for the late-load path.
+- KernelSU (GPL-2.0), [diabl0w/KernelSU](https://github.com/diabl0w/KernelSU)
+  (the pinned Samsung build), KernelSU-Next, and SukiSU Ultra for the
+  late-load path.
 - [rikumi/TimerRoot](https://github.com/rikumi/TimerRoot): the HOCON
   conf-driven profile mechanism, runtime conf selection (release, page size and
   dirty-device identity checks), and the vendor profiles under `conf/` were

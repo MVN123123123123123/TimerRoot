@@ -18,4 +18,10 @@ interface IUserService {
     String keepPermissive() = 12;
     boolean ksuActive() = 13;
     String softRestart() = 14;
+    /**
+     * Selects the Samsung endgame (DEFEX creds_hash clear + KDP-safe ksud)
+     * for subsequent calls.  The app passes this explicitly because the
+     * shell user service cannot read the app's device-protected preferences.
+     */
+    void setSamsungMode(boolean enabled) = 15;
 }

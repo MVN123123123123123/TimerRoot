@@ -3,6 +3,9 @@ package com.kpgc.timerroot;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.SystemClock;
 
 import java.io.ByteArrayOutputStream;
@@ -52,6 +55,13 @@ final class AutoRoot {
      * survives a soft restart, which is why this covers the resumed process.
      */
     static final String KEY_BOOT_UI_SEEN_BOOT = "boot_ui_seen_boot";
+    /**
+     * Samsung endgame selection. -1 = auto (default), 0 = forced generic,
+     * 1 = forced Samsung.  Stored as an int so a user override can be
+     * distinguished from the automatic vendor detection.
+     */
+    static final String KEY_SAMSUNG_MODE = "samsung_mode";
+    static final int SAMSUNG_AUTO = -1;
     /** Restart the Android userspace once KernelSU is loaded (modules apply). */
     static final String KEY_SOFT_RESTART = "soft_restart";
     /** Boot id for which the automatic soft restart was already triggered. */
@@ -80,6 +90,116 @@ final class AutoRoot {
 
     static boolean isEnabled(Context context) {
         return prefs(context).getBoolean(KEY_ENABLED, false);
+    }
+
+    // ------------------------------------------------------ Samsung mode
+
+    /** True when this is a Samsung-built device (One UI / Exynos or SD). */
+    static boolean isSamsungDevice() {
+        return "samsung".equalsIgnoreCase(Build.MANUFACTURER)
+                || "samsung".equalsIgnoreCase(Build.BRAND);
+    }
+
+    /** Stored override: {@link #SAMSUNG_AUTO}, 0 (generic) or 1 (Samsung). */
+    static int samsungModeOverride(Context context) {
+        return prefs(context).getInt(KEY_SAMSUNG_MODE, SAMSUNG_AUTO);
+    }
+
+    /**
+     * True when the Samsung chain should be used.  A device with no override
+     * follows the vendor automatically; once the user taps the toggle, the
+     * explicit choice wins (so a Samsung phone can still run the generic
+     * profile, and a non-Samsung phone can try the Samsung chain).
+     */
+    static boolean isSamsungMode(Context context) {
+        int override = samsungModeOverride(context);
+        return override != SAMSUNG_AUTO ? override == 1 : isSamsungDevice();
+    }
+
+    /** Stores an explicit on/off choice, replacing auto-detection. */
+    static void setSamsungMode(Context context, boolean enabled) {
+        prefs(context).edit()
+                .putInt(KEY_SAMSUNG_MODE, enabled ? 1 : 0)
+                .apply();
+    }
+
+    /** Drops the explicit choice and returns to vendor auto-detection. */
+    static void useAutoSamsungMode(Context context) {
+        prefs(context).edit().remove(KEY_SAMSUNG_MODE).apply();
+    }
+
+    /** Samsung mode's required manager (diabl0w/KernelSU Samsung build). */
+    static final String SAMSUNG_MANAGER_PACKAGE = "me.weishu.kernelsu";
+    /**
+     * diabl0w/KernelSU keeps the upstream package name, so its Samsung build
+     * is identified by the manager versionName prefix (samsung-v2.x).
+     */
+    static final String SAMSUNG_MANAGER_VERSION_PREFIX = "samsung-";
+    /** Other KernelSU forks that must not be used for the Samsung chain. */
+    private static final String[] OTHER_KSU_MANAGERS = {
+            "me.weishu.kernelsu.pr", "com.rifsxd.ksunext", "com.sukisu.ultra"
+    };
+
+    /**
+     * Returns null when the pinned diabl0w/KernelSU Samsung manager is
+     * installed, or a user-facing reason why Samsung mode cannot run.
+     *
+     * The bundled ksud and its embedded module come from that release, so a
+     * different KernelSU variant (or the upstream manager, which shares the
+     * package name but not the samsung-v version) is rejected rather than
+     * late-loaded into a mismatched module.
+     */
+    static String samsungManagerProblem(Context context) {
+        PackageManager pm = context.getPackageManager();
+        PackageInfo required = null;
+        try {
+            required = pm.getPackageInfo(SAMSUNG_MANAGER_PACKAGE, 0);
+        } catch (PackageManager.NameNotFoundException ignored) {
+        }
+        if (required == null) {
+            String other = installedOtherManager(pm);
+            if (other != null) {
+                return "Samsung mode is pinned to diabl0w/KernelSU ("
+                        + SAMSUNG_MANAGER_PACKAGE + ", manager version"
+                        + " samsung-v*), but " + other + " is installed"
+                        + " instead. Uninstall it and install"
+                        + " github.com/diabl0w/KernelSU";
+            }
+            return "Samsung mode is pinned to the diabl0w/KernelSU Samsung"
+                    + " build (" + SAMSUNG_MANAGER_PACKAGE + ", manager"
+                    + " version samsung-v*). Install github.com/diabl0w/KernelSU"
+                    + " first";
+        }
+        String version = required.versionName;
+        if (version == null
+                || !version.startsWith(SAMSUNG_MANAGER_VERSION_PREFIX)) {
+            return "Samsung mode is pinned to the diabl0w/KernelSU Samsung"
+                    + " build, but the installed " + SAMSUNG_MANAGER_PACKAGE
+                    + " reports version "
+                    + (version == null ? "unknown" : version)
+                    + ". Uninstall it and install github.com/diabl0w/KernelSU"
+                    + " (manager version samsung-v*)";
+        }
+        String other = installedOtherManager(pm);
+        if (other != null) {
+            return "Samsung mode must use only diabl0w/KernelSU, but "
+                    + other + " is also installed. Uninstall the other"
+                    + " KernelSU manager and retry";
+        }
+        return null;
+    }
+
+    /** Package label of the first installed non-Samsung KernelSU manager. */
+    private static String installedOtherManager(PackageManager pm) {
+        for (String pkg : OTHER_KSU_MANAGERS) {
+            try {
+                PackageInfo pi = pm.getPackageInfo(pkg, 0);
+                String version = pi.versionName;
+                return pkg + (version == null ? "" : " " + version);
+            } catch (PackageManager.NameNotFoundException ignored) {
+            }
+        }
+        return null;
     }
 
     /** True when this boot already owns an attempt (running or finished). */
@@ -438,8 +558,8 @@ final class AutoRoot {
                  * Bump on every AIDL change: Shizuku tears down a cached user
                  * service whose version differs, so a stale shell from an
                  * earlier APK can never answer the new transaction ids.
-                 * 8 -> 9 added softRestart().
+                 * 8 -> 9 added softRestart(); 9 -> 10 added setSamsungMode().
                  */
-                .version(9);
+                .version(10);
     }
 }
