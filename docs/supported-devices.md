@@ -348,12 +348,29 @@ identifies it by its manager `versionName` prefix (`samsung-v*`, for example
 package name, KernelSU-Next, or SukiSU Ultra is rejected with an explanation
 instead of late-loading a mismatched module.
 
-The bundled Samsung profile targets kernel `6.1.162-android14-11`
-(SM-S921N Galaxy S24 / SM-S948U Galaxy S26 Ultra), the builds SamTimer was
-tested on and derived its offsets from. A Samsung device on an unsupported
-kernel is refused with a message to turn Samsung mode off and use a generic
-profile. The app rejects a binary that does not carry the `TIMER_SAMSUNG=1`
-marker instead of passing `--samsung` to an old generic build.
+The bundled Samsung profiles target `6.1.162-android14-11` (SM-S921N Galaxy
+S24 / SM-S948U Galaxy S26 Ultra), the builds SamTimer was tested on and derived
+its offsets from, and `5.15.189-android13-8-33641424` (SM-A1560 Galaxy A15 5G),
+which was ported here from its own factory `boot.img` and verified in QEMU. A
+Samsung device on an unsupported kernel is refused with a message to turn
+Samsung mode off and use a generic profile. The app rejects a binary that does
+not carry the `TIMER_SAMSUNG=1` marker instead of passing `--samsung` to an old
+generic build.
+
+| Device | Codename | Factory build | Profile | Status |
+|---|---|---|---|---|
+| Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
+| Galaxy A15 5G | `a15xzh` (SM-A1560) | `BP4A.251205.006` / `A1560ZHSAEZG1` | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
+
+The `a15xzh` profile is the first 5.15 Samsung one, so it also carries the
+5.15 geometry: 4-byte `cred.usage`, `timer_alloc 0x108`, `task_alloc_bytes
+0x1200` with no vendor-size extension, and `pcp_free = 1`. It sets
+`ksu_kmi = "android13-5.15"`. F7–F11 and the `--samsung fake` write chain
+(`defex_hash` → `fake_cred` → `selinux_state` → uid/euid repair) were verified
+in QEMU; the late-load itself needs a device, so F12/F13 stay pending. The
+factory kernel calls the Knox hypervisor, so its QEMU run used a throwaway
+patched `Image` — the constants still come from the unmodified factory
+artifacts.
 
 ## Credits
 

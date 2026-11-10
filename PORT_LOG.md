@@ -25,6 +25,11 @@ every profile added for the Redmi Note 15/17 ports. Section
 [F14](#f14--qemu-mass-run) has the per-profile table and the procedure.
 F12 and F13 need a device.
 
+The Samsung pass additionally exercised the `--samsung fake` chain end to end
+in QEMU, which is where [the `g_slide` regression](#samsung--g_slide-fix) was
+found and fixed. That fix touches the shared code path, so it was re-checked
+against generic 5.15 and 6.12 profiles as well.
+
 Everything below was derived from the **factory `boot.img` of the exact build**
 named in each section, never from a running device.
 
@@ -484,11 +489,10 @@ image has no vendor-size setup and keeps `0x1200`.
   → **`timer_site = 0xffffffc00827ecdc`**. `copy_process` calls
   `dup_task_struct`, whose `bl kmem_cache_alloc` (5.15 has no `_node` variant
   here) at `0xffffffc008132d10` returns to `0xffffffc008132d14`
-  → **`copy_process_low21 = 0x132d14`**.
-  `validate_conf.py`'s generic `copy_process` regex only matches
-  `kmem_cache_alloc.*node`, so this one site was confirmed by `sitecheck.py`
-  (source register loads `task_struct_cachep`) rather than by the automated
-  cross-check.
+  → **`copy_process_low21 = 0x132d14`**. `validate_conf.py` originally only
+  matched `kmem_cache_alloc.*node`, so this site was confirmed by
+  `sitecheck.py` (the source register loads `task_struct_cachep`); the tool now
+  falls back to the unqualified callee and confirms it automatically.
 - **F4** BTF: `cred` `0xb0` — **4-byte `usage`**, uid `0x4`, euid `0x14`, caps
   `0x28`, security `0x78`; `task_struct` `0x1200`, cred `0x798`; `k_itimer`
   `0x108`, `it` `0x78`. `fork_init()` passes `0x1200` directly to
@@ -505,6 +509,75 @@ image has no vendor-size setup and keeps `0x1200`.
 - **F6** 0 errors, `--selfcheck` 0 failures. BTF names the trace event
   `trace_event_raw_kmem_alloc` (not `…_kmem_cache_alloc`); `bytes_req -
   call_site` is still `0x10`, the default.
+
+### samsung a15xzh — `5.15.189-android13-8-33641424` (Samsung mode)
+
+`conf/samsung/samsung-a15xzh-5.15.189.conf`, for the Samsung Galaxy A15 5G
+(SM-A1560). This is the first 5.15 **Samsung** profile and the second profile
+under `conf/samsung/`.
+
+- **F1** `samsung/a15xzh/a15x:16/BP4A.251205.006/A1560ZHSAEZG1`, kernel
+  `5.15.189-android13-8-33641424`. 4K pages (`CONFIG_ARM64_4K_PAGES`,
+  `CONFIG_ARM64_VA_BITS=39`), `CONFIG_SECURITY_DEFEX=y`, `CONFIG_KDP=y`,
+  `CONFIG_KDP_CRED=y`, `CONFIG_SAMSUNG_GKI_KERNEL=y`, `CONFIG_SLUB`.
+- **F2** factory `boot.img`
+  `sha256 9800789fd2f7b169ba3f51de9613e5776850f8096e23570111496537b1e65a81`;
+  `Image` `9dddd18f619c234c5a97e70b5fccdd11e43814b0b28dfa417392fa1dd2b8c6fb`;
+  `vmlinux.elf` `7ce467e5a558de5391d405bf060362a024c502690533425ab8327fea51ac93df`;
+  BTF `de165b42879670423c358958a3b879c55be048d5121aacf4054ba7b2826b0f30`.
+  Booted in QEMU it reports exactly the three F2 slabinfo lines the profile
+  predicts: `posix_timers_cache` object `264` (`0x108`) at `pagesperslab 2`
+  (order 1), `task_struct` `4608` (`0x1200`), `cred_jar` `192` (`0xc0`).
+- **F3** `init_posix_timers` is
+  `__initstub__kmod_posix_timers__387_281_init_posix_timers6`, which calls
+  `kmem_cache_create_usercopy("posix_timers_cache", 0x108, …)`.
+  `do_timer_create` → `bl kmem_cache_alloc` at `0xffffffc0082048c0`
+  → **`timer_site = 0xffffffc0082048c4`**. `copy_process` calls
+  `dup_task_struct`, whose `bl kmem_cache_alloc` (5.15 has no `_node` variant
+  here) at `0xffffffc0080c9ea4` returns to `0xffffffc0080c9ea8`
+  → **`copy_process_low21 = 0xc9ea8`**.
+- **F4** BTF: `cred` `0xb0` — **4-byte `usage`**, uid `0x4`, euid `0x14`, caps
+  `0x28`, security `0x78`, user `0x80`, user_ns `0x88`, ucounts `0x90`, groups
+  `0x98`; `task_struct` `0x1200`, cred `0x798`; `k_itimer` `0x108`, `it`
+  `0x78`. `cred_init` requests `0xb0`, which SLUB rounds to `0xc0`
+  (`cred_alloc`). `fork_init` passes `0x1200` and there is no
+  `task_struct_vendor_size_setup`, so `task_alloc_bytes = 0x1200`.
+  `pcp_free = 1` for the same reason as zephyr: 5.15 frees the order-1 slab
+  through the PCP lists.
+- **F5** `selinux_state 0xffffffc00abcded8`, `panic_on_warn 0xffffffc00a8dadd0`,
+  `root_user 0xffffffc00a901410`, `init_user_ns 0xffffffc00aa6cda8`,
+  `init_ucounts 0xffffffc00a902828`, `init_groups 0xffffffc00a9024b0`; all six
+  re-verified equal to `nm`. `selinux_blob_off = 0x0` and
+  `selinux_sid_kernel = 1` from `blobsim2.py` (effective LSM order
+  `capability, integrity, selinux`; only selinux carries a 32-byte cred blob).
+  DEFEX does not register a cred blob.
+- **F5 Samsung** `defex_creds_hash = 0xffffffc00ac53740`:
+  `get_task_creds` indexes it directly as an 8-byte array for `pid <= 0x8000`,
+  and `creds_fast_hash_init` zeroes `0x40000` bytes there.
+- **F1 vulnerability** `begin_new_exec` still calls `posix_cpu_timers_exit`
+  (`0xffffffc0084c8e4c`) before `exit_itimers` (`0xffffffc0084c8e5c`).
+- **F6** `validate_conf.py` 0 errors, `--selfcheck` 0 failures.
+- **F7–F11** all pass in QEMU against the factory `Image`, first attempt:
+  `target` prints `timer_site=0xffffffc0082048c4` and `samsung=1`; `ids`
+  `page_alloc=263 page_free=261 pairs=1029`; `probe` votes
+  `base=0xffffff7fc0000000` with `pair … agree=1`; `leak` 512/512 votes;
+  verify reaches `resuid=0/0/0` + `ROOT_SHELL_OK`.
+- **Samsung endgame** verified separately under `--samsung fake`: the
+  `defex_hash` stage clears `creds_fast_hash[105]`, the `fake_cred` stage
+  plants the fake cred and `selinux_state`, then `fake_uid`/`fake_euid` repair
+  it; the worker reports `uid=0 euid=0` and reaches the KDP-safe init-domain
+  step. `ksud` and an SELinux policy are not in the QEMU initramfs, so the
+  late-load itself stops at `ksud missing` exactly as designed (F12/F13 stay
+  pending on a device).
+- **QEMU boot note** the factory `Image` cannot boot under `qemu-system-aarch64`
+  unmodified: RKP/KDP/DEFEX call the phone's Knox hypervisor via `_uh_call`,
+  which does not exist there, so the boot dies in
+  `map_kernel_text_segment`, `kdp_init`/`prepare_ro_creds`, and the DEFEX
+  signature gate. Verification therefore used a **throwaway, patched copy**
+  (`/tmp/opencode/a15/Image.qemu`) with those vendor hooks neutralised. The
+  derived constants were never taken from it, and the factory artifacts in
+  `sam_a1560/` stay unmodified. This is the same class of QEMU-only shim the
+  harness uses for every other profile; it is not a profile change.
 
 ### brussels — `6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k`
 
@@ -526,6 +599,40 @@ image has no vendor-size setup and keeps `0x1200`.
 - **F6** 0 errors; `alloc_req_off = 0x10` matches BTF. `--selfcheck`:
   0 failures.
 
+### Samsung — `g_slide` fix (found while porting a15xzh)
+
+`--samsung fake` (and plain `fake`) parked on `no KASLR slide` before its
+first write, so the endgame could never run. Cause: commit `227597d` moved an
+`if (!g_slide) park_forever("no KASLR slide")` check to the top of the `fake`
+branch, but `g_slide` was only ever assigned inside `run_plant()`, which runs
+*after* that check. `calibrate_base()` had the slide in `site0` and threw it
+away.
+
+Fix: `calibrate_base()` now stores `g_slide = site0 - STATIC_TIMER_SITE` when
+the vote succeeds. `run_plant()` still recomputes it from the site it captures,
+so each write keeps its own authoritative slide.
+
+Reproduced against HEAD (`git show HEAD:p7a/timer_p7a.c`, built with the same
+NDK command) on both zephyr 5.15 and spinel 6.12:
+
+| build | `timer fake` | `timer --samsung fake` |
+|---|---|---|
+| HEAD `timer_p7a.c` | `[!] no KASLR slide` → park | parked before `defex_hash` |
+| fixed | writes `fake_cred` + `selinux_state`, child `resuid=0/0/0` | full chain, see the a15xzh section |
+
+The zero-write `verify` path was unaffected either way (it never reads
+`g_slide`) and was re-run after the fix on a15xzh and zephyr: still
+`resuid=0/0/0` + `ROOT_SHELL_OK`. `app/src/main/assets/timer` was rebuilt from
+the fixed source.
+
+`validate_conf.py` needed two fixes for this port, both in the tool and not the
+profiles: it resolved a profile to a vmlinux by the `release` field, which
+Samsung profiles do not have (they set `release_prefix`), so the empty string
+matched the first vmlinux alphabetically and reported 10 bogus symbol/BTF
+mismatches; and its `copy_process_low21` cross-check only looked for
+`kmem_cache_alloc_node`, which 5.15 does not emit here. With both corrected it
+reports 0 errors for all 24 bundled profiles.
+
 ---
 
 ## Gate status
@@ -538,14 +645,14 @@ image has no vendor-size setup and keeps `0x1200`.
 | F4 cred / task geometry | pass | BTF + `cred_init` / `task_vendor_size_setup` disassembly |
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors; `--selfcheck` 0 failures (host build) |
-| F7 `timer target` | pass (QEMU) | all 18 profiles print their own `timer_site`, exit 0 |
+| F7 `timer target` | pass (QEMU) | all 19 profiles print their own `timer_site`, exit 0 |
 | F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
-| F14 QEMU | pass | 18/18 profiles, see below |
+| F14 QEMU | pass | 18/18 generic profiles + the Samsung profile, see below |
 | F15 hardware | pending | no device |
 | F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
 
@@ -553,8 +660,10 @@ image has no vendor-size setup and keeps `0x1200`.
 
 Every conf whose factory Image is in the workspace was booted in
 `qemu-system-aarch64 -M virt` at the profile's page size and driven through
-the shipped aarch64 binary. **18 of 22 profiles ran and all 18 passed every
-gate.** The other four are the imported OPPO/realme profiles
+the shipped aarch64 binary. **18 of 22 generic profiles ran and all 18 passed
+every gate**, and the Samsung `a15xzh` profile passed the same gates as a
+separate run (its factory `Image` needs the vendor-hook shim described in its
+section above). The other four are the imported OPPO/realme profiles
 (`6.12.58-…-ab15213644-4k`, `6.12.69-…-g242e1a07f878-ab15865446-4k`,
 `6.6.118-…-g9bc34d5b0c79-abogki537459655-4k`,
 `6.6.66-…-abogki428889875-4k`), which have no factory artifact in the
@@ -581,6 +690,7 @@ to boot. `logs/mass-final.json` holds the per-profile detail.
 | 6.6.118-…-abogki519650608-4k | dada | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-ab15511674-4k | kunzite | pass | pass | pass | pass | pass | pass |
 | 6.6.127-…-ab16252310-4k | frankel (Pixel 10) | pass | pass | pass | pass | pass | pass |
+| samsung-a15xzh-5.15.189 | a15xzh (Galaxy A15 5G) | pass | pass | pass | pass | pass | pass |
 
 This run also supplies the F2 `slabinfo` item that a device was previously
 needed for. The booted kernel reports, per profile, a

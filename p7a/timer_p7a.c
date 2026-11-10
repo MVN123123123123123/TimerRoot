@@ -1236,7 +1236,17 @@ static unsigned long long calibrate_base(unsigned char *raw)
             }
         logf("[base] made=%d site=%#llx slide=%#llx best=%#llx count=%llu\n",
              made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc);
-        return bestc >= 4 ? best : 0;
+        if (bestc < 4)
+            return 0;
+        /*
+         * The fake endgame resolves symbols by slide before its first plant
+         * (DEFEX creds_hash, selinux_state), so the slide has to exist here.
+         * run_plant() recomputes it from the site it captures, which stays
+         * authoritative per write; this is only the pre-plant value.
+         */
+        if (site0)
+            g_slide = site0 - STATIC_TIMER_SITE;
+        return best;
     }
 }
 
