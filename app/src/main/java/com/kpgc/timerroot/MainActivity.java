@@ -1819,8 +1819,7 @@ public class MainActivity extends Activity {
 
     private void toggleAutoRoot() {
         boolean enabled = !AutoRoot.isEnabled(this);
-        AutoRoot.prefs(this).edit()
-                .putBoolean(AutoRoot.KEY_ENABLED, enabled).apply();
+        AutoRoot.setEnabled(this, enabled);
         updateAutoRootUi();
         addLog("auto-root " + (enabled ? "enabled" : "disabled"));
         if (enabled) {

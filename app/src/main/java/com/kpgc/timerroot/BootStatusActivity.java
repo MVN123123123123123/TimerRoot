@@ -74,6 +74,7 @@ public class BootStatusActivity extends Activity {
     private TextView detail;
     private TextView hint;
     private View hideButton;
+    private TextView turnOffButton;
     private Backdrop backdrop;
     private VideoView video;
     private ImageView image;
@@ -302,15 +303,6 @@ public class BootStatusActivity extends Activity {
         hint.setPadding(0, dp(12), 0, 0);
         panel.addView(hint);
 
-        LinearLayout buttons = new LinearLayout(this);
-        buttons.setOrientation(LinearLayout.HORIZONTAL);
-        buttons.setGravity(Gravity.CENTER);
-        buttons.setPadding(0, dp(16), 0, 0);
-        buttons.addView(button("Hide", v -> hide()));
-        buttons.addView(space(dp(10)));
-        buttons.addView(button("Open TimerRoot", v -> openApp()));
-        panel.addView(buttons);
-
         FrameLayout.LayoutParams panelParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -320,14 +312,28 @@ public class BootStatusActivity extends Activity {
         panelParams.bottomMargin = dp(36);
         root.addView(panel, panelParams);
 
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.HORIZONTAL);
+        topBar.setGravity(Gravity.CENTER_VERTICAL);
+
+        turnOffButton = button("Turn off", v -> turnOff());
+        turnOffButton.setTextColor(0xFFFFB4A9);
+        LinearLayout.LayoutParams turnOffParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        turnOffParams.rightMargin = dp(8);
+        topBar.addView(turnOffButton, turnOffParams);
+
         hideButton = button("Hide", v -> hide());
-        FrameLayout.LayoutParams hideParams = new FrameLayout.LayoutParams(
+        topBar.addView(hideButton);
+
+        FrameLayout.LayoutParams topParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.TOP | Gravity.END);
-        hideParams.topMargin = dp(18);
-        hideParams.rightMargin = dp(18);
-        root.addView(hideButton, hideParams);
+        topParams.topMargin = dp(18);
+        topParams.rightMargin = dp(18);
+        root.addView(topBar, topParams);
 
         setContentView(root);
     }
@@ -442,6 +448,11 @@ public class BootStatusActivity extends Activity {
             }
         }
 
+        if (turnOffButton != null) {
+            boolean show = state != AutoRoot.STAGE_OK && AutoRoot.isEnabled(this);
+            turnOffButton.setVisibility(show ? View.VISIBLE : View.GONE);
+        }
+
         if (detail != null) {
             long now = System.currentTimeMillis();
             long elapsed = since > 0 ? Math.max(0, now - since) : 0;
@@ -479,23 +490,21 @@ public class BootStatusActivity extends Activity {
         finish();
     }
 
+    /**
+     * Stops auto-root for future boots without touching the run in progress:
+     * the root shell that is already alive stays alive. The button disappears
+     * once the switch is off, and on the completed screen only Hide remains.
+     */
+    private void turnOff() {
+        AutoRoot.setEnabled(this, false);
+        AutoRoot.log(this, "auto-root disabled from the boot screen");
+        toast("Auto-root is off for future boots");
+        update();
+    }
+
     private void finishScreen() {
         if (!isFinishing()) {
             finishAndRemoveTask();
-        }
-    }
-
-    private void openApp() {
-        if (!isUserUnlocked()) {
-            toast("Unlock the device first");
-            return;
-        }
-        try {
-            startActivity(new Intent(this, MainActivity.class)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
-            finish();
-        } catch (Throwable t) {
-            toast("Could not open TimerRoot: " + t);
         }
     }
 
@@ -571,12 +580,6 @@ public class BootStatusActivity extends Activity {
         background.setStroke(dp(1), 0x44FFFFFF);
         view.setBackground(background);
         view.setOnClickListener(listener);
-        return view;
-    }
-
-    private View space(int px) {
-        View view = new View(this);
-        view.setLayoutParams(new LinearLayout.LayoutParams(px, 1));
         return view;
     }
 
@@ -778,7 +781,8 @@ public class BootStatusActivity extends Activity {
                 canvas.drawArc(oval, angle, 110, false, paint);
                 paint.setColor(0x555CC8FF);
                 paint.setStrokeWidth(stroke * 0.55f);
-                canvas.drawArc(oval, angle + 180, 42, false, paint);
+                // Faint tail just behind the bright arc, not opposite it.
+                canvas.drawArc(oval, angle - 52, 42, false, paint);
             }
 
             if (running) {

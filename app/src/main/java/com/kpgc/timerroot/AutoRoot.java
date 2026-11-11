@@ -92,6 +92,10 @@ final class AutoRoot {
         return prefs(context).getBoolean(KEY_ENABLED, false);
     }
 
+    static void setEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_ENABLED, enabled).commit();
+    }
+
     // ------------------------------------------------------ Samsung mode
 
     /** True when this is a Samsung-built device (One UI / Exynos or SD). */

@@ -609,8 +609,11 @@ What it shows:
 - a spinner while running, a green check on success, a red cross on failure;
 - the current stage (`starting Shizuku...`, `running the exploit...`,
   `loading KernelSU... 20s`, ...) and how long that stage has been running;
-- a short hint that unlocking is allowed at any time, plus **Hide** and
-  **Open TimerRoot** actions.
+- a short hint that unlocking is allowed at any time, plus a top-corner
+  **Turn off** action (disables auto-root for future boots without touching
+  the run in progress) and a **Hide** action. Once the first run since a
+  soft restart finishes successfully, **Turn off** disappears and only
+  **Hide** remains.
 
 ### How it gets on screen
 
