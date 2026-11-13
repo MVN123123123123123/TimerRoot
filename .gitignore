@@ -23,3 +23,5 @@ sam_a1560/
 
 # Agents. For the ease of porting to devices.
 SKILL.md
+timerroot-port
+AGENTS.md

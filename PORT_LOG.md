@@ -665,6 +665,16 @@ under `conf/samsung/`.
   Samsung's DEFEX logs `[DEFEX] Normal mode` and its Knox `uh_log` device
   initialises, unlike the a15xzh 5.15 kernel that needed the vendor-hook
   shim.
+- **QEMU harness** (harness-only, outside this repo — `work/qemu/` in the
+  port tree): `mass.py` now accepts Samsung profiles' full-banner
+  `release_prefix` and scans `conf/samsung/` alongside `conf/dirty/`; the
+  initramfs `init` raises `net.core.{wmem,rmem}_max` to `1048576` because
+  `SO_SNDBUF 16 MB` is otherwise clamped to the default 212 992 (~416 KB per
+  socket), which starves plant 2. 16 MB sysctls fail (RAM exhaustion in the
+  8 GB guest), 4 MB regressed vs 1 MB. End-to-end chain command:
+  `qemu-system-aarch64 -M virt -cpu max -m 8192 -smp 4 -kernel
+  work/xi/s26fe-boot/Image -initrd initramfs.cpio.gz -append
+  "... qconf=samsung-s26fe-6.6.127.conf qargs=--samsung qmode=fake"`.
 
 ### Samsung — spray-write fix (found while porting s26fe)
 
