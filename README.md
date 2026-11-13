@@ -68,6 +68,8 @@ Detected by running `su -c id` and checking for `u:r:ksu:s0`:
 | Root shell | `uid=0`, `u:r:shell:s0` |
 | Jailbreak mode | KernelSU loaded, `su` works in `u:r:ksu:s0` |
 
+![description](https://github.com/MVN123123123123123/TimerRoot/blob/main/Screenshot_20261113-185558.png)
+
 ## Updates
 
 Settings -> *Updates* checks GitHub at most once a day; **Check now** does it on demand. The app only opens the releases page and never installs an APK by itself.
