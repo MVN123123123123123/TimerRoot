@@ -350,17 +350,21 @@ instead of late-loading a mismatched module.
 
 The bundled Samsung profiles target `6.1.162-android14-11` (SM-S921N Galaxy
 S24 / SM-S948U Galaxy S26 Ultra), the builds SamTimer was tested on and derived
-its offsets from, and `5.15.189-android13-8-33641424` (SM-A1560 Galaxy A15 5G),
-which was ported here from its own factory `boot.img` and verified in QEMU. A
-Samsung device on an unsupported kernel is refused with a message to turn
-Samsung mode off and use a generic profile. The app rejects a binary that does
-not carry the `TIMER_SAMSUNG=1` marker instead of passing `--samsung` to an old
-generic build.
+its offsets from, `5.15.189-android13-8-33641424` (SM-A1560 Galaxy A15 5G),
+which was ported here from its own factory `boot.img` and verified in QEMU, and
+`6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (SM-S741B Galaxy S26 FE), also
+ported here from its factory `boot.img` and verified in QEMU (F7–F11, plus the
+`--samsung` DEFEX write chain; F12/F13 still need a device). A Samsung device
+on an unsupported kernel is refused with a message to turn Samsung mode off
+and use a generic profile. The app rejects a binary that does not carry the
+`TIMER_SAMSUNG=1` marker instead of passing `--samsung` to an old generic
+build.
 
 | Device | Codename | Factory build | Profile | Status |
 |---|---|---|---|---|
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy A15 5G | `a15xzh` (SM-A1560) | `BP4A.251205.006` / `A1560ZHSAEZG1` | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
+| Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
 
 The `a15xzh` profile is the first 5.15 Samsung one, so it also carries the
 5.15 geometry: 4-byte `cred.usage`, `timer_alloc 0x108`, `task_alloc_bytes

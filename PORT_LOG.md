@@ -579,6 +579,151 @@ under `conf/samsung/`.
   `sam_a1560/` stay unmodified. This is the same class of QEMU-only shim the
   harness uses for every other profile; it is not a profile change.
 
+### samsung s26fe — `6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (Samsung mode)
+
+`conf/samsung/samsung-s26fe-6.6.127.conf`, for the Samsung Galaxy S26 FE
+(SM-S741B, Exynos, EUX firmware `S741BXXS3AZK1`, Android 17). This is the first
+6.6 Samsung profile and the third profile under `conf/samsung/`.
+
+- **F1** banner `Linux version 6.6.127-android15-8-abogkiS741BXXS3AZK1-4k`
+  (kleaf/clang 18, `#1 SMP PREEMPT Tue Nov  3 23:55:17 UTC 2026`), 4K pages
+  (`file` reports the `Image` as 4K). The `release_prefix` in the conf is the
+  full banner, so no other Samsung 6.6 build can match it: the S25 series
+  ships `6.6.127-android15-8-p87b1ce1-…-4k`, whose text addresses differ, and
+  `release_prefix_matches()` cuts at `-` boundaries.
+- **F2** factory `boot.img`
+  `sha256 373aa4c18fafbf6811d74e5d2b779a5c8846b0863ae8bd0d5e8cf1c09ad2481b`;
+  `Image` `b936ad4eb99164de807b9027f356ca7f5b64b88bc2f07e6bbe79bf0607a2ad2f`;
+  `.BTF` `2d5a2d3dc78ccc93ba1d49996bbd0dffbe5416e57d98ad024cfae170ffd51943`.
+  `vmlinux-to-elf` reconstructs the kallsyms ELF at base `0xffffffc080000000`
+  with **115 121 symbols**. Unlike the a15xzh 5.15 kernel, this Image boots
+  unmodified in QEMU — no KDP/RKP shim needed.
+- **F1 vulnerability** `begin_new_exec` calls `exec_mmap`
+  (`0xffffffc0803d9564`), `exec_task_namespaces` (`…9594`),
+  **`posix_cpu_timers_exit`** (`…95ac`), `exit_itimers` (`…95bc`) — the
+  vulnerable order.
+- **F3** `init_posix_timers` creates the cache with `mov w1, #0x108` and
+  stores it at `posix_timers_cache` (`0xffffffc082580d60`); `do_timer_create`
+  → `bl kmem_cache_alloc` (the non-`_noprof` name on 6.6) at
+  `0xffffffc08019727c`, the register feeding `x0` being
+  `ldr x0, [x20, #0xd60]` from that same global (dataflow-verified by
+  `sitecheck.py`) → **`timer_site = 0xffffffc080197280`**. It is the only
+  `kmem_cache_alloc` site in the function (`…71d8`–`…76e4`); 6.6 has no
+  `alloc_tag` profiling path. `copy_process` calls `dup_task_struct`
+  (`bl` at `0xffffffc0800ac898`), whose
+  `bl kmem_cache_alloc_node(task_struct_cachep)` at `0xffffffc0800ad470`
+  returns to `0xffffffc0800ad474`
+  → **`copy_process_low21 = 0xad474`**.
+- **F4** BTF: `cred` `0xb8` — **8-byte `atomic_long usage`**, uid `0x8`, euid
+  `0x18`, securebits `0x28`, caps `0x30`, security `0x80`, user `0x88`,
+  user_ns `0x90`, ucounts `0x98`, group_info `0xa0`; `task_struct` `0x12c0`,
+  cred `0x820`; `k_itimer` `0x108`, `it` `0x78` → `timer_node_off = 0x78`.
+  `cred_init: mov w1, #0xb8` → SLUB rounds to `0xc0` (`cred_alloc`).
+  `task_struct_vendor_size_setup` exists (`mov w9, #0x12c0`, vendor cap
+  `0x200`) but the image does not set `android_arch_task_struct_size`, so
+  `task_alloc_bytes = 0x12c0`.
+- **F5** `selinux_state 0xffffffc08259f7f8`, `panic_on_warn 0xffffffc08233ac0c`,
+  `root_user 0xffffffc08235f0a0`, `init_user_ns 0xffffffc08235ee10`,
+  `init_ucounts 0xffffffc082360c70`, `init_groups 0xffffffc082360600`; all six
+  re-verified equal to `nm`. `selinux_state - 8` is
+  `avc_latest_notif_update.notif_lock`, so the `-7` store lands on
+  `enforcing`'s low byte as on every other profile. `selinux_blob_off = 0x0`
+  (`blobsim2.py`: effective order `capability, safesetid, selinux, bpf,
+  integrity`; only selinux has a 32-byte `lbs_cred`; no landlock cred blob on
+  6.6) and `selinux_sid_kernel = 1`.
+- **F5 Samsung** `defex_creds_hash = 0xffffffc082623e28`: this build names the
+  fast table `creds_fast_hash` (its own symbol, `creds_hash + 0x40000`).
+  `get_task_creds` indexes it directly as an 8-byte array for `pid <= 0x8000`
+  (`cmp w23, #0x8, lsl #12` → `add x9, x9, x23, lsl #3`) and falls back to the
+  bucket chain above it.
+- **F6** `validate_conf.py` 0 errors (`timer_site` and `copy_process_low21`
+  match the vmlinux, 6/6 symbols, `alloc_req_off 0x10` matches BTF);
+  `--selfcheck` 0 failures on the host build; `target` mode prints
+  `target=lynx`, `samsung=1`, exit 0; a foreign banner
+  (`…abogkiS931BXXUDDZJB-4k`, the S25 Ultra kernel) is refused with
+  `conf release prefix mismatch` and no kernel access.
+- **F7–F11** all pass in QEMU against the **unmodified factory `Image`**
+  (first attempt, `logs/mass-s26fe.json`; re-run after the spray-write fix and
+  pool recycle, `logs/mass.json`, still 0 failing gates): slabinfo reports
+  `posix_timers_cache` object `264` (`0x108`) at `pagesperslab 2` (order 1)
+  and `task_struct` `4800` (`0x12c0`); `target` prints
+  `timer_site=0xffffffc080197280` and `samsung=1`; `ids`
+  `page_alloc=275 page_free=273 pairs=1029`; `probe` votes
+  `base=0xffffff7fc0000000` with `pair pfn` `agree=1`, `recs=4096 kept=4096`;
+  `leak` 512/512 votes; verify reaches `resuid=0/0/0` + `ROOT_SHELL_OK`.
+- **Samsung endgame** under `--samsung fake`: `defex_hash` clears
+  `creds_fast_hash[pid]`, the `fake_cred` stage plants the fake cred, then
+  `selinux_state` and the uid/euid repair writes run, and the worker reaches
+  `uid=0 euid=0` with `setuid(0)=0 errno=0 resuid=0/0/0`; the late-load then
+  stops at `ksud missing` exactly as designed (F12/F13 stay pending on a
+  device; the QEMU initramfs has no ksud or coreutils for the stage script).
+  Completing the five-plant chain in QEMU needed the spray-write fix and the
+  per-attempt pool recycle below — the plain race means per-plant bursts miss
+  roughly half the time, so a miss must be recoverable, not fatal. See
+  [the spray-write fix](#samsung--spray-write-fix) that this chain exposed.
+- **QEMU note** the factory `Image` boots under `qemu-system-aarch64` as-is;
+  Samsung's DEFEX logs `[DEFEX] Normal mode` and its Knox `uh_log` device
+  initialises, unlike the a15xzh 5.15 kernel that needed the vendor-hook
+  shim.
+
+### Samsung — spray-write fix (found while porting s26fe)
+
+`--samsung fake` hung after `plant1 target=… zombie` on every attempt (3/3),
+with no `free_seen`/`burst` line ever printed. Cause: `spray_thread()` wrote
+its 8 KB payloads with a blocking `write()` to a socket whose peer is never
+drained (that is what keeps the pages pinned). The Samsung chain plants
+**twice** on the same pool — `defex_hash` (zero) then `fake_cred` (fake) — and
+plant 1 leaves each queue ~full, so plant 2's first write parks inside
+`write()`, `pthread_join()` never returns, and the chain stops right after the
+zombie is observed. Single-plant paths (`verify`, plain `fake`, `permissive`)
+never fill the pool that far, which is why this was never seen before.
+
+Fix: the spray writes use `send(…, MSG_DONTWAIT)`. A write that would block
+queues no new skbuff anyway — the peer never frees space — so every byte that
+used to land still lands and the reclaim geometry is unchanged; the only
+difference is that a full queue can no longer park a spray thread past a
+`pthread_join()`.
+
+Reproduced against the pre-fix binary on `s26fe` (3/3 hangs at the same point,
+`logs/s26fe-samsungfake{,-2,-3}.log`); with the fix the chain no longer hangs,
+but it exposed a second problem: the pool is shared across stages, and every
+plant leaves ~768 MB of payloads queued forever, so each burst starts with
+less free sndbuf than the one before it and late stages starve — a burst whose
+victim page is never reclaimed by our spray (`burst hit=0`) kills the stage,
+and a miss was treated as fatal. Best pre-recycle run reached the fourth stage
+(`logs/s26fe-samsungfake-fixed5.log`, misses at plant 4); runs with larger
+sysctls or more CPUs still lost at plant 2, so the residue is the binding
+constraint, not capacity or CPU count.
+
+Two further changes in `run_plant()`/`stage_write()` fix that:
+
+- **Per-attempt pool recycle (`pool_reset`)**: at each `stage_write()` attempt
+  the spray pool from the previous attempt is closed (both ends of every
+  socketpair — closing purges the queued skbuffs and returns their pages
+  immediately) and a fresh one is created, so every burst starts with full
+  sndbuf. The fake cred makes one pool permanently special: from the moment
+  `fake_cred` lands, the queued payloads *are* the page `task->cred` points
+  into, so that pool (`pool_a`) is pinned for the life of the process and
+  every later stage runs on a second pool (`pool_b`). A plain
+  drain-after-each-zero-stage would have been wrong here — with the shared
+  pool it would have freed the fake cred's page. Releasing a completed zero
+  stage's pool is safe because its rb node was erased from its tree when the
+  child was reaped and nothing else references payload content; a missed
+  plant's pool is safe to release too because the zombie is held and never
+  reaped, so its stale nodes are never dereferenced.
+- **Burst miss is retryable** (`res->retry = 1` on `burst hit=0`): the
+  single-stage paths already looped on `!ok`, but `stage_write()` treated a
+  miss as stage-fatal. A miss writes nothing and pins nothing, so a fresh
+  plant with a fresh pool is a clean retry.
+
+Re-run on `s26fe` with both changes (`logs/s26fe-samsungfake-recycle.log`):
+the chain completes all five writes — `defex_hash` hit on attempt 1, `fake_cred`
+miss then hit on attempt 2, `selinux` attempt 1, `fake_uid` miss then attempt 2,
+`fake_euid` miss then attempt 2 — and the worker reports `uid=0 euid=0
+setuid(0)=0 resuid=0/0/0`; the run then stops at `ksud missing` by design.
+F7–F11 were re-run after the fix and still pass, so the zero-write and
+single-plant paths are unaffected.
+
 ### brussels — `6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k`
 
 - **F1** `brussels` (Redmi Note 17 Pro Max 5G) `OS3.0.311.0.WDRMIXM`. 4K pages.
