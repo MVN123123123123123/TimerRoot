@@ -352,9 +352,11 @@ The bundled Samsung profiles target `6.1.162-android14-11` (SM-S921N Galaxy
 S24 / SM-S948U Galaxy S26 Ultra), the builds SamTimer was tested on and derived
 its offsets from, `5.15.189-android13-8-33641424` (SM-A1560 Galaxy A15 5G),
 which was ported here from its own factory `boot.img` and verified in QEMU, and
-`6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (SM-S741B Galaxy S26 FE), also
-ported here from its factory `boot.img` and verified in QEMU (F7–F11, plus the
-`--samsung` DEFEX write chain; F12/F13 still need a device). A Samsung device
+`6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (SM-S741B Galaxy S26 FE) and
+`6.6.127-android15-8-p87b1ce1-abogkiS937BXXUBDZJB-4k` (SM-S937B Galaxy S25
+Edge), both also ported here from their factory `boot.img` and verified in
+QEMU (F7–F11, plus the `--samsung` DEFEX write chain; F12/F13 still need a
+device). A Samsung device
 on an unsupported kernel is refused with a message to turn Samsung mode off
 and use a generic profile. The app rejects a binary that does not carry the
 `TIMER_SAMSUNG=1` marker instead of passing `--samsung` to an old generic
@@ -365,6 +367,7 @@ build.
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy A15 5G | `a15xzh` (SM-A1560) | `BP4A.251205.006` / `A1560ZHSAEZG1` | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
 | Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
+| Galaxy S25 Edge | SM-S937B | `S937BXXUBDZJB` (EUX) | `conf/samsung/samsung-s25edge-6.6.127.conf` | verified in QEMU |
 
 The `a15xzh` profile is the first 5.15 Samsung one, so it also carries the
 5.15 geometry: 4-byte `cred.usage`, `timer_alloc 0x108`, `task_alloc_bytes
@@ -375,6 +378,19 @@ in QEMU; the late-load itself needs a device, so F12/F13 stay pending. The
 factory kernel calls the Knox hypervisor, so its QEMU run used a throwaway
 patched `Image` — the constants still come from the unmodified factory
 artifacts.
+
+The `samsung-s25edge` profile is the first S25-series one. The S25 family
+(Edge / S25 / S25+ / S25 Ultra) ships the `p87b1ce1` 6.6.127 build, which is
+not the S741B S26 FE kernel, so `timer_site` (`0xffffffc0801962b0`),
+`copy_process_low21` (`0xac474`) and every symbol were re-derived from the
+SM-S937B factory `boot.img`. It has the same 6.6 cred/task layout as S26 FE
+(8-byte `cred.usage`, `cred 0xb8`, `task_struct 0x12c0` with cred at
+`+0x820`) and the same DEFEX shape (`creds_fast_hash` is its own symbol at
+`creds_hash + 0x40000`, indexed directly for `pid <= 0x8000`). Its
+`release_prefix` pins the full `…abogkiS937BXXUBDZJB-4k` banner: the other
+S25-series images embed a different firmware string, so they are refused
+rather than run against this profile until each is derived from its own
+factory kernel.
 
 ## Credits
 
