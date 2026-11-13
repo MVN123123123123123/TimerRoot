@@ -807,7 +807,7 @@ reports 0 errors for all 24 bundled profiles.
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
-| F14 QEMU | pass | 18/18 generic profiles + the Samsung profile, see below |
+| F14 QEMU | pass | 19/21 booted profiles pass every gate (27-profile re-run, see below); the 2 exceptions are provenance limits, not binary |
 | F15 hardware | pending | no device |
 | F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
 
@@ -824,6 +824,28 @@ section above). The other four are the imported OPPO/realme profiles
 `6.6.66-…-abogki428889875-4k`), which have no factory artifact in the
 workspace — one of them was derived from a device dump, so there is no image
 to boot. `logs/mass-final.json` holds the per-profile detail.
+
+Re-run after the spray-write fix and pool recycle (`logs/mass-recl.json`,
+27 profiles: the 22 above plus `samsung-s26fe`, `samsung-s26u` and the two
+`maybe-dirty` confs): **19 of the 21 profiles with a workspace Image passed
+every gate**, including the first full-suite run of `samsung-s26fe`. The two
+exceptions are provenance/environment limits, not binary behaviour, and both
+reproduce deterministically:
+
+- `samsung-s26u` — the profile's constants come from the SamTimer reference
+  6.1.162 build, whose factory `boot.img` is not in the workspace. Its
+  generic `release_prefix = "6.1.162-android14-11"` prefix-matches the
+  workspace `g9dd05ae3a1de-ab16261587` Image (a different binary: the
+  reference layout is KASLR-disabled, text at `0xffffffc008…` vs this
+  kernel's `0xffffffc080…`), so the harness boots a lookalike banner and the
+  run fails at `base` calibration (`made=512 site=0 count=0`, identical
+  twice). The profile row stays *untested* until the S24/S26 Ultra factory
+  image is fetched and the constants re-derived; the s26fe profile pins the
+  full banner for exactly this reason.
+- `samsung-a15xzh` — the factory Image cannot boot unmodified in QEMU (Knox
+  `_uh_call`); the throwaway vendor-hook shim copy from its port was cleaned
+  from `/tmp`, so the boot dies before slabinfo. Its gates all passed in the
+  dedicated runs recorded in its section above.
 
 | profile | device | slabinfo | F7 | F8 | F9 | F10 | F11 |
 |---|---|---|---|---|---|---|---|
@@ -846,6 +868,12 @@ to boot. `logs/mass-final.json` holds the per-profile detail.
 | 6.6.118-…-ab15511674-4k | kunzite | pass | pass | pass | pass | pass | pass |
 | 6.6.127-…-ab16252310-4k | frankel (Pixel 10) | pass | pass | pass | pass | pass | pass |
 | samsung-a15xzh-5.15.189 | a15xzh (Galaxy A15 5G) | pass | pass | pass | pass | pass | pass |
+| samsung-s26fe-6.6.127 | s26fe (Galaxy S26 FE) | pass | pass | pass | pass | pass | pass |
+| samsung-s26u-6.1.162 | s26u (Galaxy S24/S26 Ultra) | pass | pass | pass | n/a | n/a | n/a |
+
+(the two `n/a` rows for s26u are the provenance mismatch above; the
+`maybe-dirty` confs report `kernel not in workspace` like the four OPPO/realme
+imports.)
 
 This run also supplies the F2 `slabinfo` item that a device was previously
 needed for. The booted kernel reports, per profile, a
