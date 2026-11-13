@@ -747,7 +747,8 @@ were re-derived from the SM-S937B factory `boot.img`.
   `base=0xffffff7fc0000000` and `pair … agree=1`; `leak` 512/512 votes;
   verify reaches `child report uid=0 euid=0 setuid(0)=0 errno=0
   resuid=0/0/0` and `ROOT_SHELL_OK`.
-- **Samsung endgame** under `--samsung fake` (same QEMU shim): `defex_hash`
+- **Samsung endgame** under `--samsung fake` (same QEMU shim; harness log
+  `logs/samsung-s25edge-fake.log`): `defex_hash`
   clears `creds_fast_hash[134]`, the `fake_cred` stage plants the fake cred
   and `selinux_state`, the SELinux plant landed on attempt 3
   (`[ksu] panic_on_warn=0`) — the other two bursts missed and were held, as
@@ -762,10 +763,11 @@ were re-derived from the SM-S937B factory `boot.img`.
   issues `hvc #0` in `rkp_robuffer_init`'s `uh_call` trampoline and the
   hypervisor-backed page-table/RO-cred/DEFEX paths have no hypervisor to talk
   to. Verification used a **throwaway patched copy**
-  (`/tmp/opencode/s25edge/Image.qemu`, built by `mkshim.py` next to it); the
-  factory artifacts in `work/s25edge/` stay unmodified and **no constant was
-  derived from the shim**. Five one-word patches, static VA → file offset =
-  VA − `0xffffffc080000000`:
+  (`/tmp/opencode/s25edge/Image.qemu`, built by `mkshim.py` next to it; both
+  are also kept under `work/s25edge/qemu-shim/` in the port tree so the run
+  can be reproduced); the factory artifacts in `work/s25edge/` stay unmodified
+  and **no constant was derived from the shim**. Five one-word patches,
+  static VA → file offset = VA − `0xffffffc080000000`:
 
   | VA | original | shim | why |
   |---|---|---|---|
