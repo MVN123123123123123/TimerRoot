@@ -562,8 +562,9 @@ final class AutoRoot {
                  * Bump on every AIDL change: Shizuku tears down a cached user
                  * service whose version differs, so a stale shell from an
                  * earlier APK can never answer the new transaction ids.
-                 * 8 -> 9 added softRestart(); 9 -> 10 added setSamsungMode().
+                 * 8 -> 9 added softRestart(); 9 -> 10 added setSamsungMode();
+                 * 10 -> 11 added execSu().
                  */
-                .version(10);
+                .version(11);
     }
 }

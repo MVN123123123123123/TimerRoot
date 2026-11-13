@@ -35,7 +35,7 @@ If the KernelSU stage loses its race, the card turns red with `KernelSU failed`.
 
 ## Auto-root on boot
 
-Root once, press **Install channel**, reboot, and tap **Always allow** on the one-time ADB key dialog. From then on a foreground service starts Shizuku over localhost ADB at `LOCKED_BOOT_COMPLETED` and runs the exploit before the first unlock, once per real boot. It then late-loads KernelSU and performs a userspace soft restart so modules and Zygisk start.
+Root once, press **Install channel**, reboot, and tap **Always allow** on the one-time ADB key dialog. With KernelSU already loaded the channel setup runs through `su` and the key is written directly, so the dialog does not appear. From then on a foreground service starts Shizuku over localhost ADB at `LOCKED_BOOT_COMPLETED` and runs the exploit before the first unlock, once per real boot. It then late-loads KernelSU and performs a userspace soft restart so modules and Zygisk start.
 
 Use **Run auto-root now** to repeat on demand; history is under **Auto-root log**. The optional **Boot screen** shows progress over the lock screen. Details and field notes: [docs/auto-root.md](docs/auto-root.md).
 

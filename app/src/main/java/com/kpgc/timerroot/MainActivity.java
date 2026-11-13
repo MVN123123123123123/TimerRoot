@@ -1874,8 +1874,14 @@ public class MainActivity extends Activity {
      * The exploit can clear the kernel's enforcing flag itself (its
      * "permissive" mode), and /data/property is owned by root, so the uid-0
      * shell can then append persist.adb.tcp.port to the protobuf that init
-     * reads at the next boot. The key itself has to be authorized once by the
-     * normal ADB dialog; after that it stays in adb_keys.
+     * reads at the next boot.
+     *
+     * adb_keys is a different matter: it is 0640 system:shell and appending
+     * needs CAP_DAC_OVERRIDE. When KernelSU is already loaded, run the whole
+     * setup through its su (full uid-0 capabilities) so the key lands without
+     * any dialog. Without a module the shell-domain root cannot touch the
+     * file; the key then has to be authorized once by the normal ADB dialog
+     * and stays in adb_keys afterwards.
      */
     private void installChannel() {
         if (service == null) {
@@ -1905,6 +1911,13 @@ public class MainActivity extends Activity {
                 }
                 service.setSamsungMode(samsung);
 
+                String info = service.info();
+                addLog(info.trim());
+                // KernelSU's su gives a full-capability uid 0 (u:r:ksu:s0),
+                // unlike the exploit shell (u:r:shell:s0, no capabilities).
+                // Use it when it is there: adb_keys needs CAP_DAC_OVERRIDE.
+                boolean ksuActive = info.contains("ksu=active");
+
                 // 1. SELinux permissive: property_data_file is only writable
                 //    while the kernel's enforcing flag is clear.
                 if (samsung) {
@@ -1912,39 +1925,42 @@ public class MainActivity extends Activity {
                     // the generic "permissive" plant is a second trigger and
                     // is deliberately not used here.
                     addLog("Samsung mode: SELinux is managed by the ksud chain");
-                } else {
-                    String info = service.info();
-                    addLog(info.trim());
-                    if (!info.contains("selinux=Permissive")) {
-                        addLog("clearing SELinux through the exploit"
-                                + " (this can take a few minutes)...");
-                        String out = service.run("permissive");
-                        boolean done = out.contains("permissive done");
-                        addLog(done ? "permissive ok" : tailText(out));
-                        if (!done) {
-                            ui.post(() -> {
-                                toast("Could not clear SELinux - reboot and retry");
-                                addLog("channel install failed before writing the property."
-                                        + " A failed plant parks a zombie, so reboot first.");
-                            });
-                            return;
-                        }
+                } else if (!info.contains("selinux=Permissive")) {
+                    addLog("clearing SELinux through the exploit"
+                            + " (this can take a few minutes)...");
+                    String out = service.run("permissive");
+                    boolean done = out.contains("permissive done");
+                    addLog(done ? "permissive ok" : tailText(out));
+                    if (!done) {
+                        ui.post(() -> {
+                            toast("Could not clear SELinux - reboot and retry");
+                            addLog("channel install failed before writing the property."
+                                    + " A failed plant parks a zombie, so reboot first.");
+                        });
+                        return;
                     }
                 }
 
-                // 2. root shell: generic uses the shell-domain stage, Samsung
-                //    runs the unified fake/DEFEX/KDP chain.
-                String out = service.openRoot();
-                boolean ready = out.startsWith("root shell ready")
-                        || out.contains("root shell already open");
-                rootOpen = ready;
-                addLog(out);
-                if (!ready) {
-                    ui.post(() -> {
-                        toast("Could not get a root shell - reboot and retry");
-                        addLog("channel install failed: no root shell.");
-                    });
-                    return;
+                // 2. root: when KernelSU is already loaded, use su instead of
+                //    running the exploit again (each plant parks a process).
+                //    Otherwise use the shell-domain stage; Samsung runs the
+                //    unified fake/DEFEX/KDP chain.
+                if (ksuActive) {
+                    addLog("KernelSU is active - running the channel setup"
+                            + " through su");
+                } else {
+                    String out = service.openRoot();
+                    boolean ready = out.startsWith("root shell ready")
+                            || out.contains("root shell already open");
+                    rootOpen = ready;
+                    addLog(out);
+                    if (!ready) {
+                        ui.post(() -> {
+                            toast("Could not get a root shell - reboot and retry");
+                            addLog("channel install failed: no root shell.");
+                        });
+                        return;
+                    }
                 }
 
                 // 3. Append one PersistentProperties record:
@@ -1965,26 +1981,47 @@ public class MainActivity extends Activity {
                         + "settings put global adb_allowed_connection_time 0; "
                         + "echo settings=$?; "
                         + "K='" + key + "'; A=/data/misc/adb/adb_keys; "
-                        + "grep -qF \"$K\" \"$A\" 2>/dev/null || "
-                        + "echo \"$K\" >> \"$A\" 2>/dev/null; "
-                        + "echo key_count=$(grep -cF timerroot \"$A\" 2>/dev/null); "
+                        // Presence first, then write. The exploit shell cannot
+                        // write this file (0640 system:shell, no capabilities),
+                        // so the attempt is silent and reported as locked
+                        // instead of leaking a shell "Permission denied".
+                        + "if grep -qF \"$K\" \"$A\" 2>/dev/null; then echo KEY_PRESENT; "
+                        + "elif echo \"$K\" 2>/dev/null >> \"$A\"; then "
+                        + "chown system:shell \"$A\" 2>/dev/null; "
+                        + "chmod 0640 \"$A\" 2>/dev/null; echo KEY_WRITTEN; "
+                        + "else echo KEY_LOCKED; fi; "
+                        + "key_count=$(grep -cF timerroot \"$A\" 2>/dev/null) "
+                        + "|| key_count=unreadable; echo key_count=$key_count; "
                         + "appops set com.kpgc.timerroot android:use_full_screen_intent allow; "
                         + "appops set com.kpgc.timerroot android:system_alert_window allow; "
                         + "echo CHANNEL_DONE";
-                String result = service.execRoot(command);
+                String result = ksuActive
+                        ? service.execSu(command)
+                        : service.execRoot(command);
                 addLog(result);
                 boolean written = result.contains("PROP_WRITTEN")
                         || result.contains("PROP_PRESENT");
+                boolean keyReady = result.contains("KEY_PRESENT")
+                        || result.contains("KEY_WRITTEN");
                 ui.post(() -> {
                     if (written) {
                         AutoRoot.prefs(this).edit()
                                 .putBoolean(AutoRoot.KEY_SETUP_DONE, true).apply();
-                        toast("Channel installed - reboot to test auto-root");
-                        addLog("auto-root channel installed: "
-                                + "persist.adb.tcp.port=" + port
-                                + " (active after the next boot)."
-                                + " If the key count is 0, authorize the key once"
-                                + " via the ADB dialog.");
+                        if (keyReady) {
+                            toast("Channel installed - reboot to test auto-root");
+                            addLog("auto-root channel installed: "
+                                    + "persist.adb.tcp.port=" + port
+                                    + " and the ADB key is authorized"
+                                    + " (active after the next boot).");
+                        } else {
+                            toast("Channel installed - authorize the ADB key once");
+                            addLog("auto-root channel installed: "
+                                    + "persist.adb.tcp.port=" + port
+                                    + " (active after the next boot)."
+                                    + " The ADB key could not be written from the"
+                                    + " exploit shell; tap \"Always allow\" once"
+                                    + " when the ADB prompt appears after the reboot.");
+                        }
                     } else {
                         toast("Could not write the persistent property");
                         addLog("channel install failed: " + tailText(result));

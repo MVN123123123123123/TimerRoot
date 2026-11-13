@@ -48,7 +48,7 @@ public class UserService extends IUserService.Stub {
     private static final String SAMSUNG_ASSET = "assets/samsung/libksud.so";
     private static final String WORK_DIR = "/data/local/tmp/w";
     private static final String KSUD = WORK_DIR + "/ksud";
-    private static final String SAMSUNG_CMD = "/data/local/tmp/timer-root-cmd.sh";
+    private static final String SU_CMD = "/data/local/tmp/timer-root-cmd.sh";
     /** Literal the Samsung-capable binary embeds in read-only data. */
     private static final String SAMSUNG_MARKER = "TIMER_SAMSUNG=1";
     /**
@@ -910,7 +910,7 @@ public class UserService extends IUserService.Stub {
     @Override
     public String execRoot(String cmd) {
         if (samsungMode()) {
-            return execRootSu(cmd);
+            return execViaSu(cmd);
         }
         if (rootProcess == null || !rootProcess.isAlive()) {
             return "root shell not open";
@@ -937,19 +937,33 @@ public class UserService extends IUserService.Stub {
     }
 
     /**
-     * Samsung root commands go through KernelSU's su, not a persistent
-     * exploit shell.  The command is written to a script so quoting is not
-     * lost between the Java string and three layers of /bin/sh.
+     * Runs a command as full-capability uid 0 through KernelSU's su
+     * (u:r:ksu:s0). The exploit's shell-domain root shell cannot write
+     * adb_keys; this path can, so Install channel prefers it whenever a
+     * module is loaded.
      */
-    private String execRootSu(String cmd) {
+    @Override
+    public String execSu(String cmd) {
+        if (!suActiveOnce()) {
+            return "su is not available (is KernelSU loaded?)";
+        }
+        return execViaSu(cmd);
+    }
+
+    /**
+     * Samsung root commands, and any command that needs full capabilities,
+     * go through KernelSU's su. The command is written to a script so quoting
+     * is not lost between the Java string and three layers of /bin/sh.
+     */
+    private String execViaSu(String cmd) {
         try {
-            try (FileOutputStream out = new FileOutputStream(SAMSUNG_CMD)) {
+            try (FileOutputStream out = new FileOutputStream(SU_CMD)) {
                 out.write(("#!/system/bin/sh\ncd /\n" + cmd + "\n")
                         .getBytes(StandardCharsets.UTF_8));
             }
-            Os.chmod(SAMSUNG_CMD, 0755);
+            Os.chmod(SU_CMD, 0755);
             String result = execOutTimeout(
-                    "/system/bin/su -c 'sh " + SAMSUNG_CMD + "'", 120000);
+                    "/system/bin/su -c 'sh " + SU_CMD + "'", 120000);
             if ("timeout".equals(result) || "error".equals(result)) {
                 return "execRoot failed: " + result;
             }
@@ -970,7 +984,20 @@ public class UserService extends IUserService.Stub {
     /** SELinux / Seccomp / ksud, as shown on the home card. */
     @Override
     public String info() {
+        // Probe su first: it is both the ksu flag and the fallback for
+        // getenforce, which the shell uid cannot read from selinuxfs.
+        String ksu = execOut("/system/bin/su -c id").contains("u:r:ksu:s0")
+                ? "active" : "not loaded";
         String selinux = execOut("getenforce");
+        if ("active".equals(ksu)
+                && !selinux.equals("Permissive")
+                && !selinux.equals("Enforcing")) {
+            String viaSu = execOutTimeout(
+                    "/system/bin/su -c getenforce", 5000).trim();
+            if (viaSu.equals("Permissive") || viaSu.equals("Enforcing")) {
+                selinux = viaSu;
+            }
+        }
         String seccomp = execOut("grep -m1 Seccomp /proc/self/status | awk '{print $2}'");
         String ksud = "not loaded";
         if (samsungMode()) {
@@ -988,8 +1015,6 @@ public class UserService extends IUserService.Stub {
                 ksud = "missing";
             }
         }
-        String ksu = execOut("/system/bin/su -c id").contains("u:r:ksu:s0")
-                ? "active" : "not loaded";
         return "selinux=" + selinux + "\nseccomp=" + seccomp + "\nksud=" + ksud
                 + "\nksu=" + ksu + "\n";
     }
