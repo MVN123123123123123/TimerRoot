@@ -41,7 +41,7 @@ Use **Run auto-root now** to repeat on demand; history is under **Auto-root log*
 
 ## Samsung mode
 
-Selected automatically when `Build.MANUFACTURER` or `Build.BRAND` is `samsung`, or manually under **Settings -> Device mode**. It uses `conf/samsung/*.conf` and the pinned [diabl0w/KernelSU](https://github.com/diabl0w/KernelSU) Samsung build (manager version `samsung-v*`); other managers are rejected rather than mismatched. The bundled profiles target kernels `6.1.162-android14-11` (Galaxy S24 / S26 Ultra), `5.15.189-android13-8-33641424` (Galaxy A15 5G), `6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (Galaxy S26 FE) and `6.6.127-android15-8-p87b1ce1-abogkiS937BXXUBDZJB-4k` (Galaxy S25 Edge); an unsupported kernel is refused. See [Samsung mode](docs/supported-devices.md#samsung-mode).
+Selected automatically when `Build.MANUFACTURER` or `Build.BRAND` is `samsung`, or manually under **Settings -> Device mode**. It uses `conf/samsung/*.conf` and the pinned [diabl0w/KernelSU](https://github.com/diabl0w/KernelSU) Samsung build (manager version `samsung-v*`); other managers are rejected rather than mismatched. The bundled profiles target kernels `6.1.162-android14-11` (Galaxy S24 / S26 Ultra), `5.15.189-android13-8-33641424` (Galaxy A15 5G), `5.15.197-android13-8-34343818-abS911BXXUAGZIF` (Galaxy S23), `6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (Galaxy S26 FE) and `6.6.127-android15-8-p87b1ce1-abogkiS937BXXUBDZJB-4k` (Galaxy S25 Edge); an unsupported kernel is refused. See [Samsung mode](docs/supported-devices.md#samsung-mode).
 
 ## Supported devices
 

@@ -33,6 +33,11 @@ import android.widget.ScrollView;
 import android.widget.Toast;
 import android.widget.TextView;
 
+import com.google.android.material.bottomnavigation.BottomNavigationView;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.materialswitch.MaterialSwitch;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -65,17 +70,32 @@ public class MainActivity extends Activity {
             "https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/timer";
     private static final String TIMER_TARGET = "target=lynx";
 
-    private static final int BG = 0xFF0B0B0B;
-    private static final int CARD = 0xFF1A1A1C;
-    private static final int CARD_RAISED = 0xFF232326;
-    private static final int LINE = 0xFF2C2C30;
-    private static final int TEXT = 0xFFFFFFFF;
-    private static final int MUTED = 0xFF8E8E96;
-    private static final int GREEN = 0xFF2FD06B;
-    private static final int ON_GREEN = 0xFF04140A;
-    private static final int GREEN_DARK = 0xFF123D24;
-    private static final int RED = 0xFFFF5C5C;
-    private static final int TAB_BAR_HEIGHT = 62;
+    /*
+     * Material You 3 color roles, resolved from the activity theme once at
+     * startup. On Android 12+ the theme carries the dynamic color overlay
+     * applied in onCreate, so these follow the wallpaper palette; on API 30
+     * they fall back to the brand-green tokens in colors.xml.
+     */
+    private int cSurface;
+    private int cSurfaceContainerLow;
+    private int cSurfaceContainer;
+    private int cSurfaceContainerHigh;
+    private int cSurfaceContainerHighest;
+    private int cOnSurface;
+    private int cOnSurfaceVariant;
+    private int cOutline;
+    private int cOutlineVariant;
+    private int cPrimary;
+    private int cOnPrimary;
+    private int cPrimaryContainer;
+    private int cOnPrimaryContainer;
+    private int cSecondaryContainer;
+    private int cOnSecondaryContainer;
+    private int cError;
+    private int cErrorContainer;
+    private int cOnErrorContainer;
+
+    private static final int TAB_BAR_HEIGHT = 80;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss", Locale.US);
@@ -102,19 +122,22 @@ public class MainActivity extends Activity {
     private LinearLayout homePage;
     private LinearLayout logPage;
     private LinearLayout settingsPage;
-    private final TextView[] tabLabels = new TextView[3];
-    private final View[] tabIndicators = new View[3];
-    private TextView autoToggle;
-    private TextView samsungToggle;
-    private TextView bootToggle;
-    private TextView softToggle;
-    private TextView updateToggle;
+    private BottomNavigationView nav;
+    private MaterialSwitch autoToggle;
+    private MaterialSwitch samsungToggle;
+    private MaterialSwitch bootToggle;
+    private MaterialSwitch softToggle;
+    private MaterialSwitch updateToggle;
     private TextView updateStatus;
     private TextView updateBannerTitle;
     private TextView updateBannerDetail;
     private LinearLayout updateBanner;
     private volatile int latestKnownCode;
     private boolean updateChecking;
+    /** Guards switch state restores so programmatic setChecked() does not
+     *  re-trigger the user-facing checked listener. */
+    private boolean applyingSwitchState;
+    private boolean inShowTab;
     private String installedVersion = "?";
     private String ksud = "-";
     private String ksu = "unknown";
@@ -150,8 +173,24 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         Log.i(TAG, "onCreate");
 
+        /*
+         * Material You: on Android 12+ apply the library's dynamic color
+         * overlay straight onto the activity theme, so the wallpaper's
+         * tonal palette replaces every color role before the UI is built.
+         * On API 30 the theme's own brand-green tokens are used unchanged.
+         * (Applied directly rather than through DynamicColors: the style is
+         * empty below v31 and fully dynamic on v31+, and applyStyle on the
+         * activity theme is deterministic.)
+         */
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            getTheme().applyStyle(
+                    com.google.android.material.R.style
+                            .ThemeOverlay_Material3_DynamicColors_Dark, true);
+        }
+        initColors();
+
         final FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(BG);
+        root.setBackgroundColor(cSurface);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             v.setPadding(0, insets.getSystemWindowInsetTop(), 0,
                     insets.getSystemWindowInsetBottom());
@@ -171,9 +210,10 @@ public class MainActivity extends Activity {
         root.addView(logPage, fill);
         root.addView(settingsPage, fill);
 
-        LinearLayout bottom = buildBottomBar();
+        BottomNavigationView bottom = buildBottomNav();
         FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(TAB_BAR_HEIGHT), Gravity.BOTTOM);
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM);
         root.addView(bottom, barParams);
 
         setContentView(root);
@@ -208,24 +248,24 @@ public class MainActivity extends Activity {
         statusCard.setOrientation(LinearLayout.HORIZONTAL);
         statusCard.setGravity(Gravity.CENTER_VERTICAL);
         statusCard.setPadding(dp(20), dp(20), dp(20), dp(20));
-        statusCard.setBackground(cardBackground(CARD));
+        statusCard.setBackground(cardBackground(cSurfaceContainer));
 
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         TextView label = new TextView(this);
         label.setText("STATUS");
-        label.setTextColor(0x99FFFFFF);
+        label.setTextColor(cOnSurfaceVariant);
         label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         label.setTypeface(Typeface.DEFAULT_BOLD);
         label.setLetterSpacing(0.16f);
         statusTitle = new TextView(this);
         statusTitle.setText("Not connected");
-        statusTitle.setTextColor(TEXT);
+        statusTitle.setTextColor(cOnSurface);
         statusTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         statusTitle.setTypeface(Typeface.DEFAULT_BOLD);
         statusSubtitle = new TextView(this);
         statusSubtitle.setText("Start Shizuku first");
-        statusSubtitle.setTextColor(0xFFB8B8C0);
+        statusSubtitle.setTextColor(cOnSurfaceVariant);
         statusSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         statusSubtitle.setLineSpacing(dp(2), 1f);
         texts.addView(label);
@@ -309,7 +349,7 @@ public class MainActivity extends Activity {
         LinearLayout samsungCard = card();
         samsungToggle = addToggleRow(samsungCard, "Samsung mode",
                 "DEFEX/KDP chain for Samsung kernels (auto-detected)",
-                v -> toggleSamsungMode());
+                (b, on) -> applySamsungMode(on));
         body.addView(samsungCard);
         body.addView(spacer(10));
         body.addView(compactButton("Use automatic detection",
@@ -326,7 +366,7 @@ public class MainActivity extends Activity {
         addSection(body, "Auto-root");
         LinearLayout autoCard = card();
         autoToggle = addToggleRow(autoCard, "Auto-root",
-                "Run the exploit on every boot", v -> toggleAutoRoot());
+                "Run the exploit on every boot", (b, on) -> applyAutoRoot(on));
         body.addView(autoCard);
         body.addView(spacer(10));
         body.addView(buttonRow(
@@ -346,7 +386,7 @@ public class MainActivity extends Activity {
         addSection(body, "Boot screen");
         LinearLayout bootCard = card();
         bootToggle = addToggleRow(bootCard, "Boot status screen",
-                "Show progress over the lock screen", v -> toggleBootUi());
+                "Show progress over the lock screen", (b, on) -> applyBootUi(on));
         body.addView(bootCard);
         body.addView(spacer(10));
         body.addView(buttonRow(
@@ -365,7 +405,8 @@ public class MainActivity extends Activity {
         addSection(body, "Restart");
         LinearLayout softCard = card();
         softToggle = addToggleRow(softCard, "Auto soft restart",
-                "Restart Android after a successful root", v -> toggleSoftRestart());
+                "Restart Android after a successful root",
+                (b, on) -> applySoftRestart(on));
         body.addView(softCard);
         body.addView(spacer(10));
         body.addView(secondaryButton("Restart Android", v -> confirmSoftRestart()));
@@ -378,7 +419,8 @@ public class MainActivity extends Activity {
         addSection(body, "Updates");
         LinearLayout updateCard = card();
         updateToggle = addToggleRow(updateCard, "Check for updates",
-                "Look for a newer build once a day", v -> toggleAutoUpdate());
+                "Look for a newer build once a day",
+                (b, on) -> applyAutoUpdate(on));
         body.addView(updateCard);
         body.addView(spacer(10));
         updateStatus = bodyText("Not checked yet.");
@@ -393,7 +435,8 @@ public class MainActivity extends Activity {
         body.addView(spacer(28));
         TextView footer = new TextView(this);
         footer.setText("TimerRoot " + versionName() + " · CVE-2026-98260");
-        footer.setTextColor(0xFF6E6E76);
+        footer.setTextColor(cOnSurfaceVariant);
+        footer.setAlpha(0.6f);
         footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         footer.setGravity(Gravity.CENTER);
         body.addView(footer);
@@ -414,12 +457,12 @@ public class MainActivity extends Activity {
         titles.setOrientation(LinearLayout.VERTICAL);
         TextView title = new TextView(this);
         title.setText("Log");
-        title.setTextColor(TEXT);
+        title.setTextColor(cOnSurface);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         TextView subtitle = new TextView(this);
         subtitle.setText("App and shell service activity");
-        subtitle.setTextColor(MUTED);
+        subtitle.setTextColor(cOnSurfaceVariant);
         subtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         titles.addView(title);
         titles.addView(subtitle);
@@ -440,7 +483,7 @@ public class MainActivity extends Activity {
         logText = new TextView(this);
         logText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         logText.setTypeface(Typeface.MONOSPACE);
-        logText.setTextColor(0xFFD6D6D6);
+        logText.setTextColor(cOnSurfaceVariant);
         logText.setTextIsSelectable(true);
         logText.setLineSpacing(dp(2), 1f);
         logScroll = new ScrollView(this);
@@ -457,59 +500,54 @@ public class MainActivity extends Activity {
         return page;
     }
 
-    private LinearLayout buildBottomBar() {
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setBackgroundColor(0xFF131315);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(8), 0, dp(8), 0);
-        addTab(bar, 0, "Home", v -> showTab(0));
-        addTab(bar, 1, "Log", v -> showTab(1));
-        addTab(bar, 2, "Settings", v -> showTab(2));
+    /**
+     * Material 3 navigation bar: surface container background, pill-shaped
+     * active indicator in the secondary container color and tinted icons,
+     * painted from the resolved tokens so the bar matches the rest of the
+     * UI in every wallpaper palette.
+     */
+    private BottomNavigationView buildBottomNav() {
+        BottomNavigationView bar = new BottomNavigationView(this);
+        bar.getMenu()
+                .add(0, 1, 0, "Home")
+                .setIcon(R.drawable.ic_home);
+        bar.getMenu()
+                .add(0, 2, 0, "Log")
+                .setIcon(R.drawable.ic_log);
+        bar.getMenu()
+                .add(0, 3, 0, "Settings")
+                .setIcon(R.drawable.ic_settings);
+        bar.setOnItemSelectedListener(item -> {
+            showTab((int) item.getItemId() - 1);
+            return true;
+        });
+        bar.setBackgroundColor(cSurfaceContainer);
+        int[][] states = {{android.R.attr.state_checked}, {}};
+        int[] labelColors = {cOnSurface, cOnSurfaceVariant};
+        ColorStateList tint = new ColorStateList(states, labelColors);
+        bar.setItemIconTintList(tint);
+        bar.setItemTextColor(tint);
+        bar.setItemActiveIndicatorColor(ColorStateList.valueOf(cSecondaryContainer));
+        bar.setItemRippleColor(ColorStateList.valueOf(
+                (cOnSurface & 0x00FFFFFF) | 0x1F000000));
+        nav = bar;
         return bar;
     }
 
-    private void addTab(LinearLayout bar, int index, String label,
-                        View.OnClickListener click) {
-        LinearLayout tab = new LinearLayout(this);
-        tab.setOrientation(LinearLayout.VERTICAL);
-        tab.setGravity(Gravity.CENTER);
-        tab.setOnClickListener(click);
-
-        TextView text = new TextView(this);
-        text.setText(label);
-        text.setTextColor(MUTED);
-        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        text.setGravity(Gravity.CENTER);
-        tab.addView(text);
-
-        View indicator = new View(this);
-        GradientDrawable dot = new GradientDrawable();
-        dot.setColor(GREEN);
-        dot.setCornerRadius(dp(2));
-        indicator.setBackground(dot);
-        LinearLayout.LayoutParams dotParams = new LinearLayout.LayoutParams(
-                dp(18), dp(3));
-        dotParams.topMargin = dp(6);
-        tab.addView(indicator, dotParams);
-
-        bar.addView(tab, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.MATCH_PARENT, 1f));
-        tabLabels[index] = text;
-        tabIndicators[index] = indicator;
-    }
-
     private void showTab(int index) {
+        if (inShowTab) {
+            return;
+        }
+        inShowTab = true;
         homePage.setVisibility(index == 0 ? View.VISIBLE : View.GONE);
         logPage.setVisibility(index == 1 ? View.VISIBLE : View.GONE);
         settingsPage.setVisibility(index == 2 ? View.VISIBLE : View.GONE);
-        for (int i = 0; i < tabLabels.length; i++) {
-            boolean active = i == index;
-            tabLabels[i].setTextColor(active ? GREEN : MUTED);
-            tabLabels[i].setTypeface(active
-                    ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            tabIndicators[i].setVisibility(active
-                    ? View.VISIBLE : View.INVISIBLE);
+        try {
+            if (nav != null && nav.getSelectedItemId() != index + 1) {
+                nav.setSelectedItemId(index + 1);
+            }
+        } finally {
+            inShowTab = false;
         }
     }
 
@@ -519,10 +557,52 @@ public class MainActivity extends Activity {
         return (int) (value * getResources().getDisplayMetrics().density);
     }
 
+    /** Resolves the Material You color roles from the (dynamic) theme. */
+    private void initColors() {
+        cSurface = token(com.google.android.material.R.attr.colorSurface);
+        cSurfaceContainerLow = token(
+                com.google.android.material.R.attr.colorSurfaceContainerLow);
+        cSurfaceContainer = token(
+                com.google.android.material.R.attr.colorSurfaceContainer);
+        cSurfaceContainerHigh = token(
+                com.google.android.material.R.attr.colorSurfaceContainerHigh);
+        cSurfaceContainerHighest = token(
+                com.google.android.material.R.attr.colorSurfaceContainerHighest);
+        cOnSurface = token(com.google.android.material.R.attr.colorOnSurface);
+        cOnSurfaceVariant = token(
+                com.google.android.material.R.attr.colorOnSurfaceVariant);
+        cOutline = token(com.google.android.material.R.attr.colorOutline);
+        cOutlineVariant = token(
+                com.google.android.material.R.attr.colorOutlineVariant);
+        cPrimary = token(com.google.android.material.R.attr.colorPrimary);
+        cOnPrimary = token(com.google.android.material.R.attr.colorOnPrimary);
+        cPrimaryContainer = token(
+                com.google.android.material.R.attr.colorPrimaryContainer);
+        cOnPrimaryContainer = token(
+                com.google.android.material.R.attr.colorOnPrimaryContainer);
+        cSecondaryContainer = token(
+                com.google.android.material.R.attr.colorSecondaryContainer);
+        cOnSecondaryContainer = token(
+                com.google.android.material.R.attr.colorOnSecondaryContainer);
+        cError = token(com.google.android.material.R.attr.colorError);
+        cErrorContainer = token(
+                com.google.android.material.R.attr.colorErrorContainer);
+        cOnErrorContainer = token(
+                com.google.android.material.R.attr.colorOnErrorContainer);
+    }
+
+    private int token(int attr) {
+        TypedValue value = new TypedValue();
+        if (!getTheme().resolveAttribute(attr, value, true)) {
+            return 0xFFFFFFFF;
+        }
+        return value.data;
+    }
+
     private LinearLayout page() {
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setBackgroundColor(BG);
+        page.setBackgroundColor(cSurface);
         return page;
     }
 
@@ -548,12 +628,12 @@ public class MainActivity extends Activity {
         header.setOrientation(LinearLayout.VERTICAL);
         TextView name = new TextView(this);
         name.setText(title);
-        name.setTextColor(TEXT);
+        name.setTextColor(cOnSurface);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         TextView sub = new TextView(this);
         sub.setText(subtitle);
-        sub.setTextColor(MUTED);
+        sub.setTextColor(cOnSurfaceVariant);
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         sub.setLineSpacing(dp(2), 1f);
         header.addView(name);
@@ -578,7 +658,7 @@ public class MainActivity extends Activity {
     private TextView sectionLabel(String text) {
         TextView view = new TextView(this);
         view.setText(text.toUpperCase(Locale.US));
-        view.setTextColor(MUTED);
+        view.setTextColor(cOnSurfaceVariant);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         view.setTypeface(Typeface.DEFAULT_BOLD);
         view.setLetterSpacing(0.14f);
@@ -594,7 +674,7 @@ public class MainActivity extends Activity {
     private LinearLayout card() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(cardBackground(CARD));
+        card.setBackground(cardBackground(cSurfaceContainer));
         return card;
     }
 
@@ -604,13 +684,14 @@ public class MainActivity extends Activity {
         return card;
     }
 
+    /** M3 filled tonal card: surface container low, soft 20dp corners. */
     private LinearLayout hintCard(String text) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF141416);
-        bg.setCornerRadius(dp(18));
-        bg.setStroke(dp(1), LINE);
+        bg.setColor(cSurfaceContainerLow);
+        bg.setCornerRadius(dp(20));
+        bg.setStroke(dp(1), cOutlineVariant);
         card.setBackground(bg);
         card.setPadding(dp(16), dp(14), dp(16), dp(14));
         card.addView(bodyText(text));
@@ -618,16 +699,16 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * Green-tinted banner on Home announcing a newer release. Hidden until a
-     * check actually finds one, so Home stays unchanged for most users.
+     * Tonal banner on Home announcing a newer release, painted with the
+     * secondary container role. Hidden until a check actually finds one, so
+     * Home stays unchanged for most users.
      */
     private LinearLayout buildUpdateBanner() {
         LinearLayout banner = new LinearLayout(this);
         banner.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF0F2E1E);
-        bg.setCornerRadius(dp(22));
-        bg.setStroke(dp(1), 0xFF24563A);
+        bg.setColor(cSecondaryContainer);
+        bg.setCornerRadius(dp(20));
         banner.setBackground(bg);
         banner.setPadding(dp(18), dp(16), dp(18), dp(16));
 
@@ -639,12 +720,13 @@ public class MainActivity extends Activity {
         texts.setOrientation(LinearLayout.VERTICAL);
         updateBannerTitle = new TextView(this);
         updateBannerTitle.setText("Update available");
-        updateBannerTitle.setTextColor(TEXT);
+        updateBannerTitle.setTextColor(cOnSecondaryContainer);
         updateBannerTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         updateBannerTitle.setTypeface(Typeface.DEFAULT_BOLD);
         updateBannerDetail = new TextView(this);
         updateBannerDetail.setText("");
-        updateBannerDetail.setTextColor(0xFFA8CFB8);
+        updateBannerDetail.setTextColor(cOnSecondaryContainer);
+        updateBannerDetail.setAlpha(0.8f);
         updateBannerDetail.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         updateBannerDetail.setLineSpacing(dp(2), 1f);
         LinearLayout.LayoutParams detailParams = new LinearLayout.LayoutParams(
@@ -658,12 +740,12 @@ public class MainActivity extends Activity {
 
         TextView dismiss = new TextView(this);
         dismiss.setText("Dismiss");
-        dismiss.setTextColor(0xFFA8CFB8);
-        dismiss.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        dismiss.setTextColor(cOnSecondaryContainer);
+        dismiss.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         dismiss.setTypeface(Typeface.DEFAULT_BOLD);
         dismiss.setGravity(Gravity.CENTER);
         dismiss.setPadding(dp(12), dp(8), dp(12), dp(8));
-        dismiss.setBackground(pressable(roundRect(0xFF1D4A32, 14, 0)));
+        dismiss.setBackground(pressable(roundRect(cSecondaryContainer, 14, 0)));
         dismiss.setOnClickListener(v -> {
             if (latestKnownCode > 0) {
                 UpdateChecker.dismiss(this, latestKnownCode);
@@ -683,7 +765,7 @@ public class MainActivity extends Activity {
     private TextView bodyText(String text) {
         TextView view = new TextView(this);
         view.setText(text);
-        view.setTextColor(0xFFB0B0B8);
+        view.setTextColor(cOnSurfaceVariant);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         view.setLineSpacing(dp(3), 1f);
         return view;
@@ -692,12 +774,7 @@ public class MainActivity extends Activity {
     private GradientDrawable cardBackground(int color) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
-        drawable.setCornerRadius(dp(22));
-        if (color == GREEN_DARK) {
-            drawable.setGradientType(GradientDrawable.LINEAR_GRADIENT);
-            drawable.setOrientation(GradientDrawable.Orientation.LEFT_RIGHT);
-            drawable.setColors(new int[]{0xFF0F3A22, 0xFF1E7A46});
-        }
+        drawable.setCornerRadius(dp(20));
         return drawable;
     }
 
@@ -712,45 +789,71 @@ public class MainActivity extends Activity {
     }
 
     private Drawable pressable(Drawable content) {
-        return new RippleDrawable(ColorStateList.valueOf(0x24FFFFFF), content, null);
+        // A quiet veil of the on-surface color keeps the M3 state layer
+        // readable on every container tone the palette can produce.
+        return new RippleDrawable(ColorStateList.valueOf(
+                (cOnSurface & 0x00FFFFFF) | 0x1F000000), content, null);
     }
 
-    private TextView button(String text, int background, int color, int stroke,
-                            int textSize, int padH, int padV, int radius,
-                            int minHeight, View.OnClickListener click) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(color);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSize);
-        view.setTypeface(Typeface.DEFAULT_BOLD);
-        view.setGravity(Gravity.CENTER);
-        view.setPadding(dp(padH), dp(padV), dp(padH), dp(padV));
-        view.setMinHeight(dp(minHeight));
-        view.setBackground(pressable(roundRect(background, radius, stroke)));
-        view.setOnClickListener(click);
-        view.setLayoutParams(new LinearLayout.LayoutParams(
+    /*
+     * Material 3 buttons. Shape, ripple and corner radius come from the
+     * theme's widget styles; the fill and text colors are painted from the
+     * resolved Material You tokens so buttons always match the palette the
+     * rest of the UI uses.
+     */
+    private MaterialButton styledButton(int themeOverlay) {
+        return new MaterialButton(
+                new android.view.ContextThemeWrapper(this, themeOverlay), null,
+                com.google.android.material.R.attr.materialButtonStyle);
+    }
+
+    private MaterialButton decorate(MaterialButton button, int minHeight,
+                                    View.OnClickListener click) {
+        button.setMinHeight(dp(minHeight));
+        button.setOnClickListener(click);
+        button.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
-        return view;
+        return button;
     }
 
-    private TextView primaryButton(String text, View.OnClickListener click) {
-        return button(text, GREEN, ON_GREEN, 0, 15, 18, 16, 18, 54, click);
+    private MaterialButton primaryButton(String text, View.OnClickListener click) {
+        MaterialButton button = styledButton(R.style.AppTheme_FilledButton);
+        button.setText(text);
+        button.setBackgroundTintList(ColorStateList.valueOf(cPrimary));
+        button.setTextColor(cOnPrimary);
+        button.setRippleColor(ColorStateList.valueOf(
+                (cOnPrimary & 0x00FFFFFF) | 0x33000000));
+        return decorate(button, 56, click);
     }
 
-    private TextView secondaryButton(String text, View.OnClickListener click) {
-        return button(text, CARD, TEXT, LINE, 15, 18, 16, 18, 54, click);
+    private MaterialButton secondaryButton(String text, View.OnClickListener click) {
+        MaterialButton button = styledButton(R.style.AppTheme_TonalButton);
+        button.setText(text);
+        button.setBackgroundTintList(ColorStateList.valueOf(cSecondaryContainer));
+        button.setTextColor(cOnSecondaryContainer);
+        return decorate(button, 56, click);
     }
 
-    private TextView dangerButton(String text, View.OnClickListener click) {
-        return button(text, CARD, RED, 0xFF3A2222, 15, 18, 16, 18, 54, click);
+    private MaterialButton dangerButton(String text, View.OnClickListener click) {
+        MaterialButton button = styledButton(R.style.AppTheme_OutlinedButton);
+        button.setText(text);
+        button.setBackgroundTintList(ColorStateList.valueOf(cSurfaceContainerLow));
+        button.setTextColor(cError);
+        button.setStrokeColor(ColorStateList.valueOf(cError));
+        return decorate(button, 56, click);
     }
 
-    private TextView compactButton(String text, View.OnClickListener click) {
-        return button(text, CARD_RAISED, TEXT, LINE, 13, 14, 10, 14, 44, click);
+    private MaterialButton compactButton(String text, View.OnClickListener click) {
+        MaterialButton button = styledButton(R.style.AppTheme_TonalButton);
+        button.setText(text);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        button.setBackgroundTintList(ColorStateList.valueOf(cSecondaryContainer));
+        button.setTextColor(cOnSecondaryContainer);
+        return decorate(button, 44, click);
     }
 
-    private LinearLayout buttonRow(TextView left, TextView right) {
+    private LinearLayout buttonRow(MaterialButton left, MaterialButton right) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(
@@ -762,26 +865,32 @@ public class MainActivity extends Activity {
         return row;
     }
 
-    private TextView addToggleRow(LinearLayout parent, String title, String subtitle,
-                                  View.OnClickListener click) {
+    /**
+     * An M3 list item: title, supporting text and a Material switch. The
+     * whole row toggles the switch, and the switch's checked listener is
+     * the single source of truth for the setting.
+     */
+    private MaterialSwitch addToggleRow(LinearLayout parent, String title,
+                                        String subtitle,
+                                        MaterialSwitch.OnCheckedChangeListener change) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(18), dp(15), dp(18), dp(15));
-        row.setOnClickListener(click);
+        row.setPadding(dp(18), dp(14), dp(18), dp(14));
+        row.setMinimumHeight(dp(72));
 
         LinearLayout texts = new LinearLayout(this);
         texts.setOrientation(LinearLayout.VERTICAL);
         TextView name = new TextView(this);
         name.setText(title);
-        name.setTextColor(TEXT);
+        name.setTextColor(cOnSurface);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         texts.addView(name);
 
         TextView sub = new TextView(this);
         sub.setText(subtitle);
-        sub.setTextColor(MUTED);
+        sub.setTextColor(cOnSurfaceVariant);
         sub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         sub.setLineSpacing(dp(2), 1f);
         LinearLayout.LayoutParams subParams = new LinearLayout.LayoutParams(
@@ -792,12 +901,16 @@ public class MainActivity extends Activity {
         row.addView(texts, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView state = new TextView(this);
-        state.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        state.setTypeface(Typeface.DEFAULT_BOLD);
-        state.setGravity(Gravity.CENTER);
-        state.setPadding(dp(12), dp(6), dp(12), dp(6));
-        state.setMinWidth(dp(52));
+        MaterialSwitch state = new MaterialSwitch(this);
+        // Checked track/thumb in the primary container roles, unchecked in
+        // the outline roles — painted from tokens like every other control.
+        state.setThumbTintList(new ColorStateList(new int[][]{
+                {android.R.attr.state_checked}, {}},
+                new int[]{cPrimary, cOutlineVariant}));
+        state.setTrackTintList(new ColorStateList(new int[][]{
+                {android.R.attr.state_checked}, {}},
+                new int[]{cPrimaryContainer, cSurfaceContainerHighest}));
+        state.setOnCheckedChangeListener(suppressible(change));
         LinearLayout.LayoutParams stateParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -809,33 +922,45 @@ public class MainActivity extends Activity {
          * card's own rounded shape as both content and ripple mask.
          */
         row.setBackground(new RippleDrawable(
-                ColorStateList.valueOf(0x1FFFFFFF),
-                roundRect(CARD, 22, 0),
-                roundRect(0xFFFFFFFF, 22, 0)));
+                ColorStateList.valueOf((cOnSurface & 0x00FFFFFF) | 0x1F000000),
+                roundRect(cSurfaceContainer, 20, 0),
+                roundRect(cOnSurface, 20, 0)));
+        row.setOnClickListener(v -> state.toggle());
         parent.addView(row);
         setToggleState(state, false);
         return state;
     }
 
-    private void setToggleState(TextView view, boolean on) {
-        view.setText(on ? "ON" : "OFF");
-        view.setTextColor(on ? ON_GREEN : MUTED);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(on ? GREEN : CARD_RAISED);
-        bg.setCornerRadius(dp(20));
-        view.setBackground(bg);
+    private void setToggleState(MaterialSwitch view, boolean on) {
+        applyingSwitchState = true;
+        view.setChecked(on);
+        applyingSwitchState = false;
     }
 
-    private void styleBadge(String text, int color) {
+    /**
+     * Restoring a switch's persisted state with setChecked() would replay
+     * the user-facing side effects (logs, permission requests). This wrapper
+     * drops listener callbacks issued while a state is being restored.
+     */
+    private MaterialSwitch.OnCheckedChangeListener suppressible(
+            MaterialSwitch.OnCheckedChangeListener listener) {
+        return (button, on) -> {
+            if (!applyingSwitchState) {
+                listener.onCheckedChanged(button, on);
+            }
+        };
+    }
+
+    /** Round status glyph: a solid tonal circle with a high-contrast mark. */
+    private void styleBadge(String text, int glyphColor, int circleColor) {
         if (statusBadge == null) {
             return;
         }
         statusBadge.setText(text);
-        statusBadge.setTextColor(color);
+        statusBadge.setTextColor(glyphColor);
         GradientDrawable bg = new GradientDrawable();
         bg.setShape(GradientDrawable.OVAL);
-        // Same hue as the glyph, at a low alpha so the badge stays quiet.
-        bg.setColor((color & 0x00FFFFFF) | 0x33000000);
+        bg.setColor(circleColor);
         statusBadge.setBackground(bg);
     }
 
@@ -847,14 +972,14 @@ public class MainActivity extends Activity {
 
         TextView name = new TextView(this);
         name.setText(label);
-        name.setTextColor(MUTED);
+        name.setTextColor(cOnSurfaceVariant);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
         name.setTypeface(Typeface.DEFAULT_BOLD);
         name.setLetterSpacing(0.1f);
 
         TextView val = new TextView(this);
         val.setText(value);
-        val.setTextColor(TEXT);
+        val.setTextColor(cOnSurface);
         val.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         val.setLineSpacing(dp(2), 1f);
 
@@ -864,7 +989,7 @@ public class MainActivity extends Activity {
         parent.addView(row);
         if (divider) {
             View line = new View(this);
-            line.setBackgroundColor(LINE);
+            line.setBackgroundColor(cOutlineVariant);
             LinearLayout.LayoutParams lineParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, 1);
             lineParams.leftMargin = dp(18);
@@ -919,8 +1044,7 @@ public class MainActivity extends Activity {
                 + ". Installed " + versionName() + ".");
     }
 
-    private void toggleAutoUpdate() {
-        boolean enabled = !UpdateChecker.isAutoEnabled(this);
+    private void applyAutoUpdate(boolean enabled) {
         UpdateChecker.setAutoEnabled(this, enabled);
         updateUpdateUi();
         addLog("automatic update checks " + (enabled ? "enabled" : "disabled"));
@@ -1062,9 +1186,10 @@ public class MainActivity extends Activity {
     }
 
     private void applyDetails() {
+        boolean active = rootOpen || "active".equals(ksu);
         if (statusCard != null) {
             statusCard.setBackground(cardBackground(
-                    rootOpen || "active".equals(ksu) ? GREEN_DARK : CARD));
+                    active ? cPrimaryContainer : cSurfaceContainer));
         }
         if (detailMode != null) {
             detailMode.setText(AutoRoot.isSamsungMode(this)
@@ -1078,15 +1203,18 @@ public class MainActivity extends Activity {
         if ("active".equals(ksu)) {
             statusTitle.setText("Jailbreak mode");
             statusSubtitle.setText("KernelSU loaded · su in u:r:ksu:s0 · gone after reboot");
-            styleBadge("\u2713", TEXT);
+            styleStatus(cOnPrimaryContainer, cOnPrimaryContainer);
+            styleBadge("\u2713", cOnPrimary, cPrimary);
         } else if (rootOpen) {
             statusTitle.setText("Root shell");
             statusSubtitle.setText("uid=0 · u:r:shell:s0 · gone after reboot");
-            styleBadge("\u2713", TEXT);
+            styleStatus(cOnPrimaryContainer, cOnPrimaryContainer);
+            styleBadge("\u2713", cOnPrimary, cPrimary);
         } else if (shizuku && bound) {
             statusTitle.setText("Ready");
             statusSubtitle.setText("Shizuku connected · no root yet");
-            styleBadge("\u2022", MUTED);
+            styleStatus(cOnSurface, cOnSurfaceVariant);
+            styleBadge("\u2022", cOnSecondaryContainer, cSecondaryContainer);
         } else {
             statusTitle.setText("Not connected");
             statusSubtitle.setText(shizuku
@@ -1094,8 +1222,39 @@ public class MainActivity extends Activity {
                         ? "Shizuku is running · connecting..."
                         : "Shizuku is running · grant permission")
                     : "Start Shizuku first");
-            styleBadge("?", MUTED);
+            styleStatus(cOnSurface, cOnSurfaceVariant);
+            styleBadge("?", cOnSurfaceVariant, cSurfaceContainerHighest);
         }
+    }
+
+    /** Status card text tones; the failure helper uses the error roles. */
+    private void styleStatus(int titleColor, int subtitleColor) {
+        if (statusTitle != null) {
+            statusTitle.setTextColor(titleColor);
+        }
+        if (statusSubtitle != null) {
+            statusSubtitle.setTextColor(subtitleColor);
+        }
+    }
+
+    /**
+     * Failure state for the status card: error container surface with the
+     * error roles for text and badge, so a failed exploit never looks
+     * like success.
+     */
+    private void showFailure(String title, String subtitle) {
+        if (statusCard != null) {
+            statusCard.setBackground(cardBackground(cErrorContainer));
+        }
+        if (statusTitle != null) {
+            statusTitle.setText(title);
+            statusTitle.setTextColor(cOnErrorContainer);
+        }
+        if (statusSubtitle != null) {
+            statusSubtitle.setText(subtitle);
+            statusSubtitle.setTextColor(cOnErrorContainer);
+        }
+        styleBadge("!", cOnErrorContainer, cError);
     }
 
     private boolean safePing() {
@@ -1138,7 +1297,7 @@ public class MainActivity extends Activity {
     }
 
     private void showShizukuHelp() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Shizuku is not running")
                 .setMessage("Start Shizuku first:\n\n"
                         + "1. open the Shizuku app\n"
@@ -1283,7 +1442,7 @@ public class MainActivity extends Activity {
                     + "- Root disappears when you reboot\n"
                     + "- Do not use the device while it runs";
         }
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Get a root shell?")
                 .setMessage(message)
                 .setPositiveButton("Run", (d, w) -> runRoot())
@@ -1334,11 +1493,8 @@ public class MainActivity extends Activity {
                 } else if (!rootOpen) {
                     addLog("no root shell: the exploit did not reach uid=0."
                             + " Reboot before retrying.");
-                    ui.post(() -> {
-                        statusTitle.setText("Root failed");
-                        statusSubtitle.setText("exploit did not reach uid=0 - reboot, then retry");
-                        styleBadge("!", RED);
-                    });
+                    ui.post(() -> showFailure("Root failed",
+                            "exploit did not reach uid=0 - reboot, then retry"));
                 }
             } catch (Throwable t) {
                 addLog("root failed: " + t);
@@ -1347,7 +1503,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmKsu() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Load KernelSU?")
                 .setMessage("Late-loads ksud through a fake credential.\n\n"
                         + "- On success su works in u:r:ksu:s0\n"
@@ -1483,9 +1639,8 @@ public class MainActivity extends Activity {
                         refreshDetails();
                         offerSoftRestart();
                     } else {
-                        statusTitle.setText("KernelSU failed");
-                        statusSubtitle.setText(reason + " - reboot, then retry");
-                        styleBadge("!", RED);
+                        showFailure("KernelSU failed",
+                                reason + " - reboot, then retry");
                         toast("KernelSU failed: " + reason);
                         addLog("KernelSU failed: " + reason
                                 + " - parked processes remain; reboot to clean up");
@@ -1542,8 +1697,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void toggleSamsungMode() {
-        boolean enabled = !AutoRoot.isSamsungMode(this);
+    private void applySamsungMode(boolean enabled) {
         AutoRoot.setSamsungMode(this, enabled);
         applySamsungModeToService();
         updateAutoRootUi();
@@ -1569,8 +1723,7 @@ public class MainActivity extends Activity {
                 + (AutoRoot.isSamsungMode(this) ? "on" : "off"));
     }
 
-    private void toggleSoftRestart() {
-        boolean enabled = !AutoRoot.softRestartEnabled(this);
+    private void applySoftRestart(boolean enabled) {
         AutoRoot.setSoftRestartEnabled(this, enabled);
         updateAutoRootUi();
         addLog("auto soft restart " + (enabled ? "enabled" : "disabled"));
@@ -1585,7 +1738,7 @@ public class MainActivity extends Activity {
             toast("bind the service first");
             return;
         }
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Restart Android?")
                 .setMessage("Restarts the Android userspace, like the KernelSU "
                         + "manager's soft reboot.\n\n"
@@ -1603,8 +1756,7 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private void toggleBootUi() {
-        boolean enabled = !AutoRoot.bootUiEnabled(this);
+    private void applyBootUi(boolean enabled) {
         AutoRoot.setBootUiEnabled(this, enabled);
         updateAutoRootUi();
         addLog("boot status screen " + (enabled ? "enabled" : "disabled"));
@@ -1640,7 +1792,7 @@ public class MainActivity extends Activity {
         if (service == null) {
             return;
         }
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Restart Android now?")
                 .setMessage("KernelSU is loaded, but modules and Zygisk only "
                         + "start after a userspace restart.\n\n"
@@ -1817,15 +1969,14 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private void toggleAutoRoot() {
-        boolean enabled = !AutoRoot.isEnabled(this);
+    private void applyAutoRoot(boolean enabled) {
         AutoRoot.setEnabled(this, enabled);
         updateAutoRootUi();
         addLog("auto-root " + (enabled ? "enabled" : "disabled"));
         if (enabled) {
             requestNotificationPermission();
             if (!AutoRoot.prefs(this).getBoolean(AutoRoot.KEY_SETUP_DONE, false)) {
-                new AlertDialog.Builder(this)
+                new MaterialAlertDialogBuilder(this)
                         .setTitle("One-time setup left")
                         .setMessage("The first root always needs one manual run.\n\n"
                                 + "1. Get a root shell (or just press Install channel)\n"
@@ -2042,7 +2193,7 @@ public class MainActivity extends Activity {
     }
 
     private void confirmAutoRootNow() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Run auto-root now?")
                 .setMessage("Runs the boot sequence immediately: start Shizuku, bind "
                         + "it, install timer and run the exploit once.\n\n"
@@ -2070,7 +2221,7 @@ public class MainActivity extends Activity {
     }
 
     private void reboot() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Reboot the device?")
                 .setMessage("This is the only way to clean up parked processes.")
                 .setPositiveButton("Reboot", (d, w) -> {

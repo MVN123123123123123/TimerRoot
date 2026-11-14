@@ -1,20 +1,44 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <resources>
     <!--
-        Material's dark NoActionBar theme, because the whole UI is drawn in
-        code on a near-black canvas. The dark parent also makes the
-        AlertDialog.Builder dialogs match instead of falling back to a white
-        surface when the system is in light mode.
+        Material 3 dark theme. The UI is still drawn in code, but every
+        surface, control and dialog now resolves Material You color roles
+        from the theme. On Android 12+ MainActivity additionally applies
+        the dynamic color overlay, so the palette follows the wallpaper;
+        the brand-green tokens above remain the fallback on API 30.
+        Transparent system bars let the tonal surface reach the edges.
     -->
-    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/bg</item>
-        <item name="android:colorBackground">@color/bg</item>
-        <item name="android:statusBarColor">@color/bg</item>
-        <item name="android:navigationBarColor">@color/bg</item>
+    <style name="AppTheme" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/seed_primary</item>
+        <item name="colorOnPrimary">@color/seed_on_primary</item>
+        <item name="colorPrimaryContainer">@color/seed_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/seed_on_primary_container</item>
+        <item name="colorSecondaryContainer">@color/seed_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/seed_on_secondary_container</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowLightNavigationBar">false</item>
         <item name="android:forceDarkAllowed">false</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:colorAccent">@color/green</item>
+    </style>
+
+    <!--
+        Widget styles cannot be used as context themes directly (a widget
+        style does not set the materialButtonStyle attribute), so these tiny
+        overlays redirect the default button style per variant. MaterialButton
+        is then created inside a ContextThemeWrapper that applies one of them.
+    -->
+    <style name="AppTheme.FilledButton">
+        <item name="materialButtonStyle">@style/Widget.Material3.Button</item>
+    </style>
+
+    <style name="AppTheme.TonalButton">
+        <item name="materialButtonStyle">@style/Widget.Material3.Button.TonalButton</item>
+    </style>
+
+    <style name="AppTheme.OutlinedButton">
+        <item name="materialButtonStyle">@style/Widget.Material3.Button.OutlinedButton</item>
     </style>
 </resources>

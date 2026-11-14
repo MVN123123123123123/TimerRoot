@@ -350,13 +350,15 @@ instead of late-loading a mismatched module.
 
 The bundled Samsung profiles target `6.1.162-android14-11` (SM-S921N Galaxy
 S24 / SM-S948U Galaxy S26 Ultra), the builds SamTimer was tested on and derived
-its offsets from, `5.15.189-android13-8-33641424` (SM-A1560 Galaxy A15 5G),
-which was ported here from its own factory `boot.img` and verified in QEMU, and
+its offsets from, `5.15.189-android13-8-33641424` (SM-A1560 Galaxy A15 5G) and
+`5.15.197-android13-8-34343818-abS911BXXUAGZIF` (SM-S911B Galaxy S23), which
+were ported here from their own factory `boot.img` and verified in QEMU, and
 `6.6.127-android15-8-abogkiS741BXXS3AZK1-4k` (SM-S741B Galaxy S26 FE) and
 `6.6.127-android15-8-p87b1ce1-abogkiS937BXXUBDZJB-4k` (SM-S937B Galaxy S25
 Edge), both also ported here from their factory `boot.img` and verified in
-QEMU (F7–F11, plus the `--samsung` DEFEX write chain; F12/F13 still need a
-device). A Samsung device
+QEMU. F7–F11 pass for every ported profile; the S26 FE and S25 Edge ports also
+completed the `--samsung` DEFEX write chain. F12/F13 still need a device. A
+Samsung device
 on an unsupported kernel is refused with a message to turn Samsung mode off
 and use a generic profile. The app rejects a binary that does not carry the
 `TIMER_SAMSUNG=1` marker instead of passing `--samsung` to an old generic
@@ -366,6 +368,7 @@ build.
 |---|---|---|---|---|
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy A15 5G | `a15xzh` (SM-A1560) | `BP4A.251205.006` / `A1560ZHSAEZG1` | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
+| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | `conf/samsung/samsung-s23-5.15.197.conf` | verified in QEMU |
 | Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
 | Galaxy S25 Edge | SM-S937B | `S937BXXUBDZJB` (EUX) | `conf/samsung/samsung-s25edge-6.6.127.conf` | verified in QEMU |
 
@@ -391,6 +394,19 @@ SM-S937B factory `boot.img`. It has the same 6.6 cred/task layout as S26 FE
 S25-series images embed a different firmware string, so they are refused
 rather than run against this profile until each is derived from its own
 factory kernel.
+
+The `samsung-s23` profile is the second 5.15 Samsung one and the first
+S23-series one. The S23+ and S23 Ultra share its `34343818` build number but
+ship different `ab` firmware strings and different text layouts, so its
+`release_prefix` pins the full `5.15.197-android13-8-34343818-abS911BXXUAGZIF`
+banner and the other S23 models are refused until each gets its own profile.
+It carries the same 5.15 geometry as `a15xzh` (4-byte `cred.usage`, `cred
+0xb0`/`cred_jar 0xc0`, `timer_alloc 0x108`, `task_struct 0x1200` with cred at
+`+0x798`, `pcp_free = 1`) and the same DEFEX shape as the 6.6 Samsung ports
+(`creds_fast_hash` is its own symbol at `creds_hash + 0x40000`, indexed
+directly for `pid <= 0x8000`). `ksu_kmi = "android13-5.15"`. Its factory kernel
+also calls the Knox hypervisor, so the QEMU run used a throwaway patched
+`Image`; every constant comes from the unmodified factory artifacts.
 
 ## Credits
 
