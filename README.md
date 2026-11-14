@@ -1,7 +1,7 @@
 # TimerRoot
 
-**Research use only.** Use it only on hardware you own or are explicitly
-allowed to modify.
+**Definitely for Research use only** Use it only on hardware you own or are explicitly
+allowed to modify :)
 
 Android app for **CVE-2026-98260** (POSIX CPU timer use-after-free). One tap
 gives a root shell in the shell domain, then late-loads **KernelSU**
@@ -19,14 +19,13 @@ UI, state detection, Shizuku plumbing and boot automation.
 
 What it does:
 
-- runs the exploit as the shell user through Shizuku, then keeps a `uid=0`
+- runs the exploit as the shell user through Shizuku(Shizuku-next for some additional features if you want to), then keeps a `uid=0`
   shell open;
 - late-loads KernelSU, KernelSU-Next or SukiSU Ultra, ending in
   `SELinux: Permissive` and `su` in `u:r:ksu:s0`;
 - supports Samsung devices with a separate DEFEX/KDP chain pinned to the
   diabl0w/KernelSU Samsung build;
-- can re-run the whole chain automatically on every real boot through a
-  one-time localhost ADB channel;
+- can re-run the whole chain automatically on every real boot through a localhost ADB channel;
 - shows an optional boot status screen over the lock screen;
 - checks GitHub for newer builds without installing anything by itself.
 
@@ -47,13 +46,13 @@ one.
 | [Porting skill](SKILL.md) | Procedure for deriving a profile for a new kernel |
 
 Start with [Installation](docs/installation.md). It contains the 2-3 minute
-post-boot wait, the Shizuku requirement, the matching-profile rule and the
+post-boot wait, the requirement, the matching-profile rule and the
 one-shot-per-boot limits that matter before the first run.
 
 ## Safety
 
 Do not kill a parked process, reboot to clear the root shell and KernelSU, and
-remember that SELinux stays permissive until the next reboot. The full list is
+remember that SELinux stays permissive until the next reboot (not soft-restart!!!). The full list is
 in [Installation -> Safety](docs/installation.md#safety).
 
 ## License
