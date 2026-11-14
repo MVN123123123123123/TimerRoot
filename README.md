@@ -6,6 +6,7 @@ allowed to modify :)
 Android app for **CVE-2026-98260** (POSIX CPU timer use-after-free). One tap
 gives a root shell in the shell domain, then late-loads **KernelSU**
 (`u:r:ksu:s0`).
+
 **recommends using [Shizuku Next](https://github.com/rushiranpise/Shizuku-Next) for Auto root operation.**
 
 ![TimerRoot status screen](docs/images/status.png)
