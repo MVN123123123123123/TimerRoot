@@ -12,29 +12,14 @@ built with the NDK. For installing the finished artifacts see
 - **Android SDK platform 36** and **build-tools 36.0.0**. `compileSdk` and
   `targetSdk` are 36; AGP 8.7's default build-tools 35 cannot compile against
   platform 36.
-- **Gradle 9.6** (the CI uses 9.6.0). The wrapper is gitignored, so install
-  Gradle or use `gradle/actions/setup-gradle` in CI.
+- **Gradle 9.6**. The wrapper is gitignored, so install
+  Gradle. 9.6 is recommended, but i uses 8.9.3.
 - **NDK 29.0.14206865** (or another recent NDK) with the
   `aarch64-linux-android21` clang, for the exploit only.
 - **PowerShell 7+** for the Gradle-free `scripts/build.ps1` path.
 - **Shizuku-API checkout** for the Gradle-free path.
 
 ## Build the exploit binary
-
-`app/src/main/assets/timer` is gitignored. The app still builds without it, but
-**Prepare binary** then has nothing to install, and the Gradle-free build
-refuses to run.
-
-### Fetch the prebuilt binary
-
-```powershell
-scripts/fetch-timer.ps1
-```
-
-This shallow-clones [YuKongA/CVE-2026-98260](https://github.com/YuKongA/CVE-2026-98260)
-and copies `timer/timer` into `app/src/main/assets/timer`.
-
-### Build it from source
 
 The source in `p7a/timer_p7a.c` builds statically against the NDK. This is the
 exact command the release workflow uses:
@@ -75,15 +60,14 @@ or, for a release APK:
 gradle assembleRelease
 ```
 
-Useful facts:
+Notes:
 
 - The root `conf/` tree is copied into the build as `assets/conf/**` by the
   `syncConfAssets` task, which is wired to `preBuild` and every
   `merge*Assets` task. The APK therefore always carries the profiles from the
   repository root; nothing needs to be copied by hand.
 - `applicationId` is `com.kpgc.timerroot`, `minSdk` 30, `targetSdk` 36 and
-  `compileSdk` 36. The version lives in `app/build.gradle`
-  (`versionCode 40`, `versionName 0.40`).
+  `compileSdk` 36. The version lives in `app/build.gradle`.
 - Shizuku's API and provider come from Maven
   (`dev.rikka.shizuku:api:13.1.5`,
   `dev.rikka.shizuku:provider:13.1.5`). No Shizuku-API checkout is needed.
@@ -127,8 +111,6 @@ The script:
 Parameters: `-Sdk`, `-ShizukuApi`, `-Out`, `-VersionCode` (default 40) and
 `-VersionName` (default `0.40`). Output is `build/TimerRoot.apk`.
 
-It stops early if `app/src/main/assets/timer` is missing; run
-`scripts/fetch-timer.ps1` first.
 
 ## CI release workflow
 
@@ -142,8 +124,7 @@ the workflow itself, and on manual dispatch. It:
    `app/src/main/assets/timer`;
 3. builds the release APK with Gradle;
 4. zipaligns and signs it with the repository secrets when
-   `KEYSTORE_BASE64` is set, otherwise with a throwaway key (the run prints a
-   warning because that APK cannot update an install signed with another key);
+   `KEYSTORE_BASE64` is set, otherwise with a throwaway key;
 5. uploads `timer`, `timer_p7a`, `timer_p7a.c` and `TimerRoot.apk` to the
    fixed release tag `bingchiling`.
 
