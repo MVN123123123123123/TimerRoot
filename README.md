@@ -6,6 +6,7 @@ allowed to modify :)
 Android app for **CVE-2026-98260** (POSIX CPU timer use-after-free). One tap
 gives a root shell in the shell domain, then late-loads **KernelSU**
 (`u:r:ksu:s0`).
+**recommends using [Shizuki Next](https://github.com/rushiranpise/Shizuku-Next) for Auto root operation.**
 
 ![TimerRoot status screen](docs/images/status.png)
 
@@ -31,7 +32,7 @@ What it does:
 
 The exploit is tied to a kernel build, not a device name: a matching profile
 must exist for the running kernel, and the app refuses to fall back to another
-one.
+one. The fixed target name (lynx) originated from the old build specifically ported for the pixel 7a, before moving on to other device, hence why it's not used to detect a matching profile now, only added in for the fun of the game :)
 
 ## Documentation
 
