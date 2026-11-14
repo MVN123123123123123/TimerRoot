@@ -1,6 +1,6 @@
 # Contributions and credits
 
-TimerRoot builds on other people's exploit research, root managers, Shizuku
+TimerRoot builds on a part of other people's exploit research, root managers, Shizuku
 plumbing and vendor-specific kernel ports. This page lists every project this
 repository took code, constants or a design from. None of the target-specific
 ports below are vendored: their code is not in this tree, and they are credited
@@ -65,7 +65,7 @@ The other Xiaomi / Redmi profiles (`flourite`, `lapis`, `dada`, `kunzite`,
 `mist`, `spinel`, `charoite`, `zephyr`, `brussels`, `hongkong`, `madrid`) were
 derived from their own factory images without a target-specific port to
 cross-check against. The OPPO, realme and Meizu profiles are imported vendor
-profiles from `rikumi/TimerRoot`.
+profiles from `rikumi/TimerRoot`. the Samsung profiles are mostly self-ported.
 
 ## License notes
 
