@@ -416,13 +416,35 @@ public class AutoRootService extends Service {
             return "bundled exploit rejected for this kernel: " + target.trim();
         }
 
-        show("Auto-root", "running the exploit...");
-        AutoRoot.log(this, "timer shell");
+        boolean samsung = AutoRoot.isSamsungMode(this);
+        if (samsung) {
+            String problem = AutoRoot.samsungManagerProblem(this);
+            if (problem != null) {
+                AutoRoot.log(this, problem);
+                return problem;
+            }
+        }
+        show("Auto-root", samsung ? "running the Samsung chain..."
+                : "running the exploit...");
+        AutoRoot.log(this, samsung ? "timer fake (samsung)" : "timer shell");
         exploitStarted = true;
         String output = service.openRoot();
         if (!output.startsWith("root shell ready")) {
             return "exploit did not reach uid=0: " + tail(output);
         }
+        if (samsung) {
+            /*
+             * The Samsung endgame loads KernelSU inside the same `fake`
+             * plant (DEFEX clear + KDP-safe ksud).  There is no shell-domain
+             * root and no second late-load stage, and its SELinux is left to
+             * ksud, so openRoot() already returned the final state.
+             */
+            AutoRoot.log(this, "boot UI grants: "
+                    + tail(service.execRoot(grantBootUiAccess())));
+            AutoRoot.log(this, "samsung chain ready: " + tail(output));
+            return output;
+        }
+
         /*
          * The shell-domain root cannot keep KernelSU loaded across a boot, so
          * the chain does not stop here: the fake-credential endgame late-loads
@@ -433,14 +455,13 @@ public class AutoRootService extends Service {
         AutoRoot.log(this, "root shell ready; loading KernelSU");
         show("Auto-root", "loading KernelSU...");
         String ksu = loadKernelSu(service);
-        boolean loaded = ksu.startsWith("KernelSU active");
         /*
          * The boot status screen needs either "display over other apps" or
          * the "full-screen notifications" special access. Both are app-ops
-         * that a shell-domain root can grant without touching the UI, so
-         * take them now (after the time-sensitive KernelSU stage); the user
-         * can still revoke them in Settings. Install channel does the same, so
-         * the first boot after setup already has them.
+         * that root can grant without touching the UI, so take them after
+         * the time-sensitive KernelSU stage; the user can still revoke them
+         * in Settings. Install channel does the same, so the first boot after
+         * setup already has them.
          */
         AutoRoot.log(this, "boot UI grants: "
                 + tail(service.execRoot(grantBootUiAccess())));
@@ -785,6 +806,13 @@ public class AutoRootService extends Service {
             boundArgs = args;
             boundConnection = connection;
             userService = holder[0];
+            try {
+                // The user service runs as shell and cannot read the app's
+                // device-protected mode preference, so pass it explicitly.
+                userService.setSamsungMode(AutoRoot.isSamsungMode(this));
+            } catch (Throwable t) {
+                AutoRoot.log(this, "setSamsungMode failed: " + t);
+            }
             return holder[0];
         } catch (Throwable t) {
             AutoRoot.log(this, "bind failed: " + t);

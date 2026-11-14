@@ -8,8 +8,8 @@ param(
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
     [string]$ShizukuApi = "",
     [string]$Out = "",
-    [int]$VersionCode = 39,
-    [string]$VersionName = "0.39"
+    [int]$VersionCode = 40,
+    [string]$VersionName = "0.40"
 )
 
 $ErrorActionPreference = 'Stop'

@@ -40,27 +40,45 @@ public class UserService extends IUserService.Stub {
     private static final String LOG = "/data/local/tmp/timer.log";
     private static final String SOFT_RESTART_LOG = "/data/local/tmp/soft_restart.log";
     private static final String CONF_DIR = "/data/local/tmp/timer-conf";
+    /** Samsung-only profiles, selected when Samsung mode is enabled. */
+    private static final String SAMSUNG_CONF_SUBDIR = "samsung";
     /** Profiles for "dirty" kernel builds need an extra identity check. */
     private static final String DIRTY_CONF_SUBDIR = "dirty";
+    /** Staged diabl0w/KernelSU ksud bundled in the APK for the Samsung chain. */
+    private static final String SAMSUNG_ASSET = "assets/samsung/libksud.so";
+    private static final String WORK_DIR = "/data/local/tmp/w";
+    private static final String KSUD = WORK_DIR + "/ksud";
+    private static final String SU_CMD = "/data/local/tmp/timer-root-cmd.sh";
+    /** Literal the Samsung-capable binary embeds in read-only data. */
+    private static final String SAMSUNG_MARKER = "TIMER_SAMSUNG=1";
     /**
      * App &lt;-&gt; timer interface version. Must match APP_PROTOCOL in
      * p7a/timer_p7a.c. The binary refuses to run when this is missing, which
      * is how an old APK that downloads the new timer finds out it has to
      * update.
      */
-    private static final int APP_PROTOCOL = 2;
+    private static final int APP_PROTOCOL = 3;
     private static final int MAX_OUTPUT = 20000;
+
+    /** Set by the app through {@link #setSamsungMode(boolean)}. */
+    private static volatile int samsungOverride = -1;
+    private static android.content.Context serviceContext;
 
     private Process rootProcess;
     private BufferedWriter rootInput;
+    /** The parked Samsung `fake` process; never destroyed after success. */
+    private Process samsungProcess;
     private final BlockingQueue<String> rootLines = new LinkedBlockingQueue<>();
-    /** Cached protocol probe result: -1 unknown, 0 legacy binary, 2 current. */
+    /** Cached protocol probe result: -1 unknown, 0 legacy binary, 3 current. */
     private volatile int binaryProtocol = -1;
+    /** Cached Samsung-marker probe result. */
+    private volatile int binarySamsung = -1;
 
     public UserService() {
     }
 
     public UserService(android.content.Context context) {
+        serviceContext = context;
     }
 
     @Override
@@ -74,18 +92,42 @@ public class UserService extends IUserService.Stub {
         destroy();
     }
 
+    /**
+     * Called by the app after the user service binds.  The service runs as
+     * the shell user and cannot read the app's device-protected preferences,
+     * so the effective mode has to be passed over the binder.
+     */
+    @Override
+    public void setSamsungMode(boolean enabled) {
+        samsungOverride = enabled ? 1 : 0;
+        Log.i(TAG, "samsung mode=" + enabled);
+    }
+
+    private boolean samsungMode() {
+        if (samsungOverride >= 0) {
+            return samsungOverride == 1;
+        }
+        // No app override yet (manual invocation / older caller): Samsung
+        // hardware is the safe automatic choice.
+        return "samsung".equalsIgnoreCase(Build.MANUFACTURER)
+                || "samsung".equalsIgnoreCase(Build.BRAND);
+    }
+
     @Override
     public String install(String apk) {
         try {
             int confCount;
+            boolean ksudStaged;
             try (ZipFile zf = new ZipFile(apk)) {
                 ZipEntry entry = zf.getEntry("assets/timer");
                 if (entry == null) {
                     // Still publish the confs: the download path installs
                     // the binary separately through installFd().
                     confCount = extractConfs(zf);
+                    ksudStaged = extractSamsungKsud(zf);
                     return "assets/timer not found in " + apk
-                            + " (installed " + confCount + " confs)";
+                            + " (installed " + confCount + " confs"
+                            + (ksudStaged ? ", staged Samsung ksud" : "") + ")";
                 }
                 String tmp = BIN + ".new";
                 try (InputStream in = zf.getInputStream(entry);
@@ -107,14 +149,20 @@ public class UserService extends IUserService.Stub {
                 }
                 // A replaced binary must be re-identified before the next run.
                 binaryProtocol = -1;
+                binarySamsung = -1;
 
                 // Per-kernel profiles. Wipe the directory first: a stale
                 // flat conf would otherwise keep matching by release alone
                 // and bypass the dirty/ identity checks.
                 confCount = extractConfs(zf);
+                // The Samsung endgame uses the bundled diabl0w/KernelSU
+                // ksud instead of the installed manager's library; stage it
+                // on every install so an APK update refreshes it.
+                ksudStaged = extractSamsungKsud(zf);
             }
             return "installed " + new File(BIN).length() + " bytes, " + confCount
-                    + " confs (uid=" + Os.getuid() + ")";
+                    + " confs" + (ksudStaged ? ", staged Samsung ksud" : "")
+                    + " (uid=" + Os.getuid() + ")";
         } catch (Throwable t) {
             return "install failed: " + t;
         }
@@ -157,6 +205,68 @@ public class UserService extends IUserService.Stub {
         return count;
     }
 
+    /**
+     * Stages the bundled diabl0w/KernelSU ksud for the Samsung chain:
+     * {@code /data/local/tmp/w/ksud} is both the bind-mount source the
+     * exploit overlays on /system/bin/logcat and the binary late-load runs.
+     *
+     * The APK asset is 6.1 MB; missing it only disables Samsung mode, so a
+     * failure here must not fail the generic install.
+     */
+    private static boolean extractSamsungKsud(ZipFile zf) {
+        ZipEntry entry = zf.getEntry(SAMSUNG_ASSET);
+        if (entry == null) {
+            return false;
+        }
+        try {
+            File dir = new File(WORK_DIR);
+            if (!dir.isDirectory() && !dir.mkdirs()) {
+                Log.w(TAG, "cannot create " + WORK_DIR);
+                return false;
+            }
+            // Rename over the old copy: a parked exploit may still be
+            // executing it, and writing in place would fail with ETXTBSY.
+            copyAsset(zf, entry, KSUD);
+            Log.i(TAG, "staged Samsung ksud at " + KSUD);
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "Samsung ksud staging failed: " + t);
+            return false;
+        }
+    }
+
+    private static void copyAsset(ZipFile zf, ZipEntry entry, String dest)
+            throws Exception {
+        File tmp = new File(dest + ".new");
+        try (InputStream in = zf.getInputStream(entry);
+             FileOutputStream out = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        }
+        Os.chmod(tmp.getAbsolutePath(), 0755);
+        Os.rename(tmp.getAbsolutePath(), dest);
+    }
+
+    /** True when the ksud copy is present; re-stages from the APK if not. */
+    private boolean ensureSamsungKsud() {
+        if (new File(KSUD).isFile()) {
+            return true;
+        }
+        android.content.Context context = serviceContext;
+        if (context == null) {
+            return false;
+        }
+        try (ZipFile zf = new ZipFile(context.getPackageCodePath())) {
+            return extractSamsungKsud(zf);
+        } catch (Throwable t) {
+            Log.w(TAG, "cannot re-stage Samsung ksud: " + t);
+            return false;
+        }
+    }
+
     private static void deleteRecursively(File f) {
         File[] kids = f.listFiles();
         if (kids != null) {
@@ -196,6 +306,7 @@ public class UserService extends IUserService.Stub {
             }
             // A freshly installed binary must be re-probed before use.
             binaryProtocol = -1;
+            binarySamsung = -1;
             return "installed " + new File(BIN).length() + " bytes (uid="
                     + android.system.Os.getuid() + ")";
         } catch (Throwable t) {
@@ -252,6 +363,37 @@ public class UserService extends IUserService.Stub {
         return binaryProtocol == APP_PROTOCOL;
     }
 
+    /**
+     * True when the installed timer carries the Samsung endgame.  A binary
+     * without the marker predates the dual-mode build; handing it --samsung
+     * would only make it run the generic profile, so refuse instead.
+     */
+    private boolean binaryHasSamsungMarker() {
+        if (binarySamsung >= 0) {
+            return binarySamsung == 1;
+        }
+        binarySamsung = 0;
+        byte[] want = SAMSUNG_MARKER.getBytes(StandardCharsets.US_ASCII);
+        try (InputStream in = new FileInputStream(BIN)) {
+            byte[] buf = new byte[1 << 16];
+            int keep = want.length - 1;
+            int carry = 0;
+            int n;
+            while ((n = in.read(buf, carry, buf.length - carry)) > 0) {
+                int len = carry + n;
+                if (indexOf(buf, len, want) >= 0) {
+                    binarySamsung = 1;
+                    break;
+                }
+                carry = Math.min(keep, len);
+                System.arraycopy(buf, len - carry, buf, 0, carry);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Samsung marker probe failed: " + t);
+        }
+        return binarySamsung == 1;
+    }
+
     /** Plain substring search over the first {@code len} bytes of a buffer. */
     private static int indexOf(byte[] hay, int len, byte[] needle) {
         int last = len - needle.length;
@@ -291,7 +433,7 @@ public class UserService extends IUserService.Stub {
      *
      * This selection logic is ported from rikumi/TimerRoot.
      */
-    private String confArg() {
+    private String confArg(boolean samsung) {
         String release;
         long pageSize;
         try {
@@ -303,8 +445,38 @@ public class UserService extends IUserService.Stub {
         }
 
         File dir = new File(CONF_DIR);
+        if (samsung) {
+            /*
+             * Samsung mode has its own profile set.  Never fall back to the
+             * generic directory here: those profiles lack the DEFEX address
+             * and the binary would reject --samsung anyway.
+             */
+            File samsungDir = new File(dir, SAMSUNG_CONF_SUBDIR);
+            for (File f : listConfFiles(samsungDir)) {
+                if (!confMatches(f, release, pageSize)) {
+                    continue;
+                }
+                Map<String, String> fields = readConfFields(f);
+                if (!"1".equals(fields.get("samsung_mode"))) {
+                    Log.w(TAG, "skipping Samsung conf without samsung_mode=1: " + f);
+                    continue;
+                }
+                Log.i(TAG, "using Samsung conf " + f);
+                return "--conf " + f.getAbsolutePath()
+                        + " --protocol " + APP_PROTOCOL + " --samsung";
+            }
+            Log.w(TAG, "no Samsung conf matched uname -r = " + release
+                    + ", page size = " + pageSize);
+            return null;
+        }
+
         for (File f : listConfFiles(dir)) {
             if (!confMatches(f, release, pageSize)) {
+                continue;
+            }
+            if ("1".equals(readConfFields(f).get("samsung_mode"))) {
+                // Never run a Samsung profile without the DEFEX endgame.
+                Log.w(TAG, "skipping Samsung conf in generic mode: " + f);
                 continue;
             }
             Log.i(TAG, "using conf " + f);
@@ -315,6 +487,10 @@ public class UserService extends IUserService.Stub {
         File dirtyDir = new File(dir, DIRTY_CONF_SUBDIR);
         for (File f : listConfFiles(dirtyDir)) {
             if (!confMatches(f, release, pageSize)) {
+                continue;
+            }
+            if ("1".equals(readConfFields(f).get("samsung_mode"))) {
+                Log.w(TAG, "skipping Samsung conf in generic mode: " + f);
                 continue;
             }
             if (!deviceIdentityMatches(f)) {
@@ -347,7 +523,14 @@ public class UserService extends IUserService.Stub {
 
     private static boolean confMatches(File conf, String release, long pageSize) {
         Map<String, String> fields = readConfFields(conf);
-        if (!releaseMatches(fields.get("release"), release)) {
+        String wantRelease = fields.get("release");
+        /*
+         * Samsung profiles use release_prefix: the firmware appends its own
+         * build suffix, so an exact release string would stop matching after
+         * every OTA.  Generic profiles keep the exact-release behaviour.
+         */
+        if (!releaseMatches(wantRelease, release)
+                && !releasePrefixMatches(fields.get("release_prefix"), release)) {
             return false;
         }
         String wantPage = fields.get("page_size");
@@ -374,6 +557,22 @@ public class UserService extends IUserService.Stub {
         String b = running.endsWith("-4k")
                 ? running.substring(0, running.length() - 3) : running;
         return a.equals(b);
+    }
+
+    /**
+     * Prefix match used by Samsung profiles.  The next character must be a
+     * '-' boundary (or the end), so "6.1.162-android14" cannot match
+     * "6.1.162-android140".  Mirrors release_prefix_matches() in the C side.
+     */
+    private static boolean releasePrefixMatches(String prefix, String running) {
+        if (TextUtils.isEmpty(prefix) || TextUtils.isEmpty(running)) {
+            return false;
+        }
+        if (!running.startsWith(prefix)) {
+            return false;
+        }
+        return running.length() == prefix.length()
+                || running.charAt(prefix.length()) == '-';
     }
 
     /**
@@ -442,10 +641,12 @@ public class UserService extends IUserService.Stub {
     private static final class ConfCheck {
         final String args;
         final String error;
+        final boolean samsung;
 
-        ConfCheck(String args, String error) {
+        ConfCheck(String args, String error, boolean samsung) {
             this.args = args;
             this.error = error;
+            this.samsung = samsung;
         }
     }
 
@@ -459,17 +660,31 @@ public class UserService extends IUserService.Stub {
         if (!new File(BIN).isFile()) {
             return new ConfCheck(null,
                     "timer is not installed - press \"Download exploit\""
-                            + " (or Prepare) first");
+                            + " (or Prepare) first", false);
         }
         if (!binarySpeaksProtocol()) {
-            return new ConfCheck(null, oldBinaryMessage());
+            return new ConfCheck(null, oldBinaryMessage(), false);
         }
-        String conf = confArg();
+        boolean samsung = samsungMode();
+        if (samsung && !binaryHasSamsungMarker()) {
+            return new ConfCheck(null,
+                    "the installed timer has no Samsung support - press"
+                            + " \"Download exploit\" (or Prepare) to update it",
+                    true);
+        }
+        String conf = confArg(samsung);
         if (conf == null) {
-            return new ConfCheck(null, "no kernel conf matched uname -r = "
-                    + kernelRelease() + " (install the app or press Prepare again)");
+            String message = samsung
+                    ? "no Samsung kernel conf matched uname -r = "
+                            + kernelRelease() + " (this profile targets"
+                            + " 6.1.162-android14-11; switch Samsung mode off"
+                            + " to use a generic profile)"
+                    : "no kernel conf matched uname -r = "
+                            + kernelRelease()
+                            + " (install the app or press Prepare again)";
+            return new ConfCheck(null, message, samsung);
         }
-        return new ConfCheck(conf, null);
+        return new ConfCheck(conf, null, samsung);
     }
 
     @Override
@@ -525,12 +740,15 @@ public class UserService extends IUserService.Stub {
 
     @Override
     public String openRoot() {
-        if (rootProcess != null && rootProcess.isAlive()) {
-            return "root shell already open";
-        }
         ConfCheck check = resolveConfArg();
         if (check.error != null) {
             return "root shell failed: " + check.error;
+        }
+        if (check.samsung) {
+            return openRootSamsung(check.args);
+        }
+        if (rootProcess != null && rootProcess.isAlive()) {
+            return "root shell already open";
         }
         String conf = check.args;
         try {
@@ -596,8 +814,104 @@ public class UserService extends IUserService.Stub {
         }
     }
 
+    /**
+     * Samsung chain.  There is no generic shell-domain stage: `fake` plants
+     * the fake full-capability cred, clears the DEFEX bucket, leaves SELinux
+     * permissive, and execs the bundled ksud late-load through the KDP-safe
+     * logcat bind mount.  Success is the module handing out u:r:ksu:s0.
+     *
+     * The exploit parks after success, so the process must stay alive: never
+     * destroy it here or in closeRoot().  Killing it lets init reap the
+     * failed-plant zombies and corrupts kernel memory.
+     */
+    private String openRootSamsung(String conf) {
+        if (suActiveOnce()) {
+            return "root shell ready; KernelSU active (already loaded)";
+        }
+        if (samsungProcess != null && samsungProcess.isAlive()) {
+            return "root shell failed\nSamsung exploit is still running;"
+                    + " wait for it to finish or reboot";
+        }
+        if (!ensureSamsungKsud()) {
+            return "root shell failed\nSamsung ksud is missing - press"
+                    + " \"Download exploit\" (or Prepare) to stage it again";
+        }
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "/system/bin/sh", "-c", BIN + " " + conf + " fake");
+            pb.directory(new File("/data/local/tmp"));
+            pb.redirectErrorStream(true);
+            final Process p = pb.start();
+            samsungProcess = p;
+            final BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(p.getInputStream()));
+            rootLines.clear();
+            Thread pump = new Thread(() -> {
+                try {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        rootLines.offer(line);
+                    }
+                } catch (IOException ignored) {
+                }
+            });
+            pump.setDaemon(true);
+            pump.start();
+
+            StringBuilder out = new StringBuilder();
+            long deadline = System.currentTimeMillis() + 300000;
+            long nextProbe = System.currentTimeMillis() + 60000;
+            boolean ok = false;
+            while (System.currentTimeMillis() < deadline) {
+                String line = rootLines.poll(500, TimeUnit.MILLISECONDS);
+                long now = System.currentTimeMillis();
+                if (line != null) {
+                    out.append(line).append('\n');
+                }
+                boolean moduleLine = line != null
+                        && (line.contains("KSU_LOADED")
+                            || line.contains("module live")
+                            || line.contains("parking without reap"));
+                if (moduleLine || now >= nextProbe) {
+                    if (suActiveOnce()) {
+                        ok = true;
+                        break;
+                    }
+                    nextProbe = now + 15000;
+                }
+                if (line == null && !p.isAlive() && rootLines.isEmpty()) {
+                    break;
+                }
+            }
+            if (!ok && suActiveOnce()) {
+                ok = true;
+            }
+            if (ok) {
+                String state = execOutTimeout("getenforce", 5000).trim();
+                return "root shell ready; KernelSU active (selinux="
+                        + state + ")";
+            }
+            return "root shell failed\n" + out.toString().trim();
+        } catch (Throwable t) {
+            return "openRoot failed: " + t;
+        }
+    }
+
+    /** One cheap su probe; ksuActive() retries for the boot path. */
+    private boolean suActiveOnce() {
+        try {
+            return execOutTimeout("/system/bin/su -c id", 3000)
+                    .contains("u:r:ksu:s0");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @Override
     public String execRoot(String cmd) {
+        if (samsungMode()) {
+            return execViaSu(cmd);
+        }
         if (rootProcess == null || !rootProcess.isAlive()) {
             return "root shell not open";
         }
@@ -622,26 +936,85 @@ public class UserService extends IUserService.Stub {
         }
     }
 
+    /**
+     * Runs a command as full-capability uid 0 through KernelSU's su
+     * (u:r:ksu:s0). The exploit's shell-domain root shell cannot write
+     * adb_keys; this path can, so Install channel prefers it whenever a
+     * module is loaded.
+     */
+    @Override
+    public String execSu(String cmd) {
+        if (!suActiveOnce()) {
+            return "su is not available (is KernelSU loaded?)";
+        }
+        return execViaSu(cmd);
+    }
+
+    /**
+     * Samsung root commands, and any command that needs full capabilities,
+     * go through KernelSU's su. The command is written to a script so quoting
+     * is not lost between the Java string and three layers of /bin/sh.
+     */
+    private String execViaSu(String cmd) {
+        try {
+            try (FileOutputStream out = new FileOutputStream(SU_CMD)) {
+                out.write(("#!/system/bin/sh\ncd /\n" + cmd + "\n")
+                        .getBytes(StandardCharsets.UTF_8));
+            }
+            Os.chmod(SU_CMD, 0755);
+            String result = execOutTimeout(
+                    "/system/bin/su -c 'sh " + SU_CMD + "'", 120000);
+            if ("timeout".equals(result) || "error".equals(result)) {
+                return "execRoot failed: " + result;
+            }
+            return result;
+        } catch (Throwable t) {
+            return "execRoot failed: " + t;
+        }
+    }
+
     @Override
     public String closeRoot() {
         closeRootInternal();
-        return "root shell closed";
+        return samsungMode()
+                ? "root shell closed (KernelSU stays loaded until reboot)"
+                : "root shell closed";
     }
 
     /** SELinux / Seccomp / ksud, as shown on the home card. */
     @Override
     public String info() {
-        String selinux = execOut("getenforce");
-        String seccomp = execOut("grep -m1 Seccomp /proc/self/status | awk '{print $2}'");
-        String ksud = "not loaded";
-        Matcher m = Pattern.compile("version=(ksud[^\\n]*)").matcher(readLog());
-        if (m.find()) {
-            ksud = m.group(1).trim();
-        } else if (selinux.contains("Permissive")) {
-            ksud = "missing";
-        }
+        // Probe su first: it is both the ksu flag and the fallback for
+        // getenforce, which the shell uid cannot read from selinuxfs.
         String ksu = execOut("/system/bin/su -c id").contains("u:r:ksu:s0")
                 ? "active" : "not loaded";
+        String selinux = execOut("getenforce");
+        if ("active".equals(ksu)
+                && !selinux.equals("Permissive")
+                && !selinux.equals("Enforcing")) {
+            String viaSu = execOutTimeout(
+                    "/system/bin/su -c getenforce", 5000).trim();
+            if (viaSu.equals("Permissive") || viaSu.equals("Enforcing")) {
+                selinux = viaSu;
+            }
+        }
+        String seccomp = execOut("grep -m1 Seccomp /proc/self/status | awk '{print $2}'");
+        String ksud = "not loaded";
+        if (samsungMode()) {
+            // The Samsung chain uses the bundled ksud and does not print the
+            // manager-discovery "version=ksud..." line the generic log has.
+            if (execOutTimeout("grep -m1 '^kernelsu ' /proc/modules", 3000)
+                    .contains("kernelsu")) {
+                ksud = "bundled diabl0w/KernelSU ksud";
+            }
+        } else {
+            Matcher m = Pattern.compile("version=(ksud[^\\n]*)").matcher(readLog());
+            if (m.find()) {
+                ksud = m.group(1).trim();
+            } else if (selinux.contains("Permissive")) {
+                ksud = "missing";
+            }
+        }
         return "selinux=" + selinux + "\nseccomp=" + seccomp + "\nksud=" + ksud
                 + "\nksu=" + ksu + "\n";
     }
@@ -656,6 +1029,14 @@ public class UserService extends IUserService.Stub {
      */
     @Override
     public String keepPermissive() {
+        if (samsungMode()) {
+            /*
+             * The Samsung chain deliberately leaves SELinux to ksud's own
+             * restore.  Re-enforcing from userspace races it and can kill
+             * system_server on One UI, so there is nothing to do here.
+             */
+            return "selinux=left to ksud (Samsung mode)";
+        }
         String state = "unknown";
         try (java.io.FileOutputStream out = new java.io.FileOutputStream(
                 "/data/local/tmp/ksu_enforce.log", false)) {
@@ -872,6 +1253,15 @@ public class UserService extends IUserService.Stub {
     }
 
     private void closeRootInternal() {
+        if (samsungMode()) {
+            /*
+             * Deliberately do not destroy the parked fake-cred process.  It
+             * holds the reclaimed slab page (and any failed-plant zombies);
+             * killing it lets init reap them and can panic the kernel.
+             */
+            samsungProcess = null;
+            return;
+        }
         try {
             if (rootInput != null) {
                 rootInput.write("exit\n");
@@ -884,6 +1274,7 @@ public class UserService extends IUserService.Stub {
             rootProcess = null;
         }
         rootInput = null;
+        samsungProcess = null;
     }
 
     private static String readAll(InputStream in) throws IOException {

