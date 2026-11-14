@@ -22,7 +22,7 @@ coverage see [Supported devices](supported-devices.md).
   root shell:
   - Generic mode: [KernelSU](https://github.com/tiann/KernelSU),
     [KernelSU-Next](https://github.com/rifsxd/KernelSU-Next) or
-    [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra).
+    [SukiSU Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra).Others not guaranteed to work.
   - Samsung mode: the [diabl0w/KernelSU](https://github.com/diabl0w/KernelSU)
     Samsung build only (manager version starts with `samsung-v`). Other
     managers are rejected.
@@ -47,9 +47,7 @@ Use the same signing key for later builds, or uninstall the old app first.
 Shizuku stops on every reboot, so this is step one each time.
 
 1. Open the **Shizuku** app.
-2. Choose **Start via wireless debugging** and pair with the code shown. On
-   older releases over USB, run:
-   `adb shell sh /sdcard/Android/data/moe.shizuku.privileged.api/start.sh`
+2. Choose **Start via wireless debugging** and pair with the code shown.
 3. Open **TimerRoot** and allow Shizuku access (**Allow all the time**).
    The status card turns **Ready**.
 
@@ -59,9 +57,7 @@ permission state, requests the permission if needed, and binds the user
 service.
 
 ## 3. Install the exploit binary
-
-The binary is not committed (`app/src/main/assets/timer` is gitignored). Install
-it from the app after Shizuku is connected, under **Settings -> Exploit**:
+Install it from the app after Shizuku is connected, under **Settings -> Exploit**:
 
 - **Download exploit** fetches the prebuilt `timer` from the release asset,
   downloads it over HTTP, extracts the per-kernel profiles from the APK, and
@@ -74,8 +70,7 @@ Both actions:
 
 1. copy the binary to `/data/local/tmp/timer` (mode `0755`);
 2. extract `assets/conf/**.conf` to `/data/local/tmp/timer-conf`;
-3. run `timer target` and verify that its `target=` line matches the expected
-   app contract (`target=lynx`).
+3. run `timer target`.
 
 A binary whose target check fails is rejected before anything touches the
 kernel.
@@ -124,7 +119,7 @@ The app also passes `--protocol 3`, the app/binary interface version:
   debugging.
 
 `timer --conf <profile> target` prints the selected release, page size, profile
-and call-site address:
+and call-site address, for example:
 
 ```
 target=lynx
@@ -140,8 +135,7 @@ timer_site=0xffffffc008192f7c
 without touching the kernel and exits non-zero on failure, so it is safe to
 script. `PORT_LOG.md` records the derivation of every bundled profile.
 
-Adding a kernel means adding one `conf/*.conf`; the source does not change. The
-port procedure and gate definitions are in [SKILL.md](../SKILL.md) and the
+Adding a kernel means adding one `conf/*.conf`; the source does not change.The
 per-profile evidence is in [PORT_LOG.md](../PORT_LOG.md).
 
 ## 4. Get root
