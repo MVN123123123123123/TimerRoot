@@ -324,7 +324,6 @@ Both run Flyme 12.6.0.0A.
 
 Adding a kernel means adding one `conf/*.conf`; the exploit source does not
 change. The profile must be derived from the exact factory
-`boot.img`/`vendor_boot.img` (kallsyms + BTF), and the F1-F16 gates must be
-recorded. Use [SKILL.md](../SKILL.md) for the procedure and
+`boot.img`/`vendor_boot.img` (kallsyms + BTF),for the procedure and
 [PORT_LOG.md](../PORT_LOG.md) for the evidence format. Do not add a row here as
 `tested` until F15/F16 pass on hardware.
