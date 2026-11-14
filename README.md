@@ -7,7 +7,7 @@ Android app for **CVE-2026-98260** (POSIX CPU timer use-after-free). One tap
 gives a root shell in the shell domain, then late-loads **KernelSU**
 (`u:r:ksu:s0`).
 
-![TimerRoot status screen](Screenshot_20261113-185558.png)
+![TimerRoot status screen](docs/images/status.png)
 
 ## Overview
 
