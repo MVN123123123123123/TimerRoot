@@ -14,8 +14,6 @@ Status legend:
 | **verified in QEMU** | The shipped aarch64 binary ran against that factory kernel in `qemu-system-aarch64`, through `target`, `ids`, `probe`, `leak` and `verify` (F7-F11). The kernel is real; userspace, SELinux policy and KernelSU are not, so this does not replace a hardware run. |
 | **untested** | Profile exists but has not been run, or not even booted in QEMU (see the per-family notes). |
 
-**Only the Pixel 7a and Pixel 9a have been run on hardware.** Every other row
-is QEMU verification or untested.
 
 To identify your device:
 
