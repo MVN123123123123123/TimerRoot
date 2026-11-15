@@ -39,7 +39,7 @@ Profiles:
 |---|---|---|---|
 | Pixel 6 | `oriole` | `CP3A.261005.002.A1` | verified in QEMU |
 | Pixel 6 Pro | `raven` | `CP3A.261005.002.A1` | verified in QEMU |
-| Pixel 6a | `bluejay` | `CP3A.261005.002.A1` | verified in QEMU |
+| **Pixel 6a** | `bluejay` | `CP3A.261005.002.A1` | **tested, flinky** |
 | Pixel 7 | `panther` | `CP3A.261005.002.A1` | verified in QEMU |
 | Pixel 7 Pro | `cheetah` | `CP3A.261005.002.A1` | verified in QEMU |
 | **Pixel 7a** | `lynx` | `CP3A.261005.002.A1` | **tested** |
@@ -62,7 +62,7 @@ Profile: `conf/6.6.127-android15-8-g91d825611104-ab16252310-4k.conf`
 | Device | Codename | Factory build | Status |
 |---|---|---|---|
 | Pixel 10 | `frankel` | `CP3A.261005.005` | verified in QEMU |
-| Pixel 10 Pro | `blazer` | `CP3A.261005.005` | verified in QEMU |
+| Pixel 10 Pro | `blazer` | `CP3A.261005.005` | **tested, flinky** |
 | Pixel 10 Pro XL | `mustang` | `CP3A.261005.005` | verified in QEMU |
 | Pixel 10 Pro Fold | `rango` | `CP3A.261005.005` | verified in QEMU |
 
