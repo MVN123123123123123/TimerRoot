@@ -13,7 +13,7 @@ built with the NDK. For installing the finished artifacts see
   `targetSdk` are 36; AGP 8.7's default build-tools 35 cannot compile against
   platform 36.
 - **Gradle 9.6**. The wrapper is gitignored, so install
-  Gradle. 9.6 is recommended, but i uses 8.9.3.
+  Gradle. 9.6 is recommended.
 - **NDK 29.0.14206865** (or another recent NDK) with the
   `aarch64-linux-android21` clang, for the exploit only.
 - **PowerShell 7+** for the Gradle-free `scripts/build.ps1` path.
