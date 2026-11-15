@@ -895,6 +895,149 @@ hashes differ), so `release_prefix` pins the full banner including the
   `xi/s23-boot/` stays untouched. The conf constants are the factory ones; the
   boot banner is read from the image actually booted.
 
+### samsung s23fe — `5.10.240-android12-9-33420454-abS711BXXSJGZI6` (Samsung mode)
+
+`conf/samsung/samsung-s23fe-5.10.240.conf`, for the Samsung Galaxy S23 FE
+(SM-S711B, Exynos 2200, EUX firmware `S711BXXSJGZI6`, Android 16, patch
+2026-10, 4K pages). This is the **first 5.10 profile** in the tree: every
+other profile is 5.15/6.x, and 5.10 has no `struct cred::ucounts`, so the
+cred chain needed a different shape (see F4/F6 below). It is also the first
+Exynos profile. The sibling `s23fe_sm-s711u1_snapdragon` image in the port
+workspace is a different build (different `Image` hash and text layout) and
+is not usable for this profile.
+
+- **F1** banner `Linux version 5.10.240-android12-9-33420454-abS711BXXSJGZI6`
+  (`dpi@SWDK3801`, clang 12.0.4, `#1 SMP PREEMPT Fri Sep 18 13:53:09 KST
+  2026`), 4K pages, VA39. The embedded IKCONFIG confirms
+  `ARM64_4K_PAGES=y`, `ARM64_VA_BITS=39`, `SECURITY_DEFEX=y`, `KDP=y`,
+  `KDP_CRED=y`, `SLUB=y`, `SLUB_DEBUG=y`, `CFI_CLANG=y`,
+  `SHADOW_CALL_STACK=y`, `MEMCG_KMEM=y`. There is **no BTF**. The vulnerable
+  `begin_new_exec` order is intact: `bl exec_mmap` at
+  `0xffffffc008387c78`, then `bl posix_cpu_timers_exit` at
+  `0xffffffc0081a3db0`, then `bl exit_itimers` at `0xffffffc0081a1f14`
+  (`begin_new_exec` itself is at `0xffffffc0083872f4`). `_uh_call` is
+  `hvc #2` on this build (not `smc`), unlike the 5.15/6.6 Samsung images.
+- **F2** factory `boot.img`
+  `sha256 9fe5dd7050673563812f54aa030d4ace8e49fae102d6c90bfbd52d1eb58aca42`
+  (64 MiB, `boot.img.lz4` inside the AP tar); extracted `Image`
+  `dd9838fae388faccdaeb3048f4d4486b0949bd91548b9a4c186493b07bd7cbc0`
+  (33 412 928 bytes), `kernel_format raw-arm64`, `os_version_hdr 12.0.0`,
+  `os_patch_level 2026-10`. `vmlinux-to-elf` reconstructs the kallsyms ELF
+  at base `0xffffffc008000000` with **117 263 symbols**; the KMI is
+  `android12-5.10`.
+- **F3** `timer_site = 0xffffffc0081a2db0`: `do_timer_create` loads
+  `posix_timers_cache` (`0xffffffc00a1b6a50`) into `x0` at
+  `0xffffffc0081a2dac` and calls `kmem_cache_alloc` there; `sitecheck.py`
+  confirms this is the only `posix_timers_cache` allocation site.
+  `copy_process_low21 = 0xd2c4c`: `dup_task_struct`'s
+  `bl kmem_cache_alloc(task_struct_cachep 0xffffffc00a16e188)` is at
+  `0xffffffc0080d2c48` and returns to `0xffffffc0080d2c4c` (5.10 has no
+  `kmem_cache_alloc_node` in this path). The validator initially reported
+  `0xd0a6c`; disassembly showed that is `copy_signal`'s `sig_cachep`
+  allocation, i.e. a false match — the `dup_task_struct` site wins.
+- **F4** no BTF, so the layout comes from `fork_init`/`cred_init` literals,
+  `init_cred` static data and `prepare_creds`/`commit_creds`:
+  `k_itimer` is `0x108` with the `cpu_timer` node at `+0x78`. `struct cred`
+  is `0xa8` (`cred_jar` object `0xc0`) with a 4-byte `usage` at `0x0`,
+  `uid 0x4`, `euid 0x14`, caps `0x28..0x48` (5 words), `security 0x78`,
+  `user 0x80`, `user_ns 0x88`, `group 0x90`, non_rcu/rcu union `0x98`.
+  **5.10 has no `cred->ucounts`** (and no `init_ucounts` symbol): the profile
+  pins `cred_ucounts_off = cred_group_off = 0x90`, so the later groups write
+  overwrites the ucounts write, and `init_ucounts` points at
+  `ucounts_hashtable 0xffffffc00a16efc8`, which is only ever written and
+  never dereferenced. `task_struct` is `0x1280` (`fork_init` literal, no
+  vendor extension) with `cred` at `+0x780`; the trace `alloc_req_off` is
+  `0x10`.
+- **F5** `selinux_state 0xffffffc00a2c4e50`,
+  `panic_on_warn 0xffffffc009ed9dc0`, `root_user 0xffffffc009f03960`,
+  `init_user_ns 0xffffffc009f03710`, `init_groups 0xffffffc009f04b90`.
+  DEFEX `creds_fast_hash` is its own symbol at `0xffffffc00a3493b0`
+  (`creds_hash 0xffffffc00a3093b0` + `0x40000`); `get_task_creds` indexes it
+  directly as an 8-byte pointer array for `pid <= 0x8000`
+  (`cmp w25, #0x8, lsl #12`). The LSM list is
+  `capability,safesetid,integrity,selinux`: only SELinux has a 32-byte cred
+  blob, so `selinux_blob_off = 0x0`, `selinux_sid_kernel = 1` (the same
+  shape as the 6.6 S26 FE / S25 Edge builds). `fullcap = 0x1ffffffffff`.
+- **F6** `validate_conf.py`: 0 errors across all 30 confs (call site and
+  `copy_process` low21 match, 6/6 symbols; the validator needed a fallback
+  that accepts the `dup_task_struct` site when `copy_process` itself no
+  longer contains the allocation). Host build `--selfcheck`: 0 failures
+  (`libc` shim + `FAKE_REL`); `target` prints the full banner,
+  `pagesize=4096`, `timer_site=0xffffffc0081a2db0` and `samsung=1`. A
+  foreign 5.15 Samsung banner is refused with
+  `conf release prefix mismatch` before any kernel access, and the 16K
+  profile still refuses a 4K host page size.
+- **F7–F11** all pass in QEMU on the first shim boot (`logs/mass-s23fe.json`),
+  against the factory kernel booted through the QEMU-only vendor-hook shim
+  below. Slabinfo reports `posix_timers_cache` object `264` (`0x108`), 31
+  objects at `pagesperslab 2` (order 1), `task_struct` `4736` (`0x1280`) and
+  `cred_jar` `192` (`0xc0`); `target` prints the banner, `pagesize=4096` and
+  `timer_site=0xffffffc0081a2db0`; `ids` `page_alloc=260 page_free=258
+  pairs=1029`; `probe` `recs=4096 kept=4096` with a `pair … agree=1`; `leak`
+  512/512 votes; verify reaches `child report uid=0 euid=0 setuid(0)=0
+  errno=0 resuid=0/0/0` and `ROOT_SHELL_OK` (a standalone verify transcript
+  is kept in `logs/samsung-s23fe-f11.log`). F12/F13 stay pending on a
+  device.
+- **Samsung endgame** under `--samsung fake` (same shim; harness log
+  `logs/samsung-s23fe-fake.log`): `defex_hash` clears
+  `creds_fast_hash[197]`, then the `fake_cred`, `selinux_state`, `fake_uid`
+  and `fake_euid` plants each land on the first attempt (`free_seen=1` /
+  `burst hit=1`, `[ksu] panic_on_warn=0`), the worker reports `uid=0 euid=0`
+  and `setuid(0)=0 errno=0 resuid=0/0/0`. The KDP-safe setup then
+  `unshare(CLONE_NEWNS)`es, remounts `/` private and fails the ksud bind
+  mount with `errno=2` (the QEMU initramfs has no ksud source), runs the
+  stage script and stops at `[ksu] ksud missing` / `KSU_MISSING`, worker
+  `exit=0x100`, child `exit status=0`, then parks with the fake-cred page
+  held exactly as designed. F12/F13 stay pending on a device.
+- **QEMU note** the factory `Image` does **not** boot under
+  `qemu-system-aarch64` unmodified (same class of failure as a15xzh, s23
+  and s25edge): RKP/KDP call the Exynos secure monitor over `hvc` and the
+  hypervisor-backed page-table/RO-cred/DEFEX paths have no EL2 behind them.
+  Verification used a **throwaway patched copy**
+  (`work/xi/s23fe-boot/qemu-shim/Image.qemu`, built by the `mkshim.py` next
+  to it so the run can be reproduced); the factory artifacts in
+  `work/xi/s23fe-boot/` stay unmodified and **no constant was derived from
+  the shim**. Nine logical changes, all static VA → file offset =
+  VA − `0xffffffc008000000`:
+
+  | VA | original | shim | why |
+  |---|---|---|---|
+  | `0xffffffc008016128` | `hvc #2` (`d4000002`) | `mov x0,xzr` (`aa1f03e0`) | `_uh_call` returns 0 (success) instead of trapping; covers all 66 call sites |
+  | `0xffffffc00807b718` | `blr x8` (`d63f0100`) | `bl early_pgtable_alloc` (`947398c9`) | PGD-level allocator fallback; RKP hands out hypervisor page tables |
+  | `0xffffffc00807bae0` | `blr x8` (`d63f0100`) | `bl early_pgtable_alloc` (`947397d7`) | lower-level allocator call site (same reason) |
+  | `0xffffffc009d58930` | `mov w8,#1` (`52800028`) | `mov w8,#0` (`52800008`) | leaves `kdp_enable = 0`; the stock `get_cred()`/`copy_creds()` path runs instead of `prepare_ro_creds()` |
+  | `0xffffffc009d819f4` | `bl do_load_rules` (`97ffff97`) | `mov w0,wzr` (`2a1f03e0`) | `defex_load_rules` skips the hypervisor-signed rules file |
+  | `0xffffffc0083ac2f0` | `_uh_call(0x83000213)` block (7 words) | fill `V`: `V[0]=fc->root`, `V[8]=root->d_sb`, `V[0x38]=mount` | `vfs_create_mount` normally lets the hyp fill the 0x40-byte `vfsmnt_cache` object; `kern_mount` consumes `V[0x38]` |
+  | `0xffffffc008d1b548` | `bl _uh_call` (0x83000211) | `str x19,[x20,#0x38]` (`f9001e93`) | `kdp_mnt_alloc_vfsmount`: owner back-pointer for **every** `alloc_vfsmnt` (cloned mounts in `clone_mnt`) |
+  | `0xffffffc008d1b40c` / `0xffffffc0083ace8c` | `mov x4,xzr; mov x5,xzr; bl _uh_call` (0x83000213) | `str x2,[x1]; str x3,[x1,#8]; nop` | `kdp_set_mnt_root_sb` helper and `clone_mnt`'s inlined copy: fill `mnt_root`/`mnt_sb` |
+  | `0xffffffc008d1b450` / `0xffffffc008d1b494` / `0xffffffc008d1b4d8`, `0xffffffc0083ace54` / `0xffffffc0083ad018` | `bl _uh_call` (0x83000215) | `str w2,[x1,#0x10]` (`b9001022`) | the three `mnt_flags` helpers and `clone_mnt`'s two inlined copies: flags at `V+0x10` |
+
+  The failure ladder, for anyone re-deriving the shim: unmodified →
+  `hvc #2` undefined instruction in `_uh_call` (first caller
+  `rkp_robuffer_init`); with only the `_uh_call` patch → `BUG` in
+  `__create_pgd_mapping+0x798` (`rkp_ro_alloc_phys` returns 0, so the
+  installed table descriptor has no valid address); patching one allocator
+  site → prefetch abort on the EL1h vector; patching both →
+  `prepare_ro_creds` panics with `KDP Call failed`; with `kdp_enable = 0` →
+  `defex_load_rules` panics with `[DEFEX] Signature mismatch`; with the
+  rules load skipped → userspace, but the first mount faults at
+  `vfs_create_mount+0x100` (`ldr [x8,#0x8]`, `mnt_sb`) until that call's
+  vfsmount object is filled (the hyp normally fills it; the object is 0x40
+  bytes, and `kern_mount` consumes the owner at `+0x38`, not `+0x40`).
+  With that fill F7–F11 pass, but the Samsung `unshare(CLONE_NEWNS)` path
+  then dies in `copy_mnt_ns+0x280` (`ldr x10,[x10,#0x68]`, `x10 = 0`):
+  `clone_mnt` allocates fresh vfsmounts through the three `_uh_call`
+  mount ops (`0x83000211` owner, `0x83000213` root/sb, `0x83000215` flags)
+  and their inlined copies, so the cloned mount has no owner/root/sb.
+  Emulating those five call sites fixes `unshare` and the chain runs to
+  `ksud missing`. `rkp_init` still runs and `[DEFEX] Normal mode` still
+  logs.
+- **QEMU harness** (harness-only, outside this repo — `work/qemu/` in the
+  port tree): `mass.py --only samsung-s23fe --image
+  work/xi/s23fe-boot/qemu-shim/Image.qemu`, the same path as s23/s25edge,
+  so the factory `Image` stays untouched. The conf constants are the
+  factory ones; the boot banner is read from the image actually booted.
+
 ### Samsung — spray-write fix (found while porting s26fe)
 
 `--samsung fake` hung after `plant1 target=… zombie` on every attempt (3/3),
@@ -1019,14 +1162,14 @@ reports 0 errors for all 24 bundled profiles.
 | F4 cred / task geometry | pass | BTF + `cred_init` / `task_vendor_size_setup` disassembly |
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors; `--selfcheck` 0 failures (host build) |
-| F7 `timer target` | pass (QEMU) | all 19 mass profiles plus the s25edge and s23 shim runs print their own `timer_site`, exit 0 |
+| F7 `timer target` | pass (QEMU) | all 19 mass profiles plus the s23fe, s25edge and s23 shim runs print their own `timer_site`, exit 0 |
 | F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
-| F14 QEMU | pass | 19/21 booted profiles pass every gate in the 27-profile re-run; s25edge and s23 passed all gates in their own shim runs (see below); the exceptions are provenance/environment limits, not binary |
+| F14 QEMU | pass | 19/21 booted profiles pass every gate in the 27-profile re-run; s23fe, s25edge and s23 passed all gates in their own shim runs (see below); the exceptions are provenance/environment limits, not binary |
 | F15 hardware | pending | no device |
 | F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
 
@@ -1076,10 +1219,19 @@ reproduce deterministically:
   KDP `vfsmnt_cache` fill; the exact six words are in its section). Run
   separately with the harness `--image` override: **all gates passed on the
   first attempt** (`logs/mass.json`).
+- `samsung-s23fe` — the first 5.10 (and first Exynos) image; it needs its own
+  vendor-hook shim (`hvc #2` `_uh_call`, the two RKP page-table allocator
+  sites, KDP, DEFEX rules signature, plus the KDP vfsmount fills in
+  `vfs_create_mount`, `kdp_mnt_alloc_vfsmount`, `kdp_set_mnt_root_sb` and the
+  three `mnt_flags` helpers; the exact words are in its section). Run
+  separately with `--image`: **all gates passed** (`logs/mass-s23fe.json`),
+  and the `--samsung fake` endgame completed to the designed `ksud missing`.
 
 `samsung-s23` was ported after that sweep. It has its own factory `Image` and
 passed every gate in a separate shim run (`logs/mass.json`), which brings the
-count to **20 of the 22 profiles with a workspace `Image`**.
+count to **20 of the 22 profiles with a workspace `Image`**. `samsung-s23fe`
+followed as the first 5.10 profile and also passed every gate in its own shim
+run.
 
 | profile | device | slabinfo | F7 | F8 | F9 | F10 | F11 |
 |---|---|---|---|---|---|---|---|
@@ -1105,6 +1257,7 @@ count to **20 of the 22 profiles with a workspace `Image`**.
 | samsung-s26fe-6.6.127 | s26fe (Galaxy S26 FE) | pass | pass | pass | pass | pass | pass |
 | samsung-s25edge-6.6.127 | s25edge (Galaxy S25 Edge) | pass | pass | pass | pass | pass | pass |
 | samsung-s23-5.15.197 | s23 (Galaxy S23) | pass | pass | pass | pass | pass | pass |
+| samsung-s23fe-5.10.240 | s23fe (Galaxy S23 FE) | pass | pass | pass | pass | pass | pass |
 | samsung-s26u-6.1.162 | s26u (Galaxy S24/S26 Ultra) | pass | pass | pass | n/a | n/a | n/a |
 
 (the two `n/a` rows for s26u are the provenance mismatch above; the

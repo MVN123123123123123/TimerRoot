@@ -86,6 +86,7 @@ selected automatically on a Samsung device, or manually under
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | — | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
 | Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23-5.15.197.conf` | verified in QEMU |
+| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23fe-5.10.240.conf` | verified in QEMU |
 | Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | — | 2026-11-05 | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
 | Galaxy S25 Edge | SM-S937B | `S937BXXUBDZJB` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s25edge-6.6.127.conf` | verified in QEMU |
 
@@ -268,6 +269,15 @@ not publish the value for that build; read the real value on a device with
   different `ab` strings and text layouts, so they are refused until each gets
   its own profile. Its QEMU run also used a throwaway patched `Image` because
   of Knox.
+- The S23 FE (`s23fe`) is the first 5.10 and first Exynos profile: 5.10 has no
+  `cred.ucounts`, so `cred_ucounts_off` is pinned onto the groups slot (`0x90`)
+  and `init_ucounts` points at `ucounts_hashtable` (written, never
+  dereferenced). `timer_alloc 0x108`, `task_alloc_bytes 0x1280`,
+  `pcp_free = 1`, `ksu_kmi = "android12-5.10"`. Its factory kernel calls the
+  Exynos secure monitor over `hvc`, so the QEMU run used a throwaway patched
+  `Image`; the constants still come from the unmodified factory artifacts.
+  F7-F11 and the `--samsung fake` write chain were verified, including the
+  `unshare`/mount path; F12/F13 need a device.
 - The S26 FE profile pins `6.6.127-android15-8-abogkiS741BXXS3AZK1-4k`. The
   S25 Edge profile (`p87b1ce1`) is the first S25-series one; the S25 family
   shares its kernel build, but the other S25 images embed a different firmware
