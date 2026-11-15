@@ -45,7 +45,6 @@ one. The fixed target name (lynx) originated from the old build specifically por
 | [Auto-root research](docs/auto-root.md) | Design, Shizuku/ADB field notes, boot implementation and verified logs |
 | [Contributions and credits](docs/contributions.md) | Every upstream project and per-device port this work took ideas from |
 | [Port log](PORT_LOG.md) | Per-gate F1-F16 evidence for every bundled profile |
-| [Porting skill](SKILL.md) | Procedure for deriving a profile for a new kernel |
 
 Start with [Installation](docs/installation.md). It contains the 2-3 minute
 post-boot wait, the requirement, the matching-profile rule and the
