@@ -62,7 +62,7 @@ Profile: `conf/6.6.127-android15-8-g91d825611104-ab16252310-4k.conf`
 | Device | Codename | Factory build | Status |
 |---|---|---|---|
 | Pixel 10 | `frankel` | `CP3A.261005.005` | verified in QEMU |
-| Pixel 10 Pro | `blazer` | `CP3A.261005.005` | **tested, flinky** |
+| **Pixel 10 Pro** | `blazer` | `CP3A.261005.005` | **tested, flinky** |
 | Pixel 10 Pro XL | `mustang` | `CP3A.261005.005` | verified in QEMU |
 | Pixel 10 Pro Fold | `rango` | `CP3A.261005.005` | verified in QEMU |
 
