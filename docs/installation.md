@@ -187,6 +187,11 @@ kernel, `ksud` state, KernelSU state, SELinux mode and seccomp filter mode.
   permission when needed, and binds the service.
 - **Diagnose** runs the exploit's `ids` mode, which probes tracefs page event
   ids without arming a timer; it is safe to run repeatedly.
+- **Device debug log** — capture the full device spec (kernel boot
+  parameters, CPU/memory, SELinux, resolved profile) into
+  `/data/local/tmp/timer-debug.log` and show it in the Log tab. The same
+  capture runs automatically before every exploit run, on both the manual
+  and auto-root paths.
 
 ### Log
 

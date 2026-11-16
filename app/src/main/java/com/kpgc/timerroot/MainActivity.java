@@ -311,6 +311,8 @@ public class MainActivity extends Activity {
         body.addView(buttonRow(
                 compactButton("Shizuku", v -> showShizuku()),
                 compactButton("Diagnose", v -> run("ids", "ids"))));
+        body.addView(spacer(10));
+        body.addView(compactButton("Device debug log", v -> showDebugLog()));
 
         body.addView(spacer(24));
         body.addView(hintCard("First run: start Shizuku, grant access, then press "
@@ -1467,6 +1469,17 @@ public class MainActivity extends Activity {
                     }
                 }
                 service.setSamsungMode(samsung);
+                /*
+                 * Probe the device into the latest timer debug log before the
+                 * exploit runs, so a manual run leaves the same spec behind as
+                 * an auto-root boot (kernel boot parameters, SELinux state,
+                 * resolved profile). It starts no exploit stage.
+                 */
+                try {
+                    addLog(service.captureDebugLog());
+                } catch (Throwable t) {
+                    addLog("device probe failed: " + t);
+                }
                 String out = service.openRoot();
                 // Only a real uid=0 shell counts; a failed attempt parks the
                 // exploit and prints diagnostics that must not look like success.
@@ -2264,6 +2277,37 @@ public class MainActivity extends Activity {
                 addLog("[" + label + "]\n" + service.run(args));
             } catch (Throwable t) {
                 addLog("[" + label + "] failed: " + t);
+            }
+        }).start();
+    }
+
+    /**
+     * Opens the latest device-probe capture. The file lives on
+     * /data/local/tmp, so the shell user service reads it (and can capture a
+     * fresh one when none exists yet), then the text is shown on the Log tab.
+     */
+    private void showDebugLog() {
+        if (service == null) {
+            addLog("bind the service first");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                String log = service.readDebugLog();
+                if (log == null || log.trim().isEmpty()) {
+                    addLog("no device probe yet - capturing one now...");
+                    addLog(service.captureDebugLog());
+                    log = service.readDebugLog();
+                }
+                final String text = log == null || log.trim().isEmpty()
+                        ? "device debug log is empty (" + DeviceProbe.DEBUG_LOG + ")"
+                        : log;
+                ui.post(() -> {
+                    addLog(text);
+                    showTab(1);
+                });
+            } catch (Throwable t) {
+                addLog("device debug log failed: " + t);
             }
         }).start();
     }

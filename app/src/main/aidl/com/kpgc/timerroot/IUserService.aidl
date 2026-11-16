@@ -30,4 +30,31 @@ interface IUserService {
      * exploit shell because adb_keys needs CAP_DAC_OVERRIDE.
      */
     String execSu(String cmd) = 16;
+    /**
+     * Runs a read-only diagnostic command in the shell-user domain and
+     * returns its output. Used by the device probe to read /proc and /sys
+     * files an app process is denied (kernel boot parameters, cpuinfo,
+     * tracing, slabinfo), so the latest timer debug log can carry a full
+     * spec of the device the exploit is about to run on.
+     */
+    String probe(String cmd) = 17;
+    /**
+     * Probes the device and appends the capture to the latest timer debug
+     * log. Called before the exploit runs (boot iteration or manual run);
+     * does not start any exploit stage.
+     */
+    String captureDebugLog() = 18;
+    /** Contents of the latest timer debug log on /data/local/tmp. */
+    String readDebugLog() = 19;
+    /**
+     * The effective Samsung mode the service will run with, so the device
+     * probe can record it alongside the rest of the spec.
+     */
+    boolean isSamsungMode() = 20;
+    /**
+     * Appends one line to the latest timer debug log without truncating it,
+     * so the auto-root boot iteration can record its decisions next to the
+     * device probe captured by {@link #captureDebugLog()}.
+     */
+    String appendDebugLog(String line) = 21;
 }

@@ -102,7 +102,7 @@ public class AutoRootService extends Service {
                 && AutoRoot.isBootClaimed(this)
                 && !AutoRoot.hasPendingRestart(this)
                 && !AutoRoot.runInterrupted(this)) {
-            AutoRoot.log(this, "already attempted this boot, ignoring " + action);
+            log("already attempted this boot, ignoring " + action);
             if (!foregroundStarted) {
                 stopSelf(startId);
             }
@@ -167,7 +167,7 @@ public class AutoRootService extends Service {
      */
     private void resumeAfterRestart() {
         String last = AutoRoot.lastResultThisBoot(this);
-        AutoRoot.log(this, "after restart: last result=" + summary(last));
+        log("after restart: last result=" + summary(last));
         if (AutoRoot.classify(last) == AutoRoot.RESULT_FAILED) {
             /*
              * No outcome was recorded for this boot. Reporting the previous
@@ -228,9 +228,9 @@ public class AutoRootService extends Service {
         if (!AutoRoot.isEnabled(this)) {
             return;
         }
-        AutoRoot.log(this, "prestart: looking for Shizuku");
+        log("prestart: looking for Shizuku");
         if (waitForShizuku(5000)) {
-            AutoRoot.log(this, "prestart: Shizuku is already running");
+            log("prestart: Shizuku is already running");
             return;
         }
         acquireWakeLock();
@@ -244,17 +244,17 @@ public class AutoRootService extends Service {
             for (int attempt = 1; attempt <= 4; attempt++) {
                 show("Auto-root", "starting Shizuku early (try " + attempt + ")...");
                 String started = startShizuku();
-                AutoRoot.log(this, "prestart starter " + attempt + ": " + started);
+                log("prestart starter " + attempt + ": " + started);
                 long deadline = System.currentTimeMillis() + 15000;
                 boolean up = false;
                 while (System.currentTimeMillis() < deadline) {
                     if (waitForShizuku(1500)) {
-                        AutoRoot.log(this, "prestart: Shizuku is up");
+                        log("prestart: Shizuku is up");
                         up = true;
                         break;
                     }
                     if (shizukuServerRunning()) {
-                        AutoRoot.log(this, "prestart: server is up, waiting for its binder");
+                        log("prestart: server is up, waiting for its binder");
                         up = true;
                         break;
                     }
@@ -262,10 +262,10 @@ public class AutoRootService extends Service {
                 if (up) {
                     break;
                 }
-                AutoRoot.log(this, "prestart: server still not up after try " + attempt);
+                log("prestart: server still not up after try " + attempt);
             }
         } catch (Throwable t) {
-            AutoRoot.log(this, "prestart failed: " + t);
+            log("prestart failed: " + t);
         } finally {
             releaseWakeLock();
         }
@@ -274,7 +274,7 @@ public class AutoRootService extends Service {
     private void run(boolean force) {
         SharedPreferences prefs = AutoRoot.prefs(this);
         if (!prefs.getBoolean(AutoRoot.KEY_ENABLED, false)) {
-            AutoRoot.log(this, "auto-root is disabled, stopping");
+            log("auto-root is disabled, stopping");
             finish("Auto-root is off", "Enable it in TimerRoot first.", false);
             return;
         }
@@ -290,7 +290,7 @@ public class AutoRootService extends Service {
         boolean recover = !restarted && !firstAttempt
                 && AutoRoot.runInterrupted(this);
         if (!force && !restarted && !firstAttempt && !recover) {
-            AutoRoot.log(this, "already attempted this boot, skipping");
+            log("already attempted this boot, skipping");
             String last = AutoRoot.lastResultThisBoot(this);
             if (userService != null && AutoRoot.classify(last) != AutoRoot.RESULT_FAILED) {
                 // Keep the successful run, its root shell and its FGS alive.
@@ -304,7 +304,7 @@ public class AutoRootService extends Service {
             return;
         }
         if (restarted) {
-            AutoRoot.log(this, "resuming this boot after the binder restart");
+            log("resuming this boot after the binder restart");
         }
         /*
          * Capture what the dead process left behind before this attempt
@@ -324,11 +324,11 @@ public class AutoRootService extends Service {
              * The supervisor died before the exploit was started, so nothing
              * destructive ran: give the boot back and try normally.
              */
-            AutoRoot.log(this, "the interrupted run never reached the exploit; retrying this boot");
+            log("the interrupted run never reached the exploit; retrying this boot");
             AutoRoot.releaseBoot(this);
             AutoRoot.claimBoot(this);
         } else if (recover) {
-            AutoRoot.log(this, "recovering the interrupted run (" + recoverPhase + ")");
+            log("recovering the interrupted run (" + recoverPhase + ")");
         }
         /*
          * From here on this boot has no decided outcome. Dropping the old
@@ -365,7 +365,7 @@ public class AutoRootService extends Service {
         AutoRoot.clearRunPhase(this);
         AutoRoot.record(this, result);
         int kind = AutoRoot.classify(result);
-        AutoRoot.log(this, (kind == AutoRoot.RESULT_KSU ? "success: "
+        log((kind == AutoRoot.RESULT_KSU ? "success: "
                 : kind == AutoRoot.RESULT_SHELL ? "partial (no KernelSU): "
                 : "failed: ") + result);
         if (kind != AutoRoot.RESULT_FAILED) {
@@ -419,7 +419,7 @@ public class AutoRootService extends Service {
         boolean binder = waitForShizuku(15000);
         boolean serverUp = false;
         if (binder) {
-            AutoRoot.log(this, "Shizuku is already running");
+            log("Shizuku is already running");
             serverUp = true;
         } else {
             /*
@@ -430,11 +430,11 @@ public class AutoRootService extends Service {
              */
             serverUp = shizukuServerRunning();
             if (serverUp) {
-                AutoRoot.log(this, "Shizuku server is already up from the prestart");
+                log("Shizuku server is already up from the prestart");
             } else {
                 show("Auto-root", "starting Shizuku over the local ADB channel...");
                 started = startShizuku();
-                AutoRoot.log(this, "starter: " + started);
+                log("starter: " + started);
                 long deadline = System.currentTimeMillis() + 45000;
                 while (System.currentTimeMillis() < deadline) {
                     if (waitForShizuku(1500)) {
@@ -474,7 +474,7 @@ public class AutoRootService extends Service {
             if (!AutoRoot.claimRestart(this)) {
                 return "Shizuku is running but did not push its binder";
             }
-            AutoRoot.log(this, "server is up, no binder yet; restarting the app process");
+            log("server is up, no binder yet; restarting the app process");
             show("Auto-root", "restarting to receive the Shizuku binder...");
             RestartJobService.schedule(this);
             killSelf();
@@ -507,7 +507,7 @@ public class AutoRootService extends Service {
              * boot. The shell-domain root is gone with the old process, so
              * anything that needs it is done through KernelSU's su.
              */
-            AutoRoot.log(this, "re-attaching to the KernelSU stage that outlived the app");
+            log("re-attaching to the KernelSU stage that outlived the app");
             show("Auto-root", "re-attaching to the KernelSU stage...");
             long startedAt = recoverStartedAt > 0 && recoverStartedAt <= System.currentTimeMillis()
                     ? recoverStartedAt : System.currentTimeMillis();
@@ -528,15 +528,26 @@ public class AutoRootService extends Service {
                  */
                 return "auto-root was interrupted and KernelSU did not load: " + ksu;
             }
-            AutoRoot.log(this, "boot UI grants: "
+            log("boot UI grants: "
                     + tail(service.execSu(grantBootUiAccess())));
             return "root shell ready; " + ksu;
         }
 
         String installed = service.install(getPackageCodePath());
-        AutoRoot.log(this, installed);
+        log(installed);
         if (!installed.startsWith("installed")) {
             return "could not install the bundled exploit: " + installed;
+        }
+        /*
+         * Probe the whole device and write it to the latest timer debug log
+         * before anything destructive runs, so a failed or parked plant still
+         * leaves the kernel boot parameters, CPU/memory layout, SELinux state
+         * and the resolved profile behind as evidence.
+         */
+        try {
+            log(service.captureDebugLog());
+        } catch (Throwable t) {
+            log("device probe failed: " + t);
         }
         String target = service.run("target");
         if (!target.contains("target=lynx")) {
@@ -547,13 +558,13 @@ public class AutoRootService extends Service {
         if (samsung) {
             String problem = AutoRoot.samsungManagerProblem(this);
             if (problem != null) {
-                AutoRoot.log(this, problem);
+                log(problem);
                 return problem;
             }
         }
         show("Auto-root", samsung ? "running the Samsung chain..."
                 : "running the exploit...");
-        AutoRoot.log(this, samsung ? "timer fake (samsung)" : "timer shell");
+        log(samsung ? "timer fake (samsung)" : "timer shell");
         /*
          * Written before the call: if the app is killed mid-exploit, the next
          * process must know a trigger was already spent on this boot.
@@ -562,7 +573,7 @@ public class AutoRootService extends Service {
         exploitStarted = true;
         String output = service.openRoot();
         if (!output.startsWith("root shell ready")) {
-            AutoRoot.log(this, "full shell-stage output: " + UserService.SHELL_LOG);
+            log("full shell-stage output: " + UserService.SHELL_LOG);
             return "exploit did not reach uid=0: " + shellStageFailure(output);
         }
         if (samsung) {
@@ -572,9 +583,9 @@ public class AutoRootService extends Service {
              * root and no second late-load stage, and its SELinux is left to
              * ksud, so openRoot() already returned the final state.
              */
-            AutoRoot.log(this, "boot UI grants: "
+            log("boot UI grants: "
                     + tail(service.execRoot(grantBootUiAccess())));
-            AutoRoot.log(this, "samsung chain ready: " + tail(output));
+            log("samsung chain ready: " + tail(output));
             return output;
         }
 
@@ -585,7 +596,7 @@ public class AutoRootService extends Service {
          * shell" button does. A KSU failure must not throw away the working
          * root shell, hence the separate result suffix.
          */
-        AutoRoot.log(this, "root shell ready; loading KernelSU");
+        log("root shell ready; loading KernelSU");
         show("Auto-root", "loading KernelSU...");
         String ksu = loadKernelSu(service);
         /*
@@ -596,7 +607,7 @@ public class AutoRootService extends Service {
          * in Settings. Install channel does the same, so the first boot after
          * setup already has them.
          */
-        AutoRoot.log(this, "boot UI grants: "
+        log("boot UI grants: "
                 + tail(service.execRoot(grantBootUiAccess())));
         return "root shell ready; " + ksu;
     }
@@ -615,11 +626,11 @@ public class AutoRootService extends Service {
      */
     private void maybeSoftRestart(IUserService service) {
         if (!AutoRoot.softRestartEnabled(this)) {
-            AutoRoot.log(this, "soft restart disabled");
+            log("soft restart disabled");
             return;
         }
         if (!AutoRoot.claimSoftRestart(this)) {
-            AutoRoot.log(this, "soft restart already done this boot");
+            log("soft restart already done this boot");
             return;
         }
         String last = AutoRoot.lastResult(this);
@@ -635,9 +646,9 @@ public class AutoRootService extends Service {
              * page again and the user simply gets the lock screen.
              */
             AutoRoot.markBootUiSeen(this);
-            AutoRoot.log(this, "soft restart: requesting userspace restart");
+            log("soft restart: requesting userspace restart");
             String result = service.softRestart();
-            AutoRoot.log(this, "soft restart: " + result);
+            log("soft restart: " + result);
             if (result.startsWith("soft restart unavailable")
                     || result.startsWith("soft restart failed")) {
                 /*
@@ -664,7 +675,7 @@ public class AutoRootService extends Service {
              * mid-flight. Anything else means the restart did not start, and
              * the root shell is still valid.
              */
-            AutoRoot.log(this, "soft restart call ended: " + t);
+            log("soft restart call ended: " + t);
         }
     }
 
@@ -725,7 +736,7 @@ public class AutoRootService extends Service {
                                 + " minutes of KernelSU attempts";
                         break;
                     }
-                    AutoRoot.log(this, "KernelSU attempt " + attempt + ": "
+                    log("KernelSU attempt " + attempt + ": "
                             + failure);
                     show("Auto-root", "retrying KernelSU (" + attempt + "/"
                             + KSU_ATTEMPTS + ")...");
@@ -733,18 +744,18 @@ public class AutoRootService extends Service {
                 KsuStage stage = runKsuStage(service, attempt, resume, runStart);
                 if (stage.loaded) {
                     String selinux = service.keepPermissive();
-                    AutoRoot.log(this, "KernelSU active: " + selinux);
-                    AutoRoot.log(this, tail(service.readLog()));
+                    log("KernelSU active: " + selinux);
+                    log(tail(service.readLog()));
                     return "KernelSU active (" + selinux + ")";
                 }
-                AutoRoot.log(this, tail(service.readLog()));
+                log(tail(service.readLog()));
                 failure = stage.failure;
                 if (!stage.replant) {
                     break;
                 }
             }
         } catch (Throwable t) {
-            AutoRoot.log(this, "KernelSU step failed: " + t);
+            log("KernelSU step failed: " + t);
             return "KernelSU failed: " + t;
         }
         return "KernelSU failed: " + failure;
@@ -784,7 +795,7 @@ public class AutoRootService extends Service {
                     stage.loaded = true;
                     return stage;
                 }
-                AutoRoot.log(this, "watching the KernelSU stage that is already running");
+                log("watching the KernelSU stage that is already running");
             } else {
                 AutoRoot.setRunPhase(this, PHASE_FAKE);
                 if (AutoRoot.ksuStartedAt(this) <= 0) {
@@ -795,7 +806,7 @@ public class AutoRootService extends Service {
                  * anything read from here on belongs to this run.
                  */
                 String started = service.runDetached("fake");
-                AutoRoot.log(this, "timer fake");
+                log("timer fake");
                 if (started.startsWith("start failed")) {
                     stage.failure = tail(started);
                     return stage;
@@ -901,7 +912,7 @@ public class AutoRootService extends Service {
             }
             return stage;
         } catch (Throwable t) {
-            AutoRoot.log(this, "KernelSU step failed: " + t);
+            log("KernelSU step failed: " + t);
             stage.failure = String.valueOf(t);
             return stage;
         }
@@ -982,7 +993,7 @@ public class AutoRootService extends Service {
                     pair.getPrivate(), (RSAPublicKey) pair.getPublic(),
                     command, 45000);
             String output = result.output == null ? "" : result.output.trim();
-            AutoRoot.log(this, "adb starter raw: " + (output.isEmpty() ? "(no output)" : tail(output)));
+            log("adb starter raw: " + (output.isEmpty() ? "(no output)" : tail(output)));
             if (result.needsAuthorization) {
                 return "TimerRoot's ADB key is not authorized yet - connect it once"
                         + " from a computer or tap Allow on the device";
@@ -1010,7 +1021,7 @@ public class AutoRootService extends Service {
 
             @Override
             public void onServiceDisconnected(ComponentName name) {
-                AutoRoot.log(AutoRootService.this, "user service disconnected");
+                log("user service disconnected");
             }
         };
         try {
@@ -1026,12 +1037,33 @@ public class AutoRootService extends Service {
                 // device-protected mode preference, so pass it explicitly.
                 userService.setSamsungMode(AutoRoot.isSamsungMode(this));
             } catch (Throwable t) {
-                AutoRoot.log(this, "setSamsungMode failed: " + t);
+                log("setSamsungMode failed: " + t);
             }
             return holder[0];
         } catch (Throwable t) {
-            AutoRoot.log(this, "bind failed: " + t);
+            log("bind failed: " + t);
             return null;
+        }
+    }
+
+    // ------------------------------------------------------------- logging
+
+    /**
+     * Writes one auto-root boot-iteration line to both logs: AutoRoot's own
+     * device-protected history (survives a reboot, readable at BFU) and the
+     * latest timer debug log on /data/local/tmp, appended after the device
+     * probe so the decisions sit next to the spec they explain. The debug
+     * copy is best-effort: without a bound shell user service there is
+     * nothing to append through, and the history line still lands.
+     */
+    private void log(String message) {
+        AutoRoot.log(this, message);
+        IUserService service = this.userService;
+        if (service != null) {
+            try {
+                service.appendDebugLog(message);
+            } catch (Throwable ignored) {
+            }
         }
     }
 

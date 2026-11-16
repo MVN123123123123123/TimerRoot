@@ -695,6 +695,77 @@ public class UserService extends IUserService.Stub {
         return new ConfCheck(conf, null, samsung);
     }
 
+    /**
+     * Read-only diagnostic command, run as the shell user. This is what the
+     * device probe uses to read /proc and /sys files the app process is
+     * denied (kernel boot parameters, cpuinfo, tracing, slabinfo). Output is
+     * bounded so one noisy file cannot flood the debug log.
+     */
+    @Override
+    public String probe(String cmd) {
+        if (cmd == null || cmd.isEmpty()) {
+            return "";
+        }
+        try {
+            Process p = new ProcessBuilder("/system/bin/sh", "-c", cmd)
+                    .redirectErrorStream(true).start();
+            String text;
+            try (InputStream in = p.getInputStream()) {
+                text = readAll(in);
+            }
+            p.waitFor(10, TimeUnit.SECONDS);
+            return text;
+        } catch (Throwable t) {
+            return "(probe failed: " + t + ")";
+        }
+    }
+
+    @Override
+    public boolean isSamsungMode() {
+        return samsungMode();
+    }
+
+    /**
+     * Probes every device detail the shell user can reach and appends it to
+     * the latest timer debug log, truncated first so the file always holds
+     * this boot's capture. Called before the exploit runs; it starts no
+     * exploit stage and cannot fail one.
+     */
+    @Override
+    public String captureDebugLog() {
+        String conf = "-";
+        ConfCheck check = resolveConfArg();
+        if (check.args != null) {
+            conf = check.args;
+        } else if (check.error != null) {
+            conf = "unresolved (" + check.error + ")";
+        }
+        DeviceProbe.reset();
+        DeviceProbe.append(DeviceProbe.render(DeviceProbe.capture(this, conf)));
+        return "device probe written to " + DeviceProbe.DEBUG_LOG;
+    }
+
+    @Override
+    public String readDebugLog() {
+        return DeviceProbe.read();
+    }
+
+    /**
+     * Appends one auto-root boot-iteration line to the latest timer debug
+     * log. Append-only: it never truncates, so the device probe captured by
+     * {@link #captureDebugLog()} stays intact and the iteration decisions
+     * accumulate next to it. The cross-boot history still lives in
+     * AutoRoot's own device-protected log.
+     */
+    @Override
+    public String appendDebugLog(String line) {
+        if (line == null || line.isEmpty()) {
+            return "";
+        }
+        DeviceProbe.append(DeviceProbe.renderLine(line));
+        return "";
+    }
+
     @Override
     public String run(String args) {
         ConfCheck check = resolveConfArg();

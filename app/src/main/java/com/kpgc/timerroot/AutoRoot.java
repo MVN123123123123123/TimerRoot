@@ -718,8 +718,12 @@ final class AutoRoot {
                  * service whose version differs, so a stale shell from an
                  * earlier APK can never answer the new transaction ids.
                  * 8 -> 9 added softRestart(); 9 -> 10 added setSamsungMode();
-                 * 10 -> 11 added execSu().
+                 * 10 -> 11 added execSu(); 11 -> 12 added the device-probe
+                 * methods (probe, captureDebugLog, readDebugLog) and
+                 * isSamsungMode(); 12 -> 13 added appendDebugLog() so the
+                 * auto-root iteration can write into the latest timer debug
+                 * log.
                  */
-                .version(11);
+                .version(13);
     }
 }

@@ -726,3 +726,50 @@ survives a userspace restart), `bootUiWanted()` then returns false, and both
 resumed process. The notification still becomes **Jailbreak mode ready**, so a
 pull-down is enough to confirm the outcome. If the restart turns out to be
 unavailable, the mark is cleared and the success page stays visible.
+
+---
+
+## Device debug log
+
+Every exploit run is preceded by a full device probe, captured through the
+Shizuku shell-user service (an app process is denied most of `/proc` and
+`/sys`). The capture is written to the **latest timer debug log**,
+`/data/local/tmp/timer-debug.log`, truncated at the start of each capture so
+the file always describes the boot that is about to run or just ran. It is
+world-readable, so `adb` can pull it while the phone is still locked.
+
+What it records:
+
+- time, boot id, shell uid, effective mode (generic / Samsung) and the
+  resolved kernel profile (`--conf ... --protocol ...`);
+- identity: build fingerprint, model, device, Android release/SDK, `uname -a`,
+  `/proc/version` and **the kernel boot parameters** (`/proc/cmdline`);
+- CPU and memory layout (`/proc/cpuinfo`, `/proc/meminfo`, huge pages);
+- security state: `getenforce`, the LSM list, Seccomp/NoNewPrivs, whether
+  `su` already hands out `u:r:ksu:s0`, and the `kernelsu` module line;
+- exploit state: the staged binary (size + sha256), the unpacked profiles,
+  and the staged Samsung `ksud`;
+- environment: tracefs, the relevant slab caches, the system/vendor/data
+  mounts, loaded modules and the kernel/boot/slot/verified properties.
+
+The capture runs **before** `openRoot()` / `timer fake` on every path —
+auto-root boot iteration, the manual *Get root shell* run, and the
+**Device debug log** button under *Settings -> Tools* (which also shows the
+log and captures one if none exists yet). Probing starts no exploit stage,
+so it cannot spend the one-shot trigger or park a process.
+
+Three logs have distinct jobs:
+
+| Log | Path | Scope |
+| --- | --- | --- |
+| Latest timer debug log | `/data/local/tmp/timer-debug.log` | current boot: device spec, then this boot's iteration decisions appended after it |
+| Exploit stage log | `/data/local/tmp/timer.log` and `timer_last.log` | detached `fake` plant output and the fsynced per-run evidence |
+| Auto-root log | `auto_root.log` (device-protected storage) | per-boot iteration history across reboots |
+
+Each auto-root iteration writes to **both** the latest timer debug log and
+`auto_root.log`: the debug log is truncated once per run by the device probe
+and then collects the iteration's decisions (prestart, Shizuku starter,
+exploit stage, KernelSU replants, soft restart, verdict) next to the spec,
+while `auto_root.log` keeps the full cross-boot history readable at BFU.
+The debug copy is best-effort — it needs the bound shell user service — so a
+line logged before the service binds lands in `auto_root.log` only.
