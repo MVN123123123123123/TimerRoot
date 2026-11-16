@@ -43,7 +43,7 @@ Profiles:
 | **Pixel 6a** | `bluejay` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 | Pixel 7 | `panther` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 | Pixel 7 Pro | `cheetah` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
-| **Pixel 7a** | `lynx` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| **Pixel 7a** | `lynx` | `CP4A.261105.040.A1` | 2026-11-05 | **tested** (hardware 2026-11-16) |
 | Pixel 8 | `shiba` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 | Pixel 8 Pro | `husky` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 | Pixel 8a | `akita` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
@@ -58,9 +58,12 @@ Profiles:
 
 `verified in QEMU` above means the shared kernel Image was booted and the
 F7-F11 gates run against it (both page sizes, one run each — the kernel is
-the same binary on all fifteen devices). No device has run this build on
-hardware yet; the `tested` rows below were the October build, whose kernel
-(6.1.162) is a different port.
+the same binary on all fifteen devices). The Pixel 7a row is a hardware
+run of this exact build (2026-11-16): shell and KSU plant both succeed; the
+device firmware adds `android_arch_task_struct_size=784` on the cmdline, so
+the exploit's task-alloc scan must accept the +0x310 size the firmware asks
+for (see `PORT_LOG.md`, 6.1.172 F4 / device gate). The `tested` rows below
+were the October build, whose kernel (6.1.162) is a different port.
 
 The Pixel 6 and 6 Pro received no November build — the October
 `CP3A.261005.002.A1` in the 6.1.162 section is their final factory image.

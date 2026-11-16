@@ -1475,8 +1475,16 @@ sha256 `184a9ba1dd675a46…`).
   return address.
 - **F4** geometry unchanged from 6.1.162: `timer_alloc = 0x108` (BTF
   `k_itimer`), `cred_req = 0xb0` / `cred_alloc = 0xc0`, `task_alloc_bytes =
-  0x12c0` (BTF `task_struct`, no vendor extension on 6.1), `task_cred_off =
-  0x838`.
+  0x12c0` (BTF `task_struct`), `task_cred_off = 0x838`. **Device correction
+  (2026-11-16, lynx hardware):** the factory Image has no vendor extension,
+  but the shipped firmware adds one — the Pixel cmdline carries
+  `android_arch_task_struct_size=784`, so `dup_task_struct` asks for
+  `0x12c0 + 0x310 = 0x15d0` (`bytes_req=5584` on the live
+  `kmem:kmem_cache_alloc` trace, slabinfo `task_struct` object 5632, 5 objs /
+  8-page slab). QEMU boots the Image without the parameter and still matches
+  `0x12c0`, which is why F7-F11 passed here while the first device runs
+  failed. The conf keeps the factory value; `scan_task_allocs` accepts both
+  (`p7a/timer_p7a.c`, commit `711bf29`).
 - **F5** symbols: `selinux_state = 0xffffffc00a27c848` (16K
   `0xffffc0000a366858`), `panic_on_warn = 0xffffffc00a02ac0c`, `root_user`,
   `init_user_ns`, `init_ucounts`, `init_groups` per the conf comments.
@@ -1500,6 +1508,33 @@ sha256 `184a9ba1dd675a46…`).
   (`child report uid=0 euid=0 setuid(0)=0 resuid=0/0/0`).
 - **F12-F13** need a device, as always. The `tested` hardware rows in
   `docs/supported-devices.md` still refer to the 6.1.162 build.
+
+#### Device gate — lynx, CP4A.261105.040.A1 (2026-11-16)
+
+The first device runs all failed at `[-] cred leak failed` with
+`task_recs=0` (`recs=3`) on every attempt — shell mode still got uid 0, but
+fake mode (and therefore the KSU plant) never found the child's
+task_struct. Root cause: the firmware vendor extension above; the scan
+demanded exactly `0x12c0` while the device records `0x15d0`.
+
+After the fix (scanner accepts `+0x310`, rebuilt binary md5
+`5ab631cd20b33991c8ae18e111d709a7`, bundled as the app asset):
+
+- Boot shell stage: `root shell ready` ~3 min after
+  `LOCKED_BOOT_COMPLETED` (BFU, before unlock — the boot channel path).
+- KSU plant: first post-reboot attempt missed the burst twice
+  (`fake_cred exhausted retries`), attempt 2 hit (`burst hit=1 after
+  81ms`, `fake cred page pinned`), selinux zero planted on attempt 2, then
+  the chain completed: `[fake] worker setuid(0)=0 resuid=0/0/0` ->
+  `worker exit=0`.
+- Result: `auto: KernelSU active: selinux=Permissive (after 1s)`;
+  `su -c id` -> `uid=0(root) context=u:r:ksu:s0` (SukiSU Ultra manager);
+  auto-root pref `enabled=true`. KSU was late-loaded (ksud), not
+  userspace-installed, so `/data/adb/ksu` stays empty.
+- Plant reliability on this boot remains marginal (1 hit of 3 fake_cred
+  bursts plus 1 selinux miss) — the pcp-reclaim burst timing is the
+  limiting factor, not the geometry; parked zombies from misses require a
+  reboot before another run (SKILL hard rule).
 
 Two follow-ups from the same sweep, recorded in
 `timerroot-port/pixel/KERNELS.md`:
