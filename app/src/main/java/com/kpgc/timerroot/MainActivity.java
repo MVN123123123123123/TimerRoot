@@ -2280,12 +2280,15 @@ public class MainActivity extends Activity {
     }
 
     private Shizuku.UserServiceArgs serviceArgs() {
-        return new Shizuku.UserServiceArgs(
-                new ComponentName(getPackageName(), UserService.class.getName()))
-                .daemon(false)
-                .processNameSuffix("timer")
-                .debuggable(false)
-                .version(8);
+        /*
+         * One source of truth with the auto-root path. Pinning version 8 here
+         * while AutoRoot binds 11 made the server thrash the single
+         * per-app user-service record: every auto-path bind removed the
+         * MainActivity record ("version code not matched"), killed the
+         * running shell, and its own v11 callback never landed in time.
+         * MainActivity also calls v11-only methods (execSu, ksuActive).
+         */
+        return AutoRoot.serviceArgs(this);
     }
 
     private void copyLog() {
