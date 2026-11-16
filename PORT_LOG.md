@@ -1446,3 +1446,66 @@ supply.
   `conf_defaults()` instead of demanding every field be written out), but
   there is no vmlinux to cross-check their symbols against, so their F2/F3
   rows remain unverified.
+
+## 6.1.172 — Pixels 6a-10a, November 2026 (CP4A.261105.040)
+
+### `6.1.172-android14-11-g8d0115b07367-ab16385437` (4K and 16K)
+
+The November 2026 monthly ships one identical 6.1 kernel binary on all
+fifteen 6.1 GKI Pixels (bluejay, panther, cheetah, lynx, shiba, husky,
+akita, tokay, caiman, komodo, tegu, comet, felix, tangorpro, stallion) —
+decompressed Image sha256 `5c1b01c87980ea45a3a03d6bdc85e442d6fec8a087a0dfba6d0618b7f1cc13bb`,
+35,772,928 bytes. The kernel moved 6.1.162 -> 6.1.172 in this release, so
+the old `6.1.162` profiles no longer match the running banner on an updated
+device. Factory kernels were range-fetched straight out of the factory zips
+(`timerroot-port/pixel/<codename>/`, `fetch_boot.py` there; the inner
+`image-*.zip` is stored uncompressed, so `boot.img`/`kernel_16k` come out of
+HTTP ranges without pulling the ~4-15 GB images). Artifacts and derivation
+logs: `work/xi/tegu172-boot/` (4K from the tegu factory image, boot.img
+sha256 `9c9a99fe3204b56e…`; 16K from the same zip's `kernel_16k`,
+sha256 `184a9ba1dd675a46…`).
+
+- **F1** `begin_new_exec` order (4K @ `0xffffffc0083a76c0`, 16K @
+  `0xffffc000083a7470`): `exec_mmap` -> **`posix_cpu_timers_exit`** ->
+  `exit_itimers` on both — VULNERABLE.
+- **F3** `timer_site = 0xffffffc008192f9c` (16K `0xffffc000081930a8`),
+  `bl kmem_cache_alloc` inside `do_timer_create`, `x0` fed by
+  `posix_timers_cache` (`sitecheck.py`); `copy_process_low21 = 0xaba1c`
+  (16K `0xab98c`) from the `dup_task_struct` `bl kmem_cache_alloc_node`
+  return address.
+- **F4** geometry unchanged from 6.1.162: `timer_alloc = 0x108` (BTF
+  `k_itimer`), `cred_req = 0xb0` / `cred_alloc = 0xc0`, `task_alloc_bytes =
+  0x12c0` (BTF `task_struct`, no vendor extension on 6.1), `task_cred_off =
+  0x838`.
+- **F5** symbols: `selinux_state = 0xffffffc00a27c848` (16K
+  `0xffffc0000a366858`), `panic_on_warn = 0xffffffc00a02ac0c`, `root_user`,
+  `init_user_ns`, `init_ucounts`, `init_groups` per the conf comments.
+  `enforcing` at bit 0 of `selinux_state`, `avc_latest_notif_update.notif_lock`
+  at `selinux_state - 8` on both builds. `blobsim2.py`: same registration
+  order (`capability`, `selinux(0)`, `safesetid(0)`, `integrity`), only
+  selinux carries a 24-byte cred blob -> `selinux_blob_off = 0x0` (the 16K
+  kallsyms ELF drops the local `selinux_blob_sizes` symbol, so the 16K
+  `blobsim2` run reports MISSING; the registration order and `CONFIG_LSM`
+  string are identical to the 4K build that resolved it).
+- **F6** `validate_conf.py`: 0 errors on both confs; the worst-case node
+  spills into the retry path (documented, designed). `target` mode prints
+  `target=lynx` with the right `timer_site`; a VM booted with the old
+  `6.1.162` conf refuses before any kernel access
+  (`conf release mismatch: conf=6.1.162… running=6.1.172…`).
+- **F7-F11** all PASS on the first attempt for both page sizes
+  (`work/qemu/logs/mass-6.1.172.json`, `mass-6.1.172-16k.json`): slabinfo
+  cross-check (`posix_timers_cache` object 0x108 at order 1 4K / order 0
+  16K, `task_struct` 0x12c0), F7 target, F8 ids (a=263 f=261), F9 probe
+  (4096/4096), F10 leak (made=512 votes=512), F11 verify
+  (`child report uid=0 euid=0 setuid(0)=0 resuid=0/0/0`).
+- **F12-F13** need a device, as always. The `tested` hardware rows in
+  `docs/supported-devices.md` still refer to the 6.1.162 build.
+
+Two follow-ups from the same sweep, recorded in
+`timerroot-port/pixel/KERNELS.md`:
+
+- `mustang`/`rango` kernels are byte-identical to the already-ported
+  `6.12.81-…-ab16388316` blazer kernel, so those rows move to
+  `verified in QEMU`.
+- The Pixel 11 series ships `6.12.81-…-gf5369e7496cb-ab16467452-4k` in this
+  release (all four, byte-identical) — a new profile, not yet ported.

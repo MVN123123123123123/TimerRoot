@@ -26,6 +26,45 @@ adb shell getconf PAGESIZE
 
 ## Google
 
+### Pixel 6a through Pixel 10a — 6.1.172 (4K and 16K, November 2026)
+
+Build `CP4A.261105.040.A1` (security patch 2026-11-05). One identical kernel
+binary (Image sha256 `5c1b01c87980ea45…`) ships on every 6.1 GKI device in
+the November release — 15 devices, verified byte-identical against the
+factory images.
+
+Profiles:
+
+- 4K pages: `conf/6.1.172-android14-11-g8d0115b07367-ab16385437.conf`
+- 16K pages: `conf/6.1.172-android14-11-g8d0115b07367-ab16385437-16k.conf`
+
+| Device | Codename | Factory build | Security patch | Status |
+|---|---|---|---|---|
+| **Pixel 6a** | `bluejay` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 7 | `panther` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 7 Pro | `cheetah` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| **Pixel 7a** | `lynx` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 8 | `shiba` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 8 Pro | `husky` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 8a | `akita` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 9 | `tokay` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 9 Pro | `caiman` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 9 Pro XL | `komodo` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| **Pixel 9a** | `tegu` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 9 Pro Fold | `comet` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel Fold | `felix` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel Tablet | `tangorpro` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 10a | `stallion` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+
+`verified in QEMU` above means the shared kernel Image was booted and the
+F7-F11 gates run against it (both page sizes, one run each — the kernel is
+the same binary on all fifteen devices). No device has run this build on
+hardware yet; the `tested` rows below were the October build, whose kernel
+(6.1.162) is a different port.
+
+The Pixel 6 and 6 Pro received no November build — the October
+`CP3A.261005.002.A1` in the 6.1.162 section is their final factory image.
+
 ### Pixel 6 through Pixel 10a — 6.1.162 (4K and 16K)
 
 Profiles:
@@ -80,20 +119,25 @@ Profiles:
 | Device | Codename | Factory build | Security patch | Status |
 |---|---|---|---|---|
 | Pixel 10 Pro | `blazer` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
-| Pixel 10 Pro XL | `mustang` | `CP4A.261105.040.A1` | 2026-11-05 | untested |
+| Pixel 10 Pro XL | `mustang` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 10 Pro Fold | `rango` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 
-`mustang` (Pixel 10 Pro XL) is listed as untested because the profile was
-derived from the `blazer` factory image only. Both devices share one signed
-build — the factory `android-info.txt` accepts
-`board=rango|deepspace|frankel|blazer|mustang` — but that is not evidence that
-the kernel payload is byte-identical, which is what the Pixel 6–11 rows above
-were checked against. Fetching the `mustang` factory image and comparing the
-kernel hash is the remaining step; if it matches, the row becomes
-`verified in QEMU`.
+`mustang` and `rango` share one signed build with the `blazer` profile
+(`board=rango|deepspace|frankel|blazer|mustang`). The November factory
+images were fetched and their boot kernels compared: both the `mustang` and
+the `rango` kernel are byte-identical to the `blazer` one (Image sha256
+`e0c7240d40436d94…`), so the QEMU-verified `blazer` profile covers them.
 
 ### Pixel 11 series — 6.12.69 (4K)
 
 Profile: `conf/6.12.69-android16-6-g70777328ed0e-ab16108597-4k.conf`
+
+The November 2026 build (`CP4A.261105.040.D1`, security patch 2026-11-05)
+moves the Pixel 11 series to a new kernel,
+`6.12.81-android16-6-gf5369e7496cb-ab16467452-4k` (one identical binary on
+`cubs`/`grizzly`/`kodiak`/`yogi`, verified against the factory images).
+Factory kernels are fetched (`timerroot-port/pixel/cubs*/Image`) but the
+profile is **pending**; the rows below refer to the October build.
 
 | Device | Codename | Factory build | Security patch | Status |
 |---|---|---|---|---|
