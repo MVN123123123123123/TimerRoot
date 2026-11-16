@@ -953,8 +953,20 @@ static int scan_task_allocs(const unsigned char *b, size_t n, int pid,
         alloc = u64(b, i + ALLOC_REQ_OFF + 8);
         if (!is_kernel_ptr(ptr))
             continue;
-        /* task_struct_cachep rounds 0x1440 to 0x1640 on this build. */
+        /*
+         * task_alloc_bytes is the factory-Image value (BTF sizeof(task_struct)
+         * + dup_task_struct padding); the scanner also takes the sizes that
+         * real firmware asks for.  task_struct_cachep rounds 0x1440 to 0x1640
+         * on the 6.12 blazer build, and the November 2026 6.1 firmware boots
+         * with android_arch_task_struct_size=784 on the cmdline (verified on
+         * the lynx device: dup_task_struct records bytes_req=5584 = 0x12c0 +
+         * 0x310, slabinfo object_size 5632), so the vendor extension shifts
+         * the request by 0x310.  QEMU, which boots the Image without the
+         * parameter, still matches 0x12c0.
+         */
         if (req != TASK_ALLOC_BYTES && alloc != TASK_ALLOC_BYTES &&
+            req != TASK_ALLOC_BYTES + 0x310 &&
+            alloc != TASK_ALLOC_BYTES + 0x310 &&
             req != 0x1640 && alloc != 0x1640)
             continue;
         *out = ptr;
