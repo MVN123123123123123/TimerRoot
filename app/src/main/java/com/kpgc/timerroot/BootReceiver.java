@@ -61,8 +61,14 @@ public class BootReceiver extends BroadcastReceiver {
          * "Root shell ready" notification with "preparing..." for a moment.
          * A pending binder restart is the one case that must be allowed
          * through.
+         *
+         * An interrupted run is the other: its app process was killed (LMKD)
+         * while the detached exploit kept going, so this broadcast is the only
+         * chance to re-attach to it - or, if it is gone, to record what really
+         * happened instead of silently keeping the boot claim.
          */
-        if (AutoRoot.isBootClaimed(context) && !AutoRoot.hasPendingRestart(context)) {
+        if (AutoRoot.isBootClaimed(context) && !AutoRoot.hasPendingRestart(context)
+                && !AutoRoot.runInterrupted(context)) {
             AutoRoot.log(context, action + ": already handled this boot, ignoring");
             return;
         }

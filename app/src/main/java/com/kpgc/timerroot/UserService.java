@@ -38,6 +38,14 @@ public class UserService extends IUserService.Stub {
 
     private static final String BIN = "/data/local/tmp/timer";
     private static final String LOG = "/data/local/tmp/timer.log";
+    /**
+     * Full stdout/stderr of the foreground `shell` stage. `openRoot()` only
+     * returns the text, and the app keeps the last 400 chars of it in the
+     * recorded result, so a failed plant used to leave nothing behind that
+     * could be read at BFU (the app's own log needs the credential-encrypted
+     * data). This file is world-readable and survives the run.
+     */
+    static final String SHELL_LOG = "/data/local/tmp/timer-shell.log";
     private static final String SOFT_RESTART_LOG = "/data/local/tmp/soft_restart.log";
     private static final String CONF_DIR = "/data/local/tmp/timer-conf";
     /** Samsung-only profiles, selected when Samsung mode is enabled. */
@@ -738,6 +746,15 @@ public class UserService extends IUserService.Stub {
         }
     }
 
+    /** Opens (and truncates) the BFU-readable shell-stage log. */
+    private static java.io.OutputStream openShellLog() {
+        try {
+            return new FileOutputStream(SHELL_LOG, false);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     @Override
     public String openRoot() {
         ConfCheck check = resolveConfArg();
@@ -762,13 +779,33 @@ public class UserService extends IUserService.Stub {
             final BufferedReader reader = new BufferedReader(
                     new InputStreamReader(rootProcess.getInputStream()));
             rootLines.clear();
+            /*
+             * Keep a copy where adb can read it while the user is still
+             * locked: this is the only record of why a plant lost its race.
+             */
+            final java.io.OutputStream shellLog = openShellLog();
             Thread pump = new Thread(() -> {
                 try {
                     String line;
                     while ((line = reader.readLine()) != null) {
                         rootLines.offer(line);
+                        if (shellLog != null) {
+                            try {
+                                shellLog.write((line + "\n")
+                                        .getBytes(StandardCharsets.UTF_8));
+                                shellLog.flush();
+                            } catch (Throwable ignored) {
+                            }
+                        }
                     }
                 } catch (IOException ignored) {
+                } finally {
+                    if (shellLog != null) {
+                        try {
+                            shellLog.close();
+                        } catch (Throwable ignored) {
+                        }
+                    }
                 }
             });
             pump.setDaemon(true);
@@ -776,16 +813,23 @@ public class UserService extends IUserService.Stub {
             /*
              * The trigger runs three plant attempts and each one has to wait
              * for its child to exec and be killed, so a success can take
-             * minutes.  Do not declare failure early: keep reading until the
-             * exploit prints its success marker or exits.
+             * minutes. Do not declare failure early: keep reading until the
+             * exploit prints its success marker or gives up.
+             *
+             * `park_forever()` is the only way the trigger ends without root,
+             * and it never exits, so the deadline alone used to turn every
+             * failed run into a two-minute wait for a process that had
+             * already parked. The parking line is terminal unless the parent
+             * had already written the credentials and woken the child.
              */
             StringBuilder out = new StringBuilder();
-            long deadline = System.currentTimeMillis() + 300000;
+            long deadline = System.currentTimeMillis() + 420000;
             boolean ok = false;
+            boolean parked = false;
             while (System.currentTimeMillis() < deadline) {
                 String line = rootLines.poll(200, TimeUnit.MILLISECONDS);
                 if (line == null) {
-                    if (!rootProcess.isAlive()) {
+                    if (parked || !rootProcess.isAlive()) {
                         // Drain whatever is left, then stop.
                         String rest;
                         while ((rest = rootLines.poll()) != null) {
@@ -801,11 +845,12 @@ public class UserService extends IUserService.Stub {
                     ok = true;
                     break;
                 }
-                if (line.contains("parking without reap")
-                        || line.contains("no successful plant")
-                        || line.contains("cred writes landed, waking child")) {
-                    // Give the child a moment to print its id line.
+                if (line.contains("cred writes landed, waking child")) {
+                    // The child prints its id line next; keep reading.
                     continue;
+                }
+                if (line.contains("parking without reap")) {
+                    parked = true;
                 }
             }
             return (ok ? "root shell ready\n" : "root shell failed\n") + out.toString().trim();

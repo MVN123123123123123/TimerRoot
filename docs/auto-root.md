@@ -478,6 +478,47 @@ Behaviour:
   service start cannot trigger the exploit twice. The claim is released on any
   failure before `openRoot()` starts, so a later retry is still possible; once
   `openRoot()` has run the claim is kept, because the exploit is one-shot.
+- Supervisor liveness: the detached `timer fake` is not a child of the app, so
+  LMKD can kill the app and leave the plant running unattended. That is what
+  happened on the Pixel 7a: the app was killed 79 s into the KernelSU stage,
+  `BOOT_COMPLETED` was then ignored because the boot was claimed, and the boot
+  looked finished while `last_result` still held the previous boot's success.
+  The worker now writes a heartbeat every 10 s (and re-arms a persisted
+  `JobScheduler` watchdog that only fires once the heartbeats stop; it
+  survives a userspace restart, which wipes non-persisted jobs, and jobs may
+  otherwise be deferred until the unlock, which the post-unlock
+  `BOOT_COMPLETED` already covers). A heartbeat is considered dead after
+  40 s, because a userspace restart redelivers `LOCKED_BOOT_COMPLETED` about
+  a minute after the kill - the first 90 s threshold was *older* than that
+  gap, so the one recovery chance at BFU was thrown away.
+  A claimed boot with no recorded result and a stale heartbeat is an
+  interrupted run: the service starts again, re-attaches to the plant that is
+  still running and supervises it to its terminal line. If the exploit had
+  been started, the claim stays and the recorded outcome is a failure
+  ("interrupted … reboot to retry"); if it had not, the claim is released and
+  the boot retries normally.
+- Results are stamped with the boot id that produced them, and cleared when a
+  run starts. A reboot therefore cannot inherit the previous boot's
+  `KernelSU active`, and a run in flight cannot show an older result. Outcomes
+  are classified as KernelSU / shell-only / failure, so
+  `root shell ready; KernelSU failed: …` is logged as a partial result instead
+  of a success.
+- The foreground `shell` stage keeps its full stdout/stderr in
+  `/data/local/tmp/timer-shell.log` (world-readable, so `adb` can read it while
+  the phone is still at BFU; the app's own log lives in credential-encrypted
+  storage and needs the unlock). The recorded failure only carries the
+  actionable sentence, not 400 characters of kernel addresses.
+- `openRoot()` waits 7 min for the three plant attempts (a win arrives in
+  seconds; the failing third attempt can reach ~300 s), and stops as soon as
+  `park_forever()` prints its `parking without reap` line: that process never
+  exits, so the old code sat on the deadline and reported a timeout for a run
+  that had already given up.
+- The plant is a race and loses sometimes. Two boots on the Pixel 7a show the
+  mechanism: the win ran `pcp reclaim go (8773 -> 4805, 201ms)` and
+  `burst hit=1 after 73ms`, while the loss took 2626 ms for the same reclaim
+  and never reclaimed within its 15 s window (`free_seen=1 burst hit=0`) in
+  three attempts. A lost plant parks a zombie and needs a reboot, so the
+  failure is reported as such and auto-root does not loop on it.
 - `specialUse` FGS (allowed from `BOOT_COMPLETED` on 15/16/17); a partial
   wake lock covers the exploit window.
 - Binder-restart fallback: if the server is up but its binder never arrived
@@ -493,10 +534,16 @@ Behaviour:
   permissive` run). The stage is replanted up to three times, because the
   plant is a race and the exploit itself replants three times in `shell` and
   `permissive` mode; a missed burst parks a process and is otherwise
-  harmless. Success is decided by the kernel, not by the stage output:
-  `su -c id` must report `u:r:ksu:s0` (SukiSU Ultra tears the stage shell down
-  before it can print `KSU_LOADED`), and `keepPermissive()` then re-applies
-  `setenforce 0` because the module forces enforcing back ~0.4 s after load.
+  harmless. A plant needs minutes, not seconds: a full `timer fake` run took
+  316 s on the Pixel 7a to reach its `selinux write failed` line, so the stage
+  budget is 8 min per plant and 15 min for all replants. It used to be a hard
+  90 s window, which expired while the plant was still racing and reported
+  "timed out" for a run that was in fact still going. Success is decided by
+  the kernel, not by the stage output: `su -c id` must report `u:r:ksu:s0`
+  (SukiSU Ultra tears the stage shell down before it can print `KSU_LOADED`,
+  and a printed `KSU_LOADED` alone is not accepted), and `keepPermissive()`
+  then re-applies `setenforce 0` because the module forces enforcing back
+  ~0.4 s after load.
   A KernelSU failure keeps the working root shell and is reported as
   `root shell ready; KernelSU failed: ...`.
 - Soft restart after success (`softRestart()` in `UserService`, driven by

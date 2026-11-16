@@ -19,6 +19,16 @@ import android.content.Intent;
 public class RestartJobService extends JobService {
 
     private static final int JOB_ID = 4211;
+    /**
+     * Watchdog job: re-armed while a long exploit stage runs, and left to fire
+     * when the app process is killed under memory pressure. It covers the
+     * window after the boot broadcast, where no further broadcast would
+     * re-enter the service (jobs may be deferred until the unlock, which
+     * BOOT_COMPLETED already handles).
+     */
+    private static final int WATCHDOG_JOB_ID = 4212;
+    /** Fires this long after the last re-arm (i.e. after the last heartbeat). */
+    private static final long WATCHDOG_DELAY_MS = 3 * 60 * 1000L;
 
     static void schedule(Context context) {
         JobScheduler scheduler = context.getSystemService(JobScheduler.class);
@@ -32,9 +42,45 @@ public class RestartJobService extends JobService {
         scheduler.schedule(builder.build());
     }
 
+    /**
+     * (Re-)arms the watchdog. Scheduling with the same id replaces the pending
+     * job, so a live run keeps pushing it forward and it only fires once the
+     * heartbeats stop.
+     */
+    static void scheduleWatchdog(Context context) {
+        JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+        if (scheduler == null) {
+            return;
+        }
+        JobInfo.Builder builder = new JobInfo.Builder(WATCHDOG_JOB_ID,
+                new ComponentName(context, RestartJobService.class))
+                .setMinimumLatency(WATCHDOG_DELAY_MS)
+                .setOverrideDeadline(WATCHDOG_DELAY_MS + 60_000L)
+                /*
+                 * A userspace restart (framework crash or the app's own soft
+                 * restart) wipes non-persisted jobs without rebooting the
+                 * kernel, which is exactly when the supervisor is dead and the
+                 * detached plant is still running: the job is the only thing
+                 * left that can bring the recovery back before the unlock.
+                 */
+                .setPersisted(true);
+        scheduler.schedule(builder.build());
+    }
+
+    /** Drops the watchdog once the run has an outcome. */
+    static void cancelWatchdog(Context context) {
+        JobScheduler scheduler = context.getSystemService(JobScheduler.class);
+        if (scheduler != null) {
+            scheduler.cancel(WATCHDOG_JOB_ID);
+        }
+    }
+
     @Override
     public boolean onStartJob(JobParameters params) {
-        AutoRoot.log(this, "restart job: starting auto-root");
+        boolean watchdog = params.getJobId() == WATCHDOG_JOB_ID;
+        AutoRoot.log(this, watchdog
+                ? "watchdog job: the auto-root process is gone, restarting it"
+                : "restart job: starting auto-root");
         try {
             startForegroundService(new Intent(this, AutoRootService.class)
                     .setAction(AutoRootService.ACTION_START));

@@ -1539,7 +1539,8 @@ public class MainActivity extends Activity {
                 boolean sawLateLoad = false;
                 int lastLen = -1;
                 long lastChange = System.currentTimeMillis();
-                while (System.currentTimeMillis() - start < 90000) {
+                while (System.currentTimeMillis() - start
+                        < AutoRoot.KSU_STAGE_BUDGET_MS) {
                     Thread.sleep(1000);
                     String tail = service.readLog();
                     sawLateLoad |= tail.contains("[ksu] late-load rc=0");
@@ -1548,7 +1549,17 @@ public class MainActivity extends Activity {
                         lastChange = System.currentTimeMillis();
                     }
                     if (tail.contains("KSU_LOADED")) {
-                        loaded = true;
+                        /*
+                         * The stage's own marker is not proof: a loader can
+                         * print it and still not hand out root. Ask the kernel,
+                         * the same way the late-load paths below do.
+                         */
+                        if (service.ksuActive()) {
+                            loaded = true;
+                        } else {
+                            failure = "the stage printed KSU_LOADED but su does"
+                                    + " not hand out u:r:ksu:s0";
+                        }
                         break;
                     }
                     if (tail.contains("selinux write failed")) {
@@ -1619,7 +1630,8 @@ public class MainActivity extends Activity {
                     if (service.ksuActive()) {
                         loaded = true;
                     } else {
-                        failure = "timed out after 90s";
+                        failure = "did not finish within "
+                                + (AutoRoot.KSU_STAGE_BUDGET_MS / 60000) + " minutes";
                     }
                 }
                 String selinux = "";

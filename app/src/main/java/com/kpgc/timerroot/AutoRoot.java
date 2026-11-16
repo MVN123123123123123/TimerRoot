@@ -38,10 +38,24 @@ final class AutoRoot {
     static final int MAX_RESTARTS = 2;
     static final String KEY_LAST_RESULT = "last_result";
     static final String KEY_LAST_RESULT_TIME = "last_result_time";
+    /** Boot id that produced last_result, so a reboot cannot inherit it. */
+    static final String KEY_LAST_RESULT_BOOT = "last_result_boot";
+    /**
+     * Wall-clock heartbeat of the supervisor process. A run is live only while
+     * this keeps moving; a silent heartbeat plus a claimed boot is what an
+     * LMKD kill leaves behind.
+     */
+    static final String KEY_HEARTBEAT = "run_heartbeat";
+    /** Stage that was in flight ("shell" or "fake") when the app last ran. */
+    static final String KEY_RUN_PHASE = "run_phase";
+    /** Wall-clock start of the KernelSU stage, so a resumed run keeps its budget. */
+    static final String KEY_KSU_STARTED_AT = "ksu_started_at";
     static final String KEY_PRIVATE = "private_key";
     /** Live stage text for the boot status screen (device protected). */
     static final String KEY_STAGE = "stage";
     static final String KEY_STAGE_TIME = "stage_time";
+    /** Boot id that wrote the stage, so a reboot cannot inherit it either. */
+    static final String KEY_STAGE_BOOT = "stage_boot";
     /** 0 = running, 1 = success, -1 = failure. */
     static final String KEY_STAGE_STATE = "stage_state";
     /** Show the full-screen status activity over the lock screen. */
@@ -72,6 +86,42 @@ final class AutoRoot {
     static final int STAGE_RUNNING = 0;
     static final int STAGE_OK = 1;
     static final int STAGE_FAILED = -1;
+
+    /*
+     * Result kinds. A uid-0 shell and a loaded KernelSU are not the same
+     * outcome: the shell is the exploit's own root and dies with the boot,
+     * while only KernelSU survives. Keeping them apart is what stops a
+     * "... KernelSU failed: ..." result from being reported as a success.
+     */
+    static final int RESULT_FAILED = 0;
+    static final int RESULT_SHELL = 1;
+    static final int RESULT_KSU = 2;
+
+    /**
+     * One `timer fake` run plants three times and took 316 s to reach its
+     * "selinux write failed" line on the Pixel 7a, so the old 90 s window
+     * always expired while the plant was still racing. The exploit's own
+     * `shell` stage is bounded at 300 s in UserService.openRoot().
+     */
+    static final long KSU_STAGE_BUDGET_MS = 8 * 60 * 1000L;
+    /** All KernelSU replants together; a boot must not hang forever on it. */
+    static final long KSU_TOTAL_BUDGET_MS = 15 * 60 * 1000L;
+    /**
+     * No heartbeat for this long means the supervisor is gone: the app was
+     * killed while the detached exploit kept running. The heartbeat itself
+     * ticks every 10 s, and a live run always beats within a few seconds of
+     * that, so anything past four missed ticks is dead.
+     *
+     * This must stay well under the next broadcast: after a userspace
+     * restart, `LOCKED_BOOT_COMPLETED` is redelivered once, about a minute
+     * after the kill (observed 23:32:35 kill → 23:33:49 delivery on the
+     * Pixel 7a). The old 90 s threshold was older than that gap, so the
+     * recovery was thrown away and the boot sat unsupervised until the user
+     * unlocked, 2.5 minutes later.
+     */
+    static final long HEARTBEAT_STALE_MS = 40 * 1000L;
+    /** A stage that stopped printing for this long is dead, not busy. */
+    static final long KSU_STALL_MS = 60 * 1000L;
 
     static final int DEFAULT_ADB_PORT = AdbLocal.DEFAULT_PORT;
 
@@ -295,14 +345,105 @@ final class AutoRoot {
     }
 
     static void record(Context context, String result) {
+        /*
+         * commit(), not apply(): an LMKD kill right after the recording must
+         * not lose the outcome, otherwise the boot looks interrupted again.
+         */
         prefs(context).edit()
                 .putString(KEY_LAST_RESULT, result)
                 .putLong(KEY_LAST_RESULT_TIME, System.currentTimeMillis())
-                .apply();
+                .putLong(KEY_LAST_RESULT_BOOT, bootId())
+                .commit();
     }
 
     static String lastResult(Context context) {
         return prefs(context).getString(KEY_LAST_RESULT, "");
+    }
+
+    /**
+     * The recorded result only counts for the boot that produced it. Without
+     * this a reboot leaves the previous boot's "KernelSU active" on disk, and
+     * the status screen reports a success this boot never had.
+     */
+    static String lastResultThisBoot(Context context) {
+        SharedPreferences prefs = prefs(context);
+        return prefs.getLong(KEY_LAST_RESULT_BOOT, Long.MIN_VALUE) == bootId()
+                ? prefs.getString(KEY_LAST_RESULT, "") : "";
+    }
+
+    /** Drops the outcome: a run that starts now owes a fresh one. */
+    static void clearResult(Context context) {
+        prefs(context).edit()
+                .remove(KEY_LAST_RESULT)
+                .remove(KEY_LAST_RESULT_TIME)
+                .remove(KEY_LAST_RESULT_BOOT)
+                .commit();
+    }
+
+    /** Classifies a recorded result into {@link #RESULT_FAILED} and friends. */
+    static int classify(String result) {
+        if (result == null || !result.startsWith("root shell ready")) {
+            return RESULT_FAILED;
+        }
+        return result.contains("KernelSU active") ? RESULT_KSU : RESULT_SHELL;
+    }
+
+    // -------------------------------------------------- supervisor liveness
+
+    /**
+     * Marks the supervisor alive. Refreshed every few seconds by the worker so
+     * a run that lost its app process can be told apart from one that is
+     * simply busy.
+     */
+    static void heartbeat(Context context) {
+        prefs(context).edit()
+                .putLong(KEY_HEARTBEAT, System.currentTimeMillis()).apply();
+    }
+
+    static long heartbeatAge(Context context) {
+        return System.currentTimeMillis() - prefs(context).getLong(KEY_HEARTBEAT, 0);
+    }
+
+    /**
+     * True when this boot's attempt has no outcome: the boot is claimed, no
+     * result was recorded for it, and the supervisor stopped beating. That is
+     * exactly what an LMKD kill leaves behind - the detached exploit may even
+     * still be running, but nothing is watching it and the boot would
+     * otherwise be written off as "already handled".
+     */
+    static boolean runInterrupted(Context context) {
+        return isBootClaimed(context)
+                && lastResultThisBoot(context).isEmpty()
+                && heartbeatAge(context) > HEARTBEAT_STALE_MS;
+    }
+
+    /**
+     * Remembers which stage is running, so a later process knows whether the
+     * exploit was started (the one-shot claim must stay) and whether the
+     * detached KernelSU plant is still worth re-attaching to.
+     */
+    static void setRunPhase(Context context, String phase) {
+        prefs(context).edit().putString(KEY_RUN_PHASE, phase).commit();
+    }
+
+    static String runPhase(Context context) {
+        return prefs(context).getString(KEY_RUN_PHASE, "");
+    }
+
+    /** Clears the in-flight stage bookkeeping (phase and its start time). */
+    static void clearRunPhase(Context context) {
+        prefs(context).edit()
+                .remove(KEY_RUN_PHASE)
+                .remove(KEY_KSU_STARTED_AT)
+                .commit();
+    }
+
+    static long ksuStartedAt(Context context) {
+        return prefs(context).getLong(KEY_KSU_STARTED_AT, 0);
+    }
+
+    static void setKsuStartedAt(Context context, long at) {
+        prefs(context).edit().putLong(KEY_KSU_STARTED_AT, at).commit();
     }
 
     // ------------------------------------------------------- boot status UI
@@ -321,19 +462,33 @@ final class AutoRoot {
                 .putString(KEY_STAGE, text)
                 .putLong(KEY_STAGE_TIME, System.currentTimeMillis())
                 .putInt(KEY_STAGE_STATE, state)
+                .putLong(KEY_STAGE_BOOT, bootId())
                 .commit();
     }
 
+    /**
+     * True when the stored stage belongs to this boot. A reboot leaves the
+     * previous boot's "loading KernelSU... 75s" behind, and the status screen
+     * must show the new boot's state instead of a frozen one.
+     */
+    private static boolean stageIsCurrent(Context context) {
+        return prefs(context).getLong(KEY_STAGE_BOOT, Long.MIN_VALUE) == bootId();
+    }
+
     static String stageText(Context context) {
-        return prefs(context).getString(KEY_STAGE, "waiting for the boot…");
+        return stageIsCurrent(context)
+                ? prefs(context).getString(KEY_STAGE, "waiting for the boot…")
+                : "waiting for the boot…";
     }
 
     static long stageTime(Context context) {
-        return prefs(context).getLong(KEY_STAGE_TIME, 0);
+        return stageIsCurrent(context) ? prefs(context).getLong(KEY_STAGE_TIME, 0) : 0;
     }
 
     static int stageState(Context context) {
-        return prefs(context).getInt(KEY_STAGE_STATE, STAGE_RUNNING);
+        return stageIsCurrent(context)
+                ? prefs(context).getInt(KEY_STAGE_STATE, STAGE_RUNNING)
+                : STAGE_RUNNING;
     }
 
     /**

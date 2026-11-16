@@ -57,12 +57,39 @@ Profiles:
 
 Profile: `conf/6.6.127-android15-8-g91d825611104-ab16252310-4k.conf`
 
+Build `CP3A.261005.005` (security patch 2026-10-05).
+
 | Device | Codename | Factory build | Security patch | Status |
 |---|---|---|---|---|
 | Pixel 10 | `frankel` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
 | **Pixel 10 Pro** | `blazer` | `CP3A.261005.005` | 2026-10-05 | **tested, flinky** |
 | Pixel 10 Pro XL | `mustang` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
 | Pixel 10 Pro Fold | `rango` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
+
+### Pixel 10 Pro — 6.12.81 (4K and 16K)
+
+Build `CP4A.261105.040.A1` (November 2026 security update). The Pixel 10 Pro
+(`blazer`) now runs a 6.12 kernel instead of the 6.6.127 one in the section
+above.
+
+Profiles:
+
+- 4K pages: `conf/6.12.81-android16-6-g4a1a020d156e-ab16388316-4k.conf`
+- 16K pages: `conf/6.12.81-android16-6-g4a1a020d156e-ab16388316-16k.conf`
+
+| Device | Codename | Factory build | Security patch | Status |
+|---|---|---|---|---|
+| Pixel 10 Pro | `blazer` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 10 Pro XL | `mustang` | `CP4A.261105.040.A1` | 2026-11-05 | untested |
+
+`mustang` (Pixel 10 Pro XL) is listed as untested because the profile was
+derived from the `blazer` factory image only. Both devices share one signed
+build — the factory `android-info.txt` accepts
+`board=rango|deepspace|frankel|blazer|mustang` — but that is not evidence that
+the kernel payload is byte-identical, which is what the Pixel 6–11 rows above
+were checked against. Fetching the `mustang` factory image and comparing the
+kernel hash is the remaining step; if it matches, the row becomes
+`verified in QEMU`.
 
 ### Pixel 11 series — 6.12.69 (4K)
 
@@ -238,6 +265,18 @@ not publish the value for that build; read the real value on a device with
   `0226c3be4224b02884d4f9b332aee58ec06c65b2263265e80f2498332ef15c06`), so one
   profile covers all four devices. It has not been flashed on physical Pixel 10
   hardware.
+- The Pixel 10 Pro `CP4A.261105.040.A1` (November 2026) image is the first
+  6.12.81 build in the tree and the first Pixel 10-series build on a 6.12
+  kernel. It carries **two** kernels: the 4K `boot.img` and a standalone
+  `kernel_16k`. Unlike the 6.1.162 Pixel pair, the 16K payload's release string
+  drops the `-4k` suffix, so the two profiles differ in their `release` keys as
+  well as in `page_size`. Both pass F7–F11 in QEMU against the unmodified
+  factory image.
+- The Pixel 10 Pro XL (`mustang`) shares this signed build (`android-info.txt`
+  accepts `board=rango|deepspace|frankel|blazer|mustang`) but its own factory
+  image was not fetched, so the kernel payload was not compared. The 6.6.127
+  rows above were only called byte-identical after all four images were
+  unpacked; this build has not had that check.
 - The Pixel 11 series (6.12.69) likewise carries one byte-identical payload
   across both build suffixes (SHA-256
   `4417511834260f72c1b6a5bb9b9f809dfb6734b20fd7e8aa156c3c1f91f0f97b`). Its
