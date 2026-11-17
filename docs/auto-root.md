@@ -497,6 +497,17 @@ Behaviour:
   been started, the claim stays and the recorded outcome is a failure
   ("interrupted … reboot to retry"); if it had not, the claim is released and
   the boot retries normally.
+- The shell user service is just as disposable as the app process. It can be
+  killed by LMKD or torn down by Shizuku while `timer fake` is still racing,
+  which used to surface as `DeadObjectException` and a reported failure even
+  though the detached plant then loaded KernelSU normally. A dead binder in
+  the KernelSU stage is now treated as a reconnect, not a failed plant: the
+  service unbinds the dead record, rebinds (restarting `shizuku_server` over
+  the local ADB channel if its binder is gone too) and resumes watching the
+  same `/data/local/tmp/timer.log`. Up to four consecutive reconnects are
+  allowed per run, bounded by the KernelSU total budget. `keepPermissive()`
+  and the boot UI app-op grants are best-effort around the same failure, so a
+  loaded KernelSU is never downgraded to an error.
 - Results are stamped with the boot id that produced them, and cleared when a
   run starts. A reboot therefore cannot inherit the previous boot's
   `KernelSU active`, and a run in flight cannot show an older result. Outcomes

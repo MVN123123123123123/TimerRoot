@@ -138,7 +138,7 @@ final class DeviceProbe {
         }
     }
 
-    private static Entry entry(IUserService service, String label, String command) {
+    private static String entry(IUserService service, String label, String command) {
         String out;
         try {
             out = service.probe(command);
@@ -148,7 +148,16 @@ final class DeviceProbe {
         if (out == null || out.trim().isEmpty()) {
             out = "(empty)";
         }
-        return new Entry(label, command, out);
+        return renderEntry(new Entry(label, command, out));
+    }
+
+    /**
+     * Renders one field. The capture used to append the Entry object itself,
+     * which wrote {@code DeviceProbe$Entry@...} instead of the probed text and
+     * made the whole debug log useless.
+     */
+    private static String renderEntry(Entry e) {
+        return "# " + e.label + ": " + e.command + "\n" + e.output + "\n";
     }
 
     /** Truncates the latest debug log before a fresh capture is written. */

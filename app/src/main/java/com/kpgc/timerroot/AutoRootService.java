@@ -10,6 +10,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
+import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.PowerManager;
 
@@ -528,8 +529,8 @@ public class AutoRootService extends Service {
                  */
                 return "auto-root was interrupted and KernelSU did not load: " + ksu;
             }
-            log("boot UI grants: "
-                    + tail(service.execSu(grantBootUiAccess())));
+            IUserService live = userService != null ? userService : service;
+            log("boot UI grants: " + tail(applyBootUiGrants(live)));
             return "root shell ready; " + ksu;
         }
 
@@ -571,7 +572,19 @@ public class AutoRootService extends Service {
          */
         AutoRoot.setRunPhase(this, PHASE_SHELL);
         exploitStarted = true;
-        String output = service.openRoot();
+        String output;
+        try {
+            output = service.openRoot();
+        } catch (DeadObjectException e) {
+            /*
+             * Unlike `timer fake`, the root shell stage is a child of the
+             * shell user service, so it dies with it. There is nothing left
+             * to supervise and the one-shot trigger is already spent.
+             */
+            log("the shell user service died during the root shell stage");
+            return "the shell user service died during the root shell stage;"
+                    + " reboot to retry";
+        }
         if (!output.startsWith("root shell ready")) {
             log("full shell-stage output: " + UserService.SHELL_LOG);
             return "exploit did not reach uid=0: " + shellStageFailure(output);
@@ -584,7 +597,7 @@ public class AutoRootService extends Service {
              * ksud, so openRoot() already returned the final state.
              */
             log("boot UI grants: "
-                    + tail(service.execRoot(grantBootUiAccess())));
+                    + tail(applyBootUiGrants(service)));
             log("samsung chain ready: " + tail(output));
             return output;
         }
@@ -607,9 +620,35 @@ public class AutoRootService extends Service {
          * in Settings. Install channel does the same, so the first boot after
          * setup already has them.
          */
-        log("boot UI grants: "
-                + tail(service.execRoot(grantBootUiAccess())));
+        /*
+         * loadKernelSu() may have rebound the user service after the old
+         * process died, so use the live field rather than the binding made at
+         * the start of this attempt.
+         */
+        IUserService live = userService != null ? userService : service;
+        log("boot UI grants: " + tail(applyBootUiGrants(live)));
         return "root shell ready; " + ksu;
+    }
+
+    /**
+     * Best-effort boot UI app-op grants. The shell-domain root shell is gone
+     * when the user service was rebound, but KernelSU's su is exactly what
+     * those app-ops need, so fall back to it. A dead binder here must never
+     * turn an already-loaded KernelSU into a failed run.
+     */
+    private static String applyBootUiGrants(IUserService service) {
+        try {
+            String viaShell = service.execRoot(grantBootUiAccess());
+            if (viaShell != null && !viaShell.startsWith("root shell not open")) {
+                return viaShell;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            return service.execSu(grantBootUiAccess());
+        } catch (Throwable t) {
+            return "grants skipped: " + t;
+        }
     }
 
     /**
@@ -690,6 +729,12 @@ public class AutoRootService extends Service {
         String failure;
         /** True when the plant lost its race and nothing was loaded yet. */
         boolean replant;
+        /**
+         * True when the binder to the shell user service died while this
+         * stage was being watched. The detached plant keeps running; the
+         * caller must rebind and resume watching it, not start another one.
+         */
+        boolean reconnect;
     }
 
     /**
@@ -725,6 +770,7 @@ public class AutoRootService extends Service {
         String failure = resumedAt > 0
                 ? "the app was killed before the stage finished"
                 : "no attempt was made";
+        IUserService active = service;
         try {
             for (int attempt = 1; attempt <= KSU_ATTEMPTS; attempt++) {
                 boolean resume = attempt == 1 && resumedAt > 0;
@@ -741,14 +787,50 @@ public class AutoRootService extends Service {
                     show("Auto-root", "retrying KernelSU (" + attempt + "/"
                             + KSU_ATTEMPTS + ")...");
                 }
-                KsuStage stage = runKsuStage(service, attempt, resume, runStart);
+                KsuStage stage = runKsuStage(active, attempt, resume, runStart);
+                /*
+                 * The exploit is detached: if the shell user service dies
+                 * while the plant is racing, the timer binary keeps going and
+                 * can still load KernelSU. That used to surface as a
+                 * DeadObjectException failure even though root was acquired.
+                 * Rebind and re-attach to the same plant instead of spending a
+                 * second one-shot trigger on this boot.
+                 */
+                String reconnectFailure = null;
+                for (int reconnect = 0;
+                        stage.reconnect && reconnect < KSU_RECONNECTS;
+                        reconnect++) {
+                    if (System.currentTimeMillis() - runStart
+                            >= AutoRoot.KSU_TOTAL_BUDGET_MS) {
+                        reconnectFailure = "out of time while reconnecting to"
+                                + " the shell user service";
+                        break;
+                    }
+                    log("the KernelSU stage outlived the shell user service;"
+                            + " rebinding");
+                    active = rebindUserService();
+                    if (active == null) {
+                        reconnectFailure = "the shell user service is gone and"
+                                + " could not be rebound (the detached plant may"
+                                + " still finish; reboot to re-check)";
+                        break;
+                    }
+                    log("watching the KernelSU stage that is already running");
+                    stage = runKsuStage(active, attempt, true, runStart);
+                }
+                if (stage.reconnect) {
+                    failure = reconnectFailure != null ? reconnectFailure
+                            : "the shell user service kept dying during the"
+                                    + " KernelSU stage";
+                    break;
+                }
                 if (stage.loaded) {
-                    String selinux = service.keepPermissive();
+                    String selinux = keepPermissive(active);
                     log("KernelSU active: " + selinux);
-                    log(tail(service.readLog()));
+                    log(tail(readLogQuietly(active)));
                     return "KernelSU active (" + selinux + ")";
                 }
-                log(tail(service.readLog()));
+                log(tail(readLogQuietly(active)));
                 failure = stage.failure;
                 if (!stage.replant) {
                     break;
@@ -759,6 +841,79 @@ public class AutoRootService extends Service {
             return "KernelSU failed: " + t;
         }
         return "KernelSU failed: " + failure;
+    }
+
+    /** How many times a dead shell user service may be rebound per run. */
+    private static final int KSU_RECONNECTS = 4;
+
+    /**
+     * Replaces a shell user service whose binder died. The Shizuku server is
+     * normally still alive (only the app_process it spawned went away); if
+     * that is gone too, start it again over the local ADB channel first.
+     */
+    private IUserService rebindUserService() {
+        /*
+         * Drop the dead binding first. `kill=false` keeps a still-alive user
+         * service around (it may hold the root shell), and the call is
+         * harmless when Shizuku already removed the record.
+         */
+        if (boundArgs != null && boundConnection != null) {
+            try {
+                Shizuku.unbindUserService(boundArgs, boundConnection, false);
+            } catch (Throwable ignored) {
+            }
+        }
+        boundArgs = null;
+        boundConnection = null;
+        userService = null;
+        for (int i = 0; i < 3; i++) {
+            if (!waitForShizuku(2000)) {
+                log("Shizuku binder is gone; restarting the server");
+                log("restart: " + startShizuku());
+                if (!waitForShizuku(10000)) {
+                    log("Shizuku did not come back");
+                    continue;
+                }
+            }
+            IUserService rebound = bindUserService();
+            if (rebound != null) {
+                log("shell user service rebound");
+                return rebound;
+            }
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                return null;
+            }
+        }
+        log("could not rebind the shell user service");
+        return null;
+    }
+
+    /** keepPermissive() must never turn a loaded KernelSU into a failure. */
+    private String keepPermissive(IUserService active) {
+        try {
+            return active.keepPermissive();
+        } catch (Throwable t) {
+            log("keepPermissive failed: " + t);
+            IUserService rebound = rebindUserService();
+            if (rebound != null) {
+                try {
+                    return rebound.keepPermissive();
+                } catch (Throwable t2) {
+                    log("keepPermissive failed after rebind: " + t2);
+                }
+            }
+            return "selinux state unavailable";
+        }
+    }
+
+    private static String readLogQuietly(IUserService active) {
+        try {
+            return active.readLog();
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /**
@@ -910,6 +1065,17 @@ public class AutoRootService extends Service {
             if (stage.replant) {
                 stage.failure += " (no output for " + (quiet / 1000) + "s)";
             }
+            return stage;
+        } catch (DeadObjectException e) {
+            /*
+             * The shell user service was killed (LMKD, or Shizuku tearing the
+             * record down). The `timer fake` process is detached and keeps
+             * running, so this is not a failed plant: the caller rebinds and
+             * resumes watching the same log.
+             */
+            log("the shell user service died during the KernelSU stage");
+            stage.failure = "the shell user service died mid-stage";
+            stage.reconnect = true;
             return stage;
         } catch (Throwable t) {
             log("KernelSU step failed: " + t);
