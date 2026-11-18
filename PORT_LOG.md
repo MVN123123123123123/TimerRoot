@@ -1403,14 +1403,14 @@ below).
 | F4 cred / task geometry | pass | BTF + `cred_init` / `task_vendor_size_setup` disassembly |
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors; `--selfcheck` 0 failures (host build) |
-| F7 `timer target` | pass (QEMU) | all 19 mass profiles plus the s23fe, s24fe, s25edge and s23 shim runs print their own `timer_site`, exit 0 |
+| F7 `timer target` | pass (QEMU) | every generic profile with a workspace `Image`, plus the s23fe, s24fe, s25edge and s23 shim runs, prints its own `timer_site`, exit 0 |
 | F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
-| F14 QEMU | pass | 19/21 booted profiles pass every gate in the 27-profile re-run; s23fe, s24fe, s25edge and s23 passed all gates in their own shim runs (see below); the exceptions are provenance/environment limits, not binary |
+| F14 QEMU | pass | every generic profile with a workspace `Image` passes every gate (table below); s23fe, s24fe, s25edge and s23 pass in their own shim runs; s26u is the only provenance exception, not a binary result |
 | F15 hardware | pending | no device |
 | F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
 
@@ -1489,6 +1489,8 @@ run.
 | 6.12.69-…-ab16108597-4k | cubs (Pixel 11) | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-ab16388316-4k | blazer (Pixel 10 Pro) | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-ab16388316-16k | blazer 16K | pass | pass | pass | pass | pass | pass |
+| 6.12.81-…-gf5369e7496cb-4k | cubs/grizzly/kodiak/yogi (Pixel 11) | pass | pass | pass | pass | pass | pass |
+| 6.12.81-…-gf5369e7496cb-16k | Pixel 11 16K | pass | pass | pass | pass | pass | pass |
 | 6.18.21-…-abogki555938958-4k | hongkong/madrid | pass | pass | pass | pass | pass | pass |
 | 6.18.21-…-abogki565292102-4k | lhasa/yingtian | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-ab15657065-4k | mist | pass | pass | pass | pass | pass | pass |
@@ -1511,7 +1513,9 @@ imports.)
 `samsung-s24fe` was ported after that sweep. It has its own factory `Image`
 and passed every gate in a separate shim run (`logs/mass-s24fe.json`), which
 brings the count to **21 of the 23 profiles with a workspace `Image`** — the
-S24 FE section above records the run.
+S24 FE section above records the run. The 6.12.81 Pixel 11 pair (4K + 16K)
+was ported after that and also passed every gate
+(`logs/mass-6.12.81-p11.json`), bringing it to **23 of the 25**.
 
 This run also supplies the F2 `slabinfo` item that a device was previously
 needed for. The booted kernel reports, per profile, a
@@ -1688,4 +1692,93 @@ Two follow-ups from the same sweep, recorded in
   `6.12.81-…-ab16388316` blazer kernel, so those rows move to
   `verified in QEMU`.
 - The Pixel 11 series ships `6.12.81-…-gf5369e7496cb-ab16467452-4k` in this
-  release (all four, byte-identical) — a new profile, not yet ported.
+  release (all four, byte-identical); ported below with its 16K sibling.
+
+## 6.12.81 — Pixel 11 series, November 2026 (CP4A.261105.040.D1)
+
+### `6.12.81-android16-6-gf5369e7496cb-ab16467452` (4K and 16K)
+
+All four factory images (`cubs`, `grizzly`, `kodiak`, `yogi`) carry
+byte-identical payloads for both page sizes. The 4K image is
+`1b9514dd3e43a4a2d86f07787dc6334cea41d3918467316a62ab5e3596f4e4c3`
+(42,441,216 bytes); the standalone `kernel_16k` decompresses to
+`5687a0ba8af2b632a97f315d113a8cd62f2674567d2f5c8b07d0337f03cca1a5`
+(42,355,200 bytes). Artifacts kept in `timerroot-port/pixel/<codename>/`
+(`Image`, `kernel_16k`) and derived under
+`timerroot-port/work/xi/cubs-nov-boot/` and `cubs16k-nov-boot/`.
+
+- **F1** `begin_new_exec` still runs the vulnerable order:
+  - 4K (`0xffffffc080324f58`): `exec_task_namespaces` (`+0x248`) ->
+    `posix_cpu_timers_exit` (`0xffffffc0803251b4`) -> `exit_itimers`
+    (`0xffffffc0803251c4`) — VULNERABLE.
+  - 16K (`0xffffc00080472238`): `exec_mmap` (`+0x3d0`) ->
+    `exec_task_namespaces` (`+0x3fc`) -> `posix_cpu_timers_exit`
+    (`0xffffc00080472648`) -> `exit_itimers` (`0xffffc00080472658`) —
+    VULNERABLE.
+- **F2** factory artifacts:
+  - `boot.img` sha256 `85e7580d5c5004b43eefd85917635972f18d1f0b6d5f1b7d20a577ba4feb6d0b`
+  - 4K kernel member (LZ4) sha256 `0a26d7b816449c4eccd604a6c3a5c4da9dcffcbcea96118b21252205e1f9520d`
+  - `kernel_16k` member (LZ4) sha256 `54c06983918b630f128a554f3dd01a3d6f8a81c9705601b0161c499ad1549ab8`
+  - `vendor_boot.img` sha256 `57b561f4416742ef820399de167e65bc0270517210d079c043e281c5cc584444`;
+    its vendor command line carries `android_arch_task_struct_size=784`.
+  - Recovered `vmlinux.elf` + `BTF`: 4K
+    `dffc4deca82d06eb3c3c11603dce25a0aa107bdd78e61ad21d753aad34c620c1` /
+    `994bc27d0fe2a347a8f150b72b84e60f52f3066453842ed761387603d650208b`
+    (132,813 kallsyms symbols); 16K
+    `cfae5448a1193e5454fc6466c27968f61fc7da570c62c9ce73ef27a33ab3debb` /
+    `1d1ee8b80a805b31f960a43fde5d7c2f1a4ff5503080eb6a529c905180147c56`.
+- **F3** call sites, confirmed by dataflow (`sitecheck.py`) and disassembly:
+  - 4K `timer_site = 0xffffffc0802c85d8`: `alloc_posix_timer+0x24`
+    `bl kmem_cache_alloc_noprof` with `x0` from
+    `[adrp 0xffffffc0828b2000, #0x4f0]` (`posix_timers_cache`). The
+    second `bl` at `+0x98` (site `0xffffffc0802c864c`) is the alloc-tag
+    profiling path.
+  - 4K `copy_process_low21 = 0xc9d4c`: inlined `dup_task_struct`, first
+    `bl kmem_cache_alloc_node_noprof` at `0xffffffc0800c9d48` with `x0`
+    from `task_struct_cachep`; the later `bl` at `+0xe2c`
+    (`site ...caa34`) is the alloc-tag path.
+  - 16K `timer_site = 0xffffc000801f86d4`: `do_timer_create+0xa8` `bl`
+    with `x0` from `posix_timers_cache`; the second `bl` at `+0x588`
+    (`site ...8bb4`) is the alloc-tag path.
+  - 16K `copy_process_low21 = 0xdfb48`: standalone `dup_task_struct`,
+    `bl kmem_cache_alloc_node_noprof` at `+0x50` with `x0` from
+    `task_struct_cachep`; the `+0x474` `bl` is the alloc-tag path.
+- **F4** geometry from BTF: `k_itimer` `0x100` (`timer_node_off` stays
+  `0x78`), `cred` `0xb8` (`cred_req 0xb8` -> `cred_alloc 0xc0`),
+  `task_struct` `0x1440`, `task_cred_off 0x900`. The vendor extension
+  `784` is set by the firmware, so `task_alloc_bytes = 0x1440 + 0x310 =
+  0x1750` on both page sizes. Cred offsets are the 6.12 layout:
+  uid `0x8`, euid `0x18`, caps `0x30`, security `0x80`, user `0x88`,
+  user_ns `0x90`, ucounts `0x98`, group `0xa0`.
+- **F5** six kallsyms symbols (4K / 16K):
+  `selinux_state` `0xffffffc0828db9a8` / `0xffffc000828d99b8`;
+  `panic_on_warn` `0xffffffc08262ade0` / `0xffffc00082610de0`;
+  `root_user` `0xffffffc082652348` / `0xffffc0008263b348`;
+  `init_user_ns` `0xffffffc0826520d0` / `0xffffc0008263b0d0`;
+  `init_ucounts` `0xffffffc082653ce0` / `0xffffc0008263cce0`;
+  `init_groups` `0xffffffc082653810` / `0xffffc0008263c810`.
+  `selinux_state - 8` is `avc_latest_notif_update.notif_lock` on both, and
+  BTF puts `enforcing` at bit 0. `blobsim2.py` gives the runtime order
+  `capability, landlock, safesetid, selinux, bpf` with `lbs_cred`
+  landlock 8 / selinux 24, so `selinux_blob_off = 0x8`. The 16K numeric
+  layout happens to equal the blazer 16K one, but every value here was
+  independently derived from the `cubs` 16K payload.
+- **F6** `validate_conf.py`: `0 error(s)` for both. `--selfcheck`:
+  `ok (0 failures)` for both; the worst-case node spills into the designed
+  retry path on both (`slab 0x2000` 4K, `slab 0x4000` 16K). A 4K image
+  booted with the old `6.12.69` conf refuses before kernel access:
+  `[-] conf release mismatch: conf=6.12.69-…-ab16108597-4k
+  running=6.12.81-…-ab16467452-4k`.
+- **F7-F11** all PASS on the first attempt for both profiles
+  (`timerroot-port/work/qemu/logs/mass-6.12.81-p11.json`):
+  - 4K: slabinfo cross-check pass (`posix_timers_cache` object `0x100`
+    at order 1, `task_struct` `0x1750` rounded to `0x1780` for align 64);
+    F8 ids `a=334 f=332 n=1029`; F9 probe `recs=4096 kept=4096`,
+    `pair agree=1`; F10 leak `made=512 votes=512`; F11 verify
+    `resuid=0/0/0`, `ROOT_SHELL_OK`.
+  - 16K: slabinfo pass (order 0); F8 ids `a=334 f=332 n=1027`; F9 probe
+    `recs=4096 kept=4096`; F10 leak `made=512 votes=512`; F11 verify
+    `resuid=0/0/0`, `ROOT_SHELL_OK`.
+- **F12-F13** need a device, as always (no SELinux policy / KernelSU in
+  the QEMU initramfs). **F15** hardware pending; **F16** rows added to
+  `docs/supported-devices.md` as `verified in QEMU`.

@@ -131,16 +131,37 @@ images were fetched and their boot kernels compared: both the `mustang` and
 the `rango` kernel are byte-identical to the `blazer` one (Image sha256
 `e0c7240d40436d94…`), so the QEMU-verified `blazer` profile covers them.
 
-### Pixel 11 series — 6.12.69 (4K)
+### Pixel 11 series — 6.12.81 (4K and 16K, November 2026)
+
+Build `CP4A.261105.040.D1` (security patch 2026-11-05). The November update
+moves the series to `6.12.81-android16-6-gf5369e7496cb-ab16467452`; both the
+`boot.img` 4K kernel and the standalone `kernel_16k` are byte-identical across
+`cubs`/`grizzly`/`kodiak`/`yogi`.
+
+Profiles:
+
+- 4K pages: `conf/6.12.81-android16-6-gf5369e7496cb-ab16467452-4k.conf`
+- 16K pages: `conf/6.12.81-android16-6-gf5369e7496cb-ab16467452-16k.conf`
+
+The 16K payload's release string drops the `-4k` suffix, so the two profiles
+differ in `release` as well as `page_size`.
+
+| Device | Codename | Factory build | Security patch | Status |
+|---|---|---|---|---|
+| Pixel 11 | `cubs` | `CP4A.261105.040.D1` | 2026-11-05 | verified in QEMU |
+| Pixel 11 Pro | `grizzly` | `CP4A.261105.040.D1` | 2026-11-05 | verified in QEMU |
+| Pixel 11 Pro XL | `kodiak` | `CP4A.261105.040.D1` | 2026-11-05 | verified in QEMU |
+| Pixel 11 Pro Fold | `yogi` | `CP4A.261105.040.D1` | 2026-11-05 | verified in QEMU |
+
+`verified in QEMU` here means F7-F11 passed against both factory payloads
+(4K and 16K); F12/F13 still need a device.
+
+### Pixel 11 series — 6.12.69 (4K, October 2026)
 
 Profile: `conf/6.12.69-android16-6-g70777328ed0e-ab16108597-4k.conf`
 
-The November 2026 build (`CP4A.261105.040.D1`, security patch 2026-11-05)
-moves the Pixel 11 series to a new kernel,
-`6.12.81-android16-6-gf5369e7496cb-ab16467452-4k` (one identical binary on
-`cubs`/`grizzly`/`kodiak`/`yogi`, verified against the factory images).
-Factory kernels are fetched (`timerroot-port/pixel/cubs*/Image`) but the
-profile is **pending**; the rows below refer to the October build.
+Build `CD1A.261005.003` (security patch 2026-10-05). A device updated to the
+November build no longer matches this profile.
 
 | Device | Codename | Factory build | Security patch | Status |
 |---|---|---|---|---|
@@ -333,10 +354,17 @@ not publish the value for that build; read the real value on a device with
   image was not fetched, so the kernel payload was not compared. The 6.6.127
   rows above were only called byte-identical after all four images were
   unpacked; this build has not had that check.
-- The Pixel 11 series (6.12.69) likewise carries one byte-identical payload
-  across both build suffixes (SHA-256
-  `4417511834260f72c1b6a5bb9b9f809dfb6734b20fd7e8aa156c3c1f91f0f97b`). Its
-  `task_alloc_bytes` is `0x1750`, not `0x12c0`: the vendor extension
+- The Pixel 11 series carries one byte-identical payload per page size on all
+  four devices. October (6.12.69) covers only the 4K kernel (SHA-256
+  `4417511834260f72c1b6a5bb9b9f809dfb6734b20fd7e8aa156c3c1f91f0f97b`).
+  November (6.12.81) ships both a 4K `boot.img` kernel and a standalone
+  `kernel_16k`; the 4K Image is
+  `1b9514dd3e43a4a2d86f07787dc6334cea41d3918467316a62ab5e3596f4e4c3` and the
+  16K Image is
+  `5687a0ba8af2b632a97f315d113a8cd62f2674567d2f5c8b07d0337f03cca1a5`, each
+  identical across the four factory images. The 16K banner drops `-4k`, so
+  page size selects between the two profiles. `task_alloc_bytes` stays
+  `0x1750` on both: the vendor extension
   `android_arch_task_struct_size=784` is added to `sizeof(task_struct)`.
 
 ### Samsung
