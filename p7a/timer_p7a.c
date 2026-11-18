@@ -708,13 +708,23 @@ static long slab_active(void)
 /*
  * Every line is also appended to /data/local/tmp/timer_last.log and fsynced,
  * so a kernel panic cannot destroy the evidence of which mode/payload ran.
+ *
+ * The file belongs to one exploit run: a top-level invocation truncates it
+ * when it opens the log.  The helper stages the trigger re-execs (argv[0]=""
+ * and the "wait" child) are part of the same run, so they append instead;
+ * otherwise the re-exec would erase the evidence right before the race.
  */
 static int g_logfd = -1;
 
-static void log_open(void)
+static void log_open(int argc, char **argv)
 {
-    g_logfd = open("/data/local/tmp/timer_last.log",
-                   O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    int nested = (argc > 0 && argv[0] && argv[0][0] == '\0')
+                 || (argc > 1 && !strcmp(argv[1], "wait"));
+    int flags = O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC;
+
+    if (!nested)
+        flags |= O_TRUNC;
+    g_logfd = open("/data/local/tmp/timer_last.log", flags, 0644);
 }
 
 static void logf(const char *fmt, ...)
@@ -2956,7 +2966,7 @@ int main(int argc, char **argv)
     int argi = 1;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    log_open();
+    log_open(argc, argv);
     logf("=== start pid=%d argc=%d argv0=\"%s\" argv1=\"%s\" ===\n",
          getpid(), argc,
          argc > 0 && argv[0] ? argv[0] : "(null)",
