@@ -474,7 +474,7 @@ public class BootStatusActivity extends Activity {
                         : "Unlocked. Tap Hide or it closes itself.");
             } else {
                 hint.setText("Tap Hide to return to the lock screen (needed for a "
-                        + "PIN or pattern); biometric unlock works without hiding.");
+                        + "Password or biometric unlock)");
             }
         }
 
