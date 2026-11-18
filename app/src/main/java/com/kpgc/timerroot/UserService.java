@@ -460,6 +460,7 @@ public class UserService extends IUserService.Stub {
              * and the binary would reject --samsung anyway.
              */
             File samsungDir = new File(dir, SAMSUNG_CONF_SUBDIR);
+            File releaseOnly = null;
             for (File f : listConfFiles(samsungDir)) {
                 if (!confMatches(f, release, pageSize)) {
                     continue;
@@ -469,9 +470,29 @@ public class UserService extends IUserService.Stub {
                     Log.w(TAG, "skipping Samsung conf without samsung_mode=1: " + f);
                     continue;
                 }
-                Log.i(TAG, "using Samsung conf " + f);
-                return "--conf " + f.getAbsolutePath()
-                        + " --protocol " + APP_PROTOCOL + " --samsung";
+                /*
+                 * Several 6.1.162 Exynos models share one uname -r, so the
+                 * release string alone cannot pick between their profiles.
+                 * A conf that pins device_model is only valid for that model;
+                 * an unpinned conf stays as the fallback, preserving the
+                 * behaviour of the older single-profile Samsung builds.
+                 */
+                if (!TextUtils.isEmpty(fields.get("device_model"))) {
+                    if (!deviceIdentityMatches(f)) {
+                        Log.w(TAG, "skipping Samsung conf " + f
+                                + ": device identity mismatch");
+                        continue;
+                    }
+                    Log.i(TAG, "using Samsung conf " + f);
+                    return samsungConfArg(f);
+                }
+                if (releaseOnly == null) {
+                    releaseOnly = f;
+                }
+            }
+            if (releaseOnly != null) {
+                Log.i(TAG, "using Samsung conf " + releaseOnly);
+                return samsungConfArg(releaseOnly);
             }
             Log.w(TAG, "no Samsung conf matched uname -r = " + release
                     + ", page size = " + pageSize);
@@ -512,6 +533,12 @@ public class UserService extends IUserService.Stub {
         Log.w(TAG, "no conf matched uname -r = " + release
                 + ", page size = " + pageSize);
         return null;
+    }
+
+    /** The `--conf ... --samsung` argument for a matched Samsung profile. */
+    private static String samsungConfArg(File conf) {
+        return "--conf " + conf.getAbsolutePath()
+                + " --protocol " + APP_PROTOCOL + " --samsung";
     }
 
     /** Regular .conf files directly inside {@code dir} (no recursion). */

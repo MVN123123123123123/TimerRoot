@@ -1252,6 +1252,145 @@ mismatches; and its `copy_process_low21` cross-check only looked for
 `kmem_cache_alloc_node`, which 5.15 does not emit here. With both corrected it
 reports 0 errors for all 24 bundled profiles.
 
+### samsung s24fe — `6.1.162-android14-11` (Samsung mode)
+
+`conf/samsung/samsung-s24fe-6.1.162.conf`, for the Samsung Galaxy S24 FE
+(SM-S721B, Exynos 2400e, EUX firmware `S721BXXUFEZJ6`, Android 17, patch
+2026-10, 4K pages). The factory artifacts are predownloaded in
+`timerroot-port/samsung/s24fe_sm-s721b_exynos/` (`boot.img`, `boot.img.lz4`,
+`Image`, `btf.bin`, `metadata.json`); the kallsyms ELF rebuilt from them lives
+in `work/xi/s24fe-boot/`.
+
+The Samsung release string on this Exynos family carries no model suffix, so
+`uname -r` is exactly `6.1.162-android14-11` on the S24, S24+, S24 FE and the
+reference S26 Ultra build. The profile therefore pins `device_model =
+"SM-S721B"` and `android_release = "17"`, and `UserService` now prefers an
+identity-pinned Samsung conf over a release-only one (see *Profile selection*
+below).
+
+- **F1** banner `Linux version 6.1.162-android14-11 (build-user@build-host)`
+  (Android clang 17.0.2, `#1 SMP PREEMPT Mon Oct 19 11:41:26 UTC 2026`),
+  4K pages. The vulnerable `begin_new_exec` order is intact: `bl
+  posix_cpu_timers_exit` at `0xffffffc0083ae5a4`, then `bl exit_itimers` at
+  `0xffffffc0083ae5b4` (`begin_new_exec` itself at
+  `0xffffffc0083ae1bc`) — VULNERABLE.
+- **F2** factory `boot.img`
+  `sha256 f5f4109953959d8f09e3b3142d0ee1dfcce4cf069dae8b77cc2373146b6fe899`
+  (64 MiB, Android boot header v4 with an **empty** `cmdline` field); the
+  extracted `Image` is
+  `2a9e9aa3be718dc51fd7e6c389d243c50a97ed9c13914fba2160304181850ebd`
+  (38 832 640 bytes), `.BTF` is
+  `d6991a6975155571d8ec653db9f00ec971af657fce0c5ac2b7453dbd7cb982e0`
+  (5 997 046 bytes). `vmlinux-to-elf` rebuilds the kallsyms ELF at base
+  `0xffffffc008000000` with **115 697 symbols**; KMI `android14-6.1`.
+- **F3** `timer_site = 0xffffffc008194fe0`: `do_timer_create` loads
+  `posix_timers_cache` (`0xffffffc00a53b3e0`, `adrp`/`ldr` off
+  `0xffffffc00a53b000+0x3e0`) into `x0` at `0xffffffc008194fd8` and calls
+  `kmem_cache_alloc` at `0xffffffc008194fdc`; `sitecheck.py` confirms this is
+  the only `posix_timers_cache` allocation site. `copy_process_low21 =
+  0xacb7c`: `dup_task_struct`'s `bl kmem_cache_alloc_node(task_struct_cachep)`
+  at `0xffffffc0080acb78` returns to `0xffffffc0080acb7c` (6.1 does not
+  inline `copy_process` into it, so the trace scan has a single candidate).
+- **F4** BTF plus `init_posix_timers`/`cred_init`/`fork_init` literals:
+  `k_itimer` is `0x108` with the `cpu_timer` node at `+0x78`; `struct cred`
+  is `0xb0` (`cred_jar` object `0xc0`) with a 4-byte `atomic_t usage` at
+  `0x0`, `uid 0x4`, `euid 0x14`, `cap_inheritable 0x28` (5 words),
+  `security 0x78`, `user 0x80`, `user_ns 0x88`, `ucounts 0x90`,
+  `group_info 0x98`; `task_struct` is `0x12c0` (BTF; there is no
+  `arch_task_struct_size` bump on this build) with `cred` at `+0x838`; the
+  trace `alloc_req_off` is `0x10`, matching the BTF
+  `trace_event_raw_kmem_cache_alloc` shape.
+- **F5** `selinux_state 0xffffffc00a5ea4a8`,
+  `panic_on_warn 0xffffffc00a2eac00`, `root_user 0xffffffc00a310a00`,
+  `init_user_ns 0xffffffc00a310770`, `init_ucounts 0xffffffc00a3121d8`,
+  `init_groups 0xffffffc00a311d20`. DEFEX `creds_fast_hash` is its own
+  kallsyms symbol at `0xffffffc00a66e9f8` (`creds_hash 0xffffffc00a62e9f8` +
+  `0x40000`); `get_task_creds` indexes it directly as an 8-byte pointer array
+  for `pid <= 0x8000`. `selinux_state - 8` is
+  `avc_latest_notif_update.notif_lock` and BTF puts `enforcing` at bit 0, so
+  the `-7` store lands on `enforcing`. `blobsim2.py` LSM order is
+  `capability, safesetid, integrity, selinux`: only SELinux carries a 32-byte
+  cred blob, so `selinux_blob_off = 0x0` and `selinux_sid_kernel = 1`.
+  `fullcap = 0x1ffffffffff`.
+- **F6** `validate_conf.py`: 0 errors over all 35 bundled confs; for this
+  profile 6/6 symbols match the factory vmlinux, the `do_timer_create` call
+  site and `copy_process_low21` match, and the worst case node `0x1f68` /
+  cred end `0x2030` spills past the `0x2000` slab into the retry path
+  (documented, designed). `--selfcheck` booted in QEMU: **0 failures** across
+  the eleven invariants (`slab_size 0x2000`, `timer_site_low21 0x194fe0`,
+  `copy_process_low21` in 21 bits, `cred_uid_off 0x4`, `fake_cred_off 0x18`,
+  `cred_req 0xb0 < cred_alloc 0xc0`, `alloc_req_off 0x10`, linear window
+  `0xffffff0000000000..0xffffffc000000000` below the image).
+- **F7–F11** all pass in QEMU on the **first** shim boot
+  (`work/qemu/logs/mass-s24fe.json`): slabinfo reports `posix_timers_cache`
+  object `264` (`0x108`), 31 objects / 2 pages (order 1), `task_struct` `4800`
+  (`0x12c0`, 6 objects / 8 pages, order 3) and `cred_jar` `192` (`0xc0`);
+  `target` prints the banner, `pagesize=4096` and
+  `timer_site=0xffffffc008194fe0`; `ids` `page_alloc=264 page_free=262
+  pairs=1029`; `probe` `recs=4096 kept=4096`; `leak` 512/512 votes; verify
+  reaches `child report uid=0 euid=0 setuid(0)=0 errno=0 resuid=0/0/0` plus
+  `ROOT_SHELL_OK`. F12/F13 stay pending on a device.
+- **Profile selection** the four 6.1.162 Exynos models share one `uname -r`,
+  so `confMatches()` alone cannot tell their profiles apart. `UserService`
+  now keeps a `device_model`-pinned Samsung conf only when
+  `ro.product.model` (and `ro.build.version.release`) match, and falls back
+  to the unpinned conf otherwise — the old single-profile Samsung behaviour.
+  The same rule already applied to `maybe-dirty` confs.
+- **QEMU note** as with the other Exynos/Knox builds the factory `Image` does
+  **not** boot under `qemu-system-aarch64` unmodified: `_uh_call` traps in the
+  missing secure monitor and `defex_load_rules` panics with
+  `[DEFEX] Signature mismatch`. Verification used a **throwaway patched
+  copy** (`work/xi/s24fe-boot/qemu-shim/Image.qemu`, built by the `mkshim.py`
+  next to it; `--no-pgd` stops the patch ladder at two words). The factory
+  artifacts stay unmodified and **no constant was derived from the shim**:
+
+  | VA | original | shim | why |
+  |---|---|---|---|
+  | `0xffffffc00803bbf0` | `hvc #0` (`d4000002`) | `mov x0,xzr` (`aa1f03e0`) | `_uh_call` returns 0 instead of trapping; covers every call site |
+  | `0xffffffc009e8dd68` | `bl do_load_rules` (`97ffff8e`) | `mov w0,wzr` (`2a1f03e0`) | `defex_load_rules` skips the hypervisor-signed rules file and takes its own success path |
+
+  The failure ladder: unmodified → `_uh_call` traps; with only that patch →
+  `[DEFEX] Signature mismatch` panic from `defex_load_rules`; with both →
+  userspace, and F7–F11 pass on the first attempt. Unlike s23/s23fe this
+  build needs **no** RKP page-table, KDP or vfsmount patch — the two sites in
+  `PGD_PATCHES` are unused here. Rebuild with
+  `python3 mkshim.py <factory Image> Image.qemu --no-pgd`
+  (result sha256 `1cec3804a1ed4446e848a0d98efe7169a95a9fcbb348687ad7d29d1915b99bf9`).
+- **Kernel boot parameters** the profile adds nothing to the kernel command
+  line, and the factory `boot.img` v4 header `cmdline` field is empty — on a
+  real S24 FE `/proc/cmdline` is whatever the bootloader and the built-in
+  bootconfig supply. The app records it verbatim as `kernel_boot_params`
+  (`cat /proc/cmdline`, `DeviceProbe`), and for this port the reference
+  values are:
+  - QEMU `-append` used for every gate here:
+    `console=ttyAMA0 earlycon=pl011,0x9000000 rdinit=/init panic=-1
+    slub_min_order=1 qconf=samsung-s24fe-6.1.162.conf` (`qargs=`/`qmode=`
+    only steer the initramfs harness).
+  - Observed in-VM `/proc/cmdline`:
+    `console=ttynull stack_depot_disable=on cgroup_disable=pressure
+    kasan.page_alloc.sample=10 kasan.stacktrace=off kvm-arm.mode=protected
+    bootconfig ioremap_guard console=ttyAMA0 earlycon=pl011,0x9000000
+    rdinit=/init panic=-1 slub_min_order=1 qconf=…`
+
+  `slub_min_order=1` is a QEMU-only knob: it reproduces the phone's order-1
+  `posix_timers_cache` slab independently of the VM's CPU count, and is not
+  needed on a device. No profile constant depends on any boot parameter —
+  there is no `android_arch_task_struct_size` bump on this build (the
+  `task_struct` object is the plain `0x12c0`).
+- **Foreign banner** booting the same conf against a 5.15.194 `zephyr` Image
+  is refused before any kernel access:
+  `conf release prefix mismatch: conf=6.1.162-android14-11
+  running=5.15.194-android13-8-00015-gf5526d1116e5-ab15004895`.
+- **Siblings** the same constants cover SM-S921B (S24) and SM-S926B (S24+):
+  their 6.1.162 `Image`s are different binaries (sha256 `073eaf03…` /
+  `844ad759…`) but expose identical values for all six pinned symbols and the
+  same `do_timer_create` / `dup_task_struct` sites
+  (`work/xi/s24-probe/`, `work/xi/s24plus-probe/`). The S25 FE (SM-S731B) build is **not** compatible:
+  its `root_user`, `init_user_ns`, `init_ucounts` and `init_groups` sit at
+  +0x40 and its `creds_hash` / `creds_fast_hash` at +0x90 (only
+  `selinux_state` and `panic_on_warn` land on the same addresses) — that
+  model needs its own profile.
+
 ---
 
 ## Gate status
@@ -1264,14 +1403,14 @@ reports 0 errors for all 24 bundled profiles.
 | F4 cred / task geometry | pass | BTF + `cred_init` / `task_vendor_size_setup` disassembly |
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors; `--selfcheck` 0 failures (host build) |
-| F7 `timer target` | pass (QEMU) | all 19 mass profiles plus the s23fe, s25edge and s23 shim runs print their own `timer_site`, exit 0 |
+| F7 `timer target` | pass (QEMU) | all 19 mass profiles plus the s23fe, s24fe, s25edge and s23 shim runs print their own `timer_site`, exit 0 |
 | F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
-| F14 QEMU | pass | 19/21 booted profiles pass every gate in the 27-profile re-run; s23fe, s25edge and s23 passed all gates in their own shim runs (see below); the exceptions are provenance/environment limits, not binary |
+| F14 QEMU | pass | 19/21 booted profiles pass every gate in the 27-profile re-run; s23fe, s24fe, s25edge and s23 passed all gates in their own shim runs (see below); the exceptions are provenance/environment limits, not binary |
 | F15 hardware | pending | no device |
 | F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
 
@@ -1363,10 +1502,16 @@ run.
 | samsung-s23-5.15.197 | s23 (Galaxy S23) | pass | pass | pass | pass | pass | pass |
 | samsung-s23fe-5.10.240 | s23fe (Galaxy S23 FE) | pass | pass | pass | pass | pass | pass |
 | samsung-s26u-6.1.162 | s26u (Galaxy S24/S26 Ultra) | pass | pass | pass | n/a | n/a | n/a |
+| samsung-s24fe-6.1.162 | s24fe (Galaxy S24 FE) | pass | pass | pass | pass | pass | pass |
 
 (the two `n/a` rows for s26u are the provenance mismatch above; the
 `maybe-dirty` confs report `kernel not in workspace` like the four OPPO/realme
 imports.)
+
+`samsung-s24fe` was ported after that sweep. It has its own factory `Image`
+and passed every gate in a separate shim run (`logs/mass-s24fe.json`), which
+brings the count to **21 of the 23 profiles with a workspace `Image`** — the
+S24 FE section above records the run.
 
 This run also supplies the F2 `slabinfo` item that a device was previously
 needed for. The booted kernel reports, per profile, a
