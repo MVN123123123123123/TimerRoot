@@ -108,7 +108,7 @@ Build `CP3A.261005.005` (security patch 2026-10-05).
 | Pixel 10 Pro XL | `mustang` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
 | Pixel 10 Pro Fold | `rango` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
 
-### Pixel 10 Pro — 6.12.81 (4K and 16K)
+### Pixel 10 Series — 6.12.81 (4K and 16K)
 
 Build `CP4A.261105.040.A1` (November 2026 security update). The Pixel 10 Pro
 (`blazer`) now runs a 6.12 kernel instead of the 6.6.127 one in the section
@@ -121,7 +121,8 @@ Profiles:
 
 | Device | Codename | Factory build | Security patch | Status |
 |---|---|---|---|---|
-| Pixel 10 Pro | `blazer` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| Pixel 10 | `frankel` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
+| **Pixel 10 Pro** | `blazer` | `CP4A.261105.040.A1` | 2026-11-05 | **tested** |
 | Pixel 10 Pro XL | `mustang` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 | Pixel 10 Pro Fold | `rango` | `CP4A.261105.040.A1` | 2026-11-05 | verified in QEMU |
 

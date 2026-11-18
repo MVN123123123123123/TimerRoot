@@ -28,7 +28,7 @@ coverage see [Supported devices](supported-devices.md).
     managers are rejected.
 - **A settled device.** Wait **2-3 minutes after the first login following a
   boot** before running the exploit. Startup work competes for RAM, swap and
-  CPU, and that shrinks the race window the exploit depends on.
+  CPU, and that shrinks the race window the exploit depends on. also clean up the device's background apps n service b4 attempting a AFU root.
 - **USB debugging left on** if you plan to use auto-root. The boot channel
   needs `adbd` to start by itself; see [Auto-root](#auto-root).
 
