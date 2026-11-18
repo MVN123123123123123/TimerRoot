@@ -10,6 +10,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
+import android.os.DeadObjectException;
 import android.os.IBinder;
 import android.os.PowerManager;
 
@@ -57,6 +58,8 @@ public class AutoRootService extends Service {
 
     private Thread worker;
     private PowerManager.WakeLock wakeLock;
+    private Thread heartbeatThread;
+    private volatile boolean beating;
     private Shizuku.UserServiceArgs boundArgs;
     private ServiceConnection boundConnection;
     private IUserService userService;
@@ -64,6 +67,13 @@ public class AutoRootService extends Service {
     private boolean foregroundStarted;
     /** True once the exploit has actually been started this boot. */
     private boolean exploitStarted;
+    /**
+     * Stage left behind by an interrupted run ("shell"/"fake"), captured when
+     * the service starts so the recovery path knows what to do.
+     */
+    private String recoverPhase;
+    /** Start of that interrupted KernelSU stage, so its budget still counts. */
+    private long recoverStartedAt;
 
     @Override
     public void onCreate() {
@@ -84,12 +94,16 @@ public class AutoRootService extends Service {
          * shell. Stop a freshly created service (which also cancels the
          * startForegroundService deadline); leave an already running one
          * exactly as it is.
+         *
+         * An interrupted run is the exception: its claim is held but nothing
+         * recorded an outcome, so the boot still needs a supervisor.
          */
         if (!ACTION_RUN_NOW.equals(action)
                 && !ACTION_AFTER_RESTART.equals(action)
                 && AutoRoot.isBootClaimed(this)
-                && !AutoRoot.hasPendingRestart(this)) {
-            AutoRoot.log(this, "already attempted this boot, ignoring " + action);
+                && !AutoRoot.hasPendingRestart(this)
+                && !AutoRoot.runInterrupted(this)) {
+            log("already attempted this boot, ignoring " + action);
             if (!foregroundStarted) {
                 stopSelf(startId);
             }
@@ -153,15 +167,33 @@ public class AutoRootService extends Service {
      * previous success.
      */
     private void resumeAfterRestart() {
-        String last = AutoRoot.lastResult(this);
-        AutoRoot.log(this, "after restart: last result=" + summary(last));
+        String last = AutoRoot.lastResultThisBoot(this);
+        log("after restart: last result=" + summary(last));
+        if (AutoRoot.classify(last) == AutoRoot.RESULT_FAILED) {
+            /*
+             * No outcome was recorded for this boot. Reporting the previous
+             * boot's success here is exactly how a failed run used to look
+             * like a win, so say what is actually known.
+             */
+            AutoRoot.stage(this, "the restart left no recorded result",
+                    AutoRoot.STAGE_RUNNING);
+            if (!AutoRoot.isEnabled(this)) {
+                finish("Auto-root is off", "Enable it in TimerRoot first.", false);
+                return;
+            }
+            startShizukuEarly();
+            finish("Auto-root", "Shizuku is back; no result was recorded for "
+                    + "this boot.", false);
+            stopSelf();
+            return;
+        }
         AutoRoot.stage(this, last, AutoRoot.STAGE_OK);
         if (!AutoRoot.isEnabled(this)) {
             finish("Auto-root is off", "Enable it in TimerRoot first.", false);
             return;
         }
         startShizukuEarly();
-        finish(last.contains("KernelSU active")
+        finish(AutoRoot.classify(last) == AutoRoot.RESULT_KSU
                         ? "Jailbreak mode ready" : "Root shell ready",
                 last, true);
     }
@@ -197,9 +229,9 @@ public class AutoRootService extends Service {
         if (!AutoRoot.isEnabled(this)) {
             return;
         }
-        AutoRoot.log(this, "prestart: looking for Shizuku");
+        log("prestart: looking for Shizuku");
         if (waitForShizuku(5000)) {
-            AutoRoot.log(this, "prestart: Shizuku is already running");
+            log("prestart: Shizuku is already running");
             return;
         }
         acquireWakeLock();
@@ -213,17 +245,17 @@ public class AutoRootService extends Service {
             for (int attempt = 1; attempt <= 4; attempt++) {
                 show("Auto-root", "starting Shizuku early (try " + attempt + ")...");
                 String started = startShizuku();
-                AutoRoot.log(this, "prestart starter " + attempt + ": " + started);
+                log("prestart starter " + attempt + ": " + started);
                 long deadline = System.currentTimeMillis() + 15000;
                 boolean up = false;
                 while (System.currentTimeMillis() < deadline) {
                     if (waitForShizuku(1500)) {
-                        AutoRoot.log(this, "prestart: Shizuku is up");
+                        log("prestart: Shizuku is up");
                         up = true;
                         break;
                     }
                     if (shizukuServerRunning()) {
-                        AutoRoot.log(this, "prestart: server is up, waiting for its binder");
+                        log("prestart: server is up, waiting for its binder");
                         up = true;
                         break;
                     }
@@ -231,10 +263,10 @@ public class AutoRootService extends Service {
                 if (up) {
                     break;
                 }
-                AutoRoot.log(this, "prestart: server still not up after try " + attempt);
+                log("prestart: server still not up after try " + attempt);
             }
         } catch (Throwable t) {
-            AutoRoot.log(this, "prestart failed: " + t);
+            log("prestart failed: " + t);
         } finally {
             releaseWakeLock();
         }
@@ -243,19 +275,27 @@ public class AutoRootService extends Service {
     private void run(boolean force) {
         SharedPreferences prefs = AutoRoot.prefs(this);
         if (!prefs.getBoolean(AutoRoot.KEY_ENABLED, false)) {
-            AutoRoot.log(this, "auto-root is disabled, stopping");
+            log("auto-root is disabled, stopping");
             finish("Auto-root is off", "Enable it in TimerRoot first.", false);
             return;
         }
         boolean restarted = AutoRoot.consumeRestart(this);
         boolean firstAttempt = AutoRoot.claimBoot(this);
-        if (!force && !restarted && !firstAttempt) {
-            AutoRoot.log(this, "already attempted this boot, skipping");
-            if (userService != null
-                    && AutoRoot.lastResult(this).startsWith("root shell ready")) {
+        /*
+         * A claimed boot with no recorded outcome and no heartbeat is a run
+         * whose supervisor was killed (LMKD under memory pressure). The
+         * detached exploit may still be out there, so this must not be
+         * mistaken for "already handled this boot". A pending binder restart
+         * is its own recovery path and keeps its claim on purpose.
+         */
+        boolean recover = !restarted && !firstAttempt
+                && AutoRoot.runInterrupted(this);
+        if (!force && !restarted && !firstAttempt && !recover) {
+            log("already attempted this boot, skipping");
+            String last = AutoRoot.lastResultThisBoot(this);
+            if (userService != null && AutoRoot.classify(last) != AutoRoot.RESULT_FAILED) {
                 // Keep the successful run, its root shell and its FGS alive.
-                String last = AutoRoot.lastResult(this);
-                finish(last.contains("KernelSU active")
+                finish(AutoRoot.classify(last) == AutoRoot.RESULT_KSU
                                 ? "Jailbreak mode ready" : "Root shell ready",
                         last, true);
             } else {
@@ -265,9 +305,40 @@ public class AutoRootService extends Service {
             return;
         }
         if (restarted) {
-            AutoRoot.log(this, "resuming this boot after the binder restart");
+            log("resuming this boot after the binder restart");
         }
+        /*
+         * Capture what the dead process left behind before this attempt
+         * rewrites the stage bookkeeping. A recovery does not clear the phase
+         * yet: if this process is killed too, the next one must still see that
+         * the one-shot trigger was spent (and whether the detached plant is
+         * worth re-attaching to). The phase is cleared with the result.
+         */
+        String phase = recover ? AutoRoot.runPhase(this) : "";
+        recoverStartedAt = recover ? AutoRoot.ksuStartedAt(this) : 0;
+        if (!recover) {
+            AutoRoot.clearRunPhase(this);
+        }
+        recoverPhase = phase == null || phase.isEmpty() ? null : phase;
+        if (recover && recoverPhase == null) {
+            /*
+             * The supervisor died before the exploit was started, so nothing
+             * destructive ran: give the boot back and try normally.
+             */
+            log("the interrupted run never reached the exploit; retrying this boot");
+            AutoRoot.releaseBoot(this);
+            AutoRoot.claimBoot(this);
+        } else if (recover) {
+            log("recovering the interrupted run (" + recoverPhase + ")");
+        }
+        /*
+         * From here on this boot has no decided outcome. Dropping the old
+         * result is what keeps a previous success from being displayed while
+         * the exploit is in flight - or after the supervisor is killed.
+         */
+        AutoRoot.clearResult(this);
         acquireWakeLock();
+        startHeartbeat();
 
         String result;
         exploitStarted = false;
@@ -276,6 +347,7 @@ public class AutoRootService extends Service {
         } catch (Throwable t) {
             result = "unexpected error: " + t;
         } finally {
+            stopHeartbeat();
             releaseWakeLock();
         }
         if (result == null) {
@@ -291,16 +363,20 @@ public class AutoRootService extends Service {
             AutoRoot.releaseBoot(this);
         }
         AutoRoot.clearRestart(this);
+        AutoRoot.clearRunPhase(this);
         AutoRoot.record(this, result);
-        boolean success = result.startsWith("root shell ready");
-        AutoRoot.log(this, (success ? "success: " : "failed: ") + result);
-        if (success) {
-            boolean ksu = result.contains("KernelSU active");
+        int kind = AutoRoot.classify(result);
+        log((kind == AutoRoot.RESULT_KSU ? "success: "
+                : kind == AutoRoot.RESULT_SHELL ? "partial (no KernelSU): "
+                : "failed: ") + result);
+        if (kind != AutoRoot.RESULT_FAILED) {
             // Stay alive to keep the Shizuku user service (and the root shell).
-            finish(ksu ? "Jailbreak mode ready" : "Root shell ready",
-                    ksu ? "KernelSU late-loaded; su works in u:r:ksu:s0."
+            finish(kind == AutoRoot.RESULT_KSU
+                            ? "Jailbreak mode ready" : "Root shell ready",
+                    kind == AutoRoot.RESULT_KSU
+                            ? "KernelSU late-loaded; su works in u:r:ksu:s0."
                             : summary(result), true);
-            if (ksu && userService != null) {
+            if (kind == AutoRoot.RESULT_KSU && userService != null) {
                 /*
                  * Last step, and deliberately after record() + finish(): the
                  * restart kills this process, so the outcome must already be
@@ -317,6 +393,23 @@ public class AutoRootService extends Service {
 
     private String attempt() throws Exception {
         String started = null;
+        if (recoverPhase != null) {
+            /*
+             * The dead process already spent this boot's trigger, whether or
+             * not this process manages to take the supervision back: the
+             * one-shot claim must stay even if the rebind fails below.
+             */
+            exploitStarted = true;
+        }
+        if (recoverPhase != null && !PHASE_FAKE.equals(recoverPhase)) {
+            /*
+             * The root shell lives in the Shizuku user service process, which
+             * died with the app. There is nothing left to supervise, and a
+             * second `timer shell` would spend the one trigger this boot gets.
+             */
+            return "auto-root was interrupted while the shell stage was running"
+                    + " (the app was killed); reboot to retry";
+        }
         /*
          * No unlock wait here. The provider is directBootAware, so
          * shizuku_server can deliver its binder to this app while the
@@ -327,7 +420,7 @@ public class AutoRootService extends Service {
         boolean binder = waitForShizuku(15000);
         boolean serverUp = false;
         if (binder) {
-            AutoRoot.log(this, "Shizuku is already running");
+            log("Shizuku is already running");
             serverUp = true;
         } else {
             /*
@@ -338,11 +431,11 @@ public class AutoRootService extends Service {
              */
             serverUp = shizukuServerRunning();
             if (serverUp) {
-                AutoRoot.log(this, "Shizuku server is already up from the prestart");
+                log("Shizuku server is already up from the prestart");
             } else {
                 show("Auto-root", "starting Shizuku over the local ADB channel...");
                 started = startShizuku();
-                AutoRoot.log(this, "starter: " + started);
+                log("starter: " + started);
                 long deadline = System.currentTimeMillis() + 45000;
                 while (System.currentTimeMillis() < deadline) {
                     if (waitForShizuku(1500)) {
@@ -382,7 +475,7 @@ public class AutoRootService extends Service {
             if (!AutoRoot.claimRestart(this)) {
                 return "Shizuku is running but did not push its binder";
             }
-            AutoRoot.log(this, "server is up, no binder yet; restarting the app process");
+            log("server is up, no binder yet; restarting the app process");
             show("Auto-root", "restarting to receive the Shizuku binder...");
             RestartJobService.schedule(this);
             killSelf();
@@ -406,23 +499,109 @@ public class AutoRootService extends Service {
             return "could not bind the Shizuku user service";
         }
 
+        if (PHASE_FAKE.equals(recoverPhase)) {
+            /*
+             * The detached `timer fake` and its log outlive this app process:
+             * the app supervises the run, it does not own it. Rebind, pick
+             * the log up where it is, and drive that same plant to its
+             * terminal line instead of spending a second trigger on this
+             * boot. The shell-domain root is gone with the old process, so
+             * anything that needs it is done through KernelSU's su.
+             */
+            log("re-attaching to the KernelSU stage that outlived the app");
+            show("Auto-root", "re-attaching to the KernelSU stage...");
+            long startedAt = recoverStartedAt > 0 && recoverStartedAt <= System.currentTimeMillis()
+                    ? recoverStartedAt : System.currentTimeMillis();
+            /*
+             * Keep the bookkeeping live: if this process is killed too, the
+             * next one must still see the stage and its original start time.
+             */
+            AutoRoot.setRunPhase(this, PHASE_FAKE);
+            if (AutoRoot.ksuStartedAt(this) <= 0) {
+                AutoRoot.setKsuStartedAt(this, startedAt);
+            }
+            String ksu = loadKernelSu(service, startedAt);
+            if (!ksu.startsWith("KernelSU active")) {
+                /*
+                 * The shell-domain root died with the old process, so a
+                 * KernelSU failure here leaves no root at all. This is a plain
+                 * failure, not the usual "shell works, no module" case.
+                 */
+                return "auto-root was interrupted and KernelSU did not load: " + ksu;
+            }
+            IUserService live = userService != null ? userService : service;
+            log("boot UI grants: " + tail(applyBootUiGrants(live)));
+            return "root shell ready; " + ksu;
+        }
+
         String installed = service.install(getPackageCodePath());
-        AutoRoot.log(this, installed);
+        log(installed);
         if (!installed.startsWith("installed")) {
             return "could not install the bundled exploit: " + installed;
+        }
+        /*
+         * Probe the whole device and write it to the latest timer debug log
+         * before anything destructive runs, so a failed or parked plant still
+         * leaves the kernel boot parameters, CPU/memory layout, SELinux state
+         * and the resolved profile behind as evidence.
+         */
+        try {
+            log(service.captureDebugLog());
+        } catch (Throwable t) {
+            log("device probe failed: " + t);
         }
         String target = service.run("target");
         if (!target.contains("target=lynx")) {
             return "bundled exploit rejected for this kernel: " + target.trim();
         }
 
-        show("Auto-root", "running the exploit...");
-        AutoRoot.log(this, "timer shell");
-        exploitStarted = true;
-        String output = service.openRoot();
-        if (!output.startsWith("root shell ready")) {
-            return "exploit did not reach uid=0: " + tail(output);
+        boolean samsung = AutoRoot.isSamsungMode(this);
+        if (samsung) {
+            String problem = AutoRoot.samsungManagerProblem(this);
+            if (problem != null) {
+                log(problem);
+                return problem;
+            }
         }
+        show("Auto-root", samsung ? "running the Samsung chain..."
+                : "running the exploit...");
+        log(samsung ? "timer fake (samsung)" : "timer shell");
+        /*
+         * Written before the call: if the app is killed mid-exploit, the next
+         * process must know a trigger was already spent on this boot.
+         */
+        AutoRoot.setRunPhase(this, PHASE_SHELL);
+        exploitStarted = true;
+        String output;
+        try {
+            output = service.openRoot();
+        } catch (DeadObjectException e) {
+            /*
+             * Unlike `timer fake`, the root shell stage is a child of the
+             * shell user service, so it dies with it. There is nothing left
+             * to supervise and the one-shot trigger is already spent.
+             */
+            log("the shell user service died during the root shell stage");
+            return "the shell user service died during the root shell stage;"
+                    + " reboot to retry";
+        }
+        if (!output.startsWith("root shell ready")) {
+            log("full shell-stage output: " + UserService.SHELL_LOG);
+            return "exploit did not reach uid=0: " + shellStageFailure(output);
+        }
+        if (samsung) {
+            /*
+             * The Samsung endgame loads KernelSU inside the same `fake`
+             * plant (DEFEX clear + KDP-safe ksud).  There is no shell-domain
+             * root and no second late-load stage, and its SELinux is left to
+             * ksud, so openRoot() already returned the final state.
+             */
+            log("boot UI grants: "
+                    + tail(applyBootUiGrants(service)));
+            log("samsung chain ready: " + tail(output));
+            return output;
+        }
+
         /*
          * The shell-domain root cannot keep KernelSU loaded across a boot, so
          * the chain does not stop here: the fake-credential endgame late-loads
@@ -430,21 +609,46 @@ public class AutoRootService extends Service {
          * shell" button does. A KSU failure must not throw away the working
          * root shell, hence the separate result suffix.
          */
-        AutoRoot.log(this, "root shell ready; loading KernelSU");
+        log("root shell ready; loading KernelSU");
         show("Auto-root", "loading KernelSU...");
         String ksu = loadKernelSu(service);
-        boolean loaded = ksu.startsWith("KernelSU active");
         /*
          * The boot status screen needs either "display over other apps" or
          * the "full-screen notifications" special access. Both are app-ops
-         * that a shell-domain root can grant without touching the UI, so
-         * take them now (after the time-sensitive KernelSU stage); the user
-         * can still revoke them in Settings. Install channel does the same, so
-         * the first boot after setup already has them.
+         * that root can grant without touching the UI, so take them after
+         * the time-sensitive KernelSU stage; the user can still revoke them
+         * in Settings. Install channel does the same, so the first boot after
+         * setup already has them.
          */
-        AutoRoot.log(this, "boot UI grants: "
-                + tail(service.execRoot(grantBootUiAccess())));
+        /*
+         * loadKernelSu() may have rebound the user service after the old
+         * process died, so use the live field rather than the binding made at
+         * the start of this attempt.
+         */
+        IUserService live = userService != null ? userService : service;
+        log("boot UI grants: " + tail(applyBootUiGrants(live)));
         return "root shell ready; " + ksu;
+    }
+
+    /**
+     * Best-effort boot UI app-op grants. The shell-domain root shell is gone
+     * when the user service was rebound, but KernelSU's su is exactly what
+     * those app-ops need, so fall back to it. A dead binder here must never
+     * turn an already-loaded KernelSU into a failed run.
+     */
+    private static String applyBootUiGrants(IUserService service) {
+        try {
+            String viaShell = service.execRoot(grantBootUiAccess());
+            if (viaShell != null && !viaShell.startsWith("root shell not open")) {
+                return viaShell;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            return service.execSu(grantBootUiAccess());
+        } catch (Throwable t) {
+            return "grants skipped: " + t;
+        }
     }
 
     /**
@@ -461,11 +665,11 @@ public class AutoRootService extends Service {
      */
     private void maybeSoftRestart(IUserService service) {
         if (!AutoRoot.softRestartEnabled(this)) {
-            AutoRoot.log(this, "soft restart disabled");
+            log("soft restart disabled");
             return;
         }
         if (!AutoRoot.claimSoftRestart(this)) {
-            AutoRoot.log(this, "soft restart already done this boot");
+            log("soft restart already done this boot");
             return;
         }
         String last = AutoRoot.lastResult(this);
@@ -481,9 +685,9 @@ public class AutoRootService extends Service {
              * page again and the user simply gets the lock screen.
              */
             AutoRoot.markBootUiSeen(this);
-            AutoRoot.log(this, "soft restart: requesting userspace restart");
+            log("soft restart: requesting userspace restart");
             String result = service.softRestart();
-            AutoRoot.log(this, "soft restart: " + result);
+            log("soft restart: " + result);
             if (result.startsWith("soft restart unavailable")
                     || result.startsWith("soft restart failed")) {
                 /*
@@ -510,18 +714,27 @@ public class AutoRootService extends Service {
              * mid-flight. Anything else means the restart did not start, and
              * the root shell is still valid.
              */
-            AutoRoot.log(this, "soft restart call ended: " + t);
+            log("soft restart call ended: " + t);
         }
     }
 
     /** How many times the racy late-load stage may be replanted. */
     private static final int KSU_ATTEMPTS = 3;
+    /** Run phases persisted in {@link AutoRoot#KEY_RUN_PHASE}. */
+    private static final String PHASE_SHELL = "shell";
+    private static final String PHASE_FAKE = "fake";
 
     private static final class KsuStage {
         boolean loaded;
         String failure;
         /** True when the plant lost its race and nothing was loaded yet. */
         boolean replant;
+        /**
+         * True when the binder to the shell user service died while this
+         * stage was being watched. The detached plant keeps running; the
+         * caller must rebind and resume watching it, not start another one.
+         */
+        boolean reconnect;
     }
 
     /**
@@ -542,54 +755,223 @@ public class AutoRootService extends Service {
      * between attempts.
      */
     private String loadKernelSu(IUserService service) {
-        String failure = "no attempt was made";
+        return loadKernelSu(service, 0);
+    }
+
+    /**
+     * KernelSU stage for a run that may have outlived its app process.
+     * {@code resumedAt} is the wall-clock start of a plant that was already
+     * running (0 starts a new one); the budget is measured from there, so a
+     * recovered run does not get a fresh eight minutes on top of the time
+     * the plant has already spent.
+     */
+    private String loadKernelSu(IUserService service, long resumedAt) {
+        long runStart = resumedAt > 0 ? resumedAt : System.currentTimeMillis();
+        String failure = resumedAt > 0
+                ? "the app was killed before the stage finished"
+                : "no attempt was made";
+        IUserService active = service;
         try {
             for (int attempt = 1; attempt <= KSU_ATTEMPTS; attempt++) {
+                boolean resume = attempt == 1 && resumedAt > 0;
                 if (attempt > 1) {
-                    AutoRoot.log(this, "KernelSU attempt " + attempt + ": "
+                    if (System.currentTimeMillis() - runStart
+                            >= AutoRoot.KSU_TOTAL_BUDGET_MS) {
+                        failure = "out of time after "
+                                + (AutoRoot.KSU_TOTAL_BUDGET_MS / 60000)
+                                + " minutes of KernelSU attempts";
+                        break;
+                    }
+                    log("KernelSU attempt " + attempt + ": "
                             + failure);
                     show("Auto-root", "retrying KernelSU (" + attempt + "/"
                             + KSU_ATTEMPTS + ")...");
                 }
-                KsuStage stage = runKsuStage(service, attempt);
+                KsuStage stage = runKsuStage(active, attempt, resume, runStart);
+                /*
+                 * The exploit is detached: if the shell user service dies
+                 * while the plant is racing, the timer binary keeps going and
+                 * can still load KernelSU. That used to surface as a
+                 * DeadObjectException failure even though root was acquired.
+                 * Rebind and re-attach to the same plant instead of spending a
+                 * second one-shot trigger on this boot.
+                 */
+                String reconnectFailure = null;
+                for (int reconnect = 0;
+                        stage.reconnect && reconnect < KSU_RECONNECTS;
+                        reconnect++) {
+                    if (System.currentTimeMillis() - runStart
+                            >= AutoRoot.KSU_TOTAL_BUDGET_MS) {
+                        reconnectFailure = "out of time while reconnecting to"
+                                + " the shell user service";
+                        break;
+                    }
+                    log("the KernelSU stage outlived the shell user service;"
+                            + " rebinding");
+                    active = rebindUserService();
+                    if (active == null) {
+                        reconnectFailure = "the shell user service is gone and"
+                                + " could not be rebound (the detached plant may"
+                                + " still finish; reboot to re-check)";
+                        break;
+                    }
+                    log("watching the KernelSU stage that is already running");
+                    stage = runKsuStage(active, attempt, true, runStart);
+                }
+                if (stage.reconnect) {
+                    failure = reconnectFailure != null ? reconnectFailure
+                            : "the shell user service kept dying during the"
+                                    + " KernelSU stage";
+                    break;
+                }
                 if (stage.loaded) {
-                    String selinux = service.keepPermissive();
-                    AutoRoot.log(this, "KernelSU active: " + selinux);
-                    AutoRoot.log(this, tail(service.readLog()));
+                    String selinux = keepPermissive(active);
+                    log("KernelSU active: " + selinux);
+                    log(tail(readLogQuietly(active)));
                     return "KernelSU active (" + selinux + ")";
                 }
-                AutoRoot.log(this, tail(service.readLog()));
+                log(tail(readLogQuietly(active)));
                 failure = stage.failure;
                 if (!stage.replant) {
                     break;
                 }
             }
         } catch (Throwable t) {
-            AutoRoot.log(this, "KernelSU step failed: " + t);
+            log("KernelSU step failed: " + t);
             return "KernelSU failed: " + t;
         }
         return "KernelSU failed: " + failure;
     }
 
-    private KsuStage runKsuStage(IUserService service, int attempt) {
+    /** How many times a dead shell user service may be rebound per run. */
+    private static final int KSU_RECONNECTS = 4;
+
+    /**
+     * Replaces a shell user service whose binder died. The Shizuku server is
+     * normally still alive (only the app_process it spawned went away); if
+     * that is gone too, start it again over the local ADB channel first.
+     */
+    private IUserService rebindUserService() {
+        /*
+         * Drop the dead binding first. `kill=false` keeps a still-alive user
+         * service around (it may hold the root shell), and the call is
+         * harmless when Shizuku already removed the record.
+         */
+        if (boundArgs != null && boundConnection != null) {
+            try {
+                Shizuku.unbindUserService(boundArgs, boundConnection, false);
+            } catch (Throwable ignored) {
+            }
+        }
+        boundArgs = null;
+        boundConnection = null;
+        userService = null;
+        for (int i = 0; i < 3; i++) {
+            if (!waitForShizuku(2000)) {
+                log("Shizuku binder is gone; restarting the server");
+                log("restart: " + startShizuku());
+                if (!waitForShizuku(10000)) {
+                    log("Shizuku did not come back");
+                    continue;
+                }
+            }
+            IUserService rebound = bindUserService();
+            if (rebound != null) {
+                log("shell user service rebound");
+                return rebound;
+            }
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                return null;
+            }
+        }
+        log("could not rebind the shell user service");
+        return null;
+    }
+
+    /** keepPermissive() must never turn a loaded KernelSU into a failure. */
+    private String keepPermissive(IUserService active) {
+        try {
+            return active.keepPermissive();
+        } catch (Throwable t) {
+            log("keepPermissive failed: " + t);
+            IUserService rebound = rebindUserService();
+            if (rebound != null) {
+                try {
+                    return rebound.keepPermissive();
+                } catch (Throwable t2) {
+                    log("keepPermissive failed after rebind: " + t2);
+                }
+            }
+            return "selinux state unavailable";
+        }
+    }
+
+    private static String readLogQuietly(IUserService active) {
+        try {
+            return active.readLog();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * Supervises one `timer fake` plant. A plant needs minutes, not seconds:
+     * three internal attempts, each waiting for its child to exec and be
+     * killed. The 90 s window this used to have expired while the plant was
+     * still racing, so the outcome was always "timed out" and the failure
+     * line was never seen.
+     *
+     * {@code resume} means the plant was started by an earlier, killed app
+     * process: its output file is still there and must not be truncated by a
+     * second runDetached().
+     */
+    private KsuStage runKsuStage(IUserService service, int attempt, boolean resume,
+                                 long runStart) {
         KsuStage stage = new KsuStage();
         try {
+            final long stageStart = System.currentTimeMillis();
             /*
-             * runDetached() truncates /data/local/tmp/timer.log, so anything
-             * read from here on belongs to this run.
+             * The stage budget covers one plant; the total budget covers all
+             * replants, and is never cut below a minute so a run recovered
+             * long after the fact can still have its log evaluated.
              */
-            String started = service.runDetached("fake");
-            AutoRoot.log(this, "timer fake");
-            if (started.startsWith("start failed")) {
-                stage.failure = tail(started);
-                return stage;
+            final long deadline = Math.min(stageStart + AutoRoot.KSU_STAGE_BUDGET_MS,
+                    Math.max(runStart + AutoRoot.KSU_TOTAL_BUDGET_MS,
+                            stageStart + 60_000L));
+            if (resume) {
+                /*
+                 * The plant may have won its race - or been loaded by the
+                 * loader - after the app died and before it printed anything
+                 * terminal. Root that already works ends the stage here.
+                 */
+                if (service.ksuActive()) {
+                    stage.loaded = true;
+                    return stage;
+                }
+                log("watching the KernelSU stage that is already running");
+            } else {
+                AutoRoot.setRunPhase(this, PHASE_FAKE);
+                if (AutoRoot.ksuStartedAt(this) <= 0) {
+                    AutoRoot.setKsuStartedAt(this, stageStart);
+                }
+                /*
+                 * runDetached() truncates /data/local/tmp/timer.log, so
+                 * anything read from here on belongs to this run.
+                 */
+                String started = service.runDetached("fake");
+                log("timer fake");
+                if (started.startsWith("start failed")) {
+                    stage.failure = tail(started);
+                    return stage;
+                }
             }
-            final long startedAt = System.currentTimeMillis();
-            long lastChange = startedAt;
+            long lastChange = System.currentTimeMillis();
             long lastProgress = 0;
-            int lastLength = -1;
+            int lastLength = service.readLog().length();
             boolean sawLateLoad = false;
-            while (System.currentTimeMillis() - startedAt < 90000) {
+            while (System.currentTimeMillis() < deadline) {
                 Thread.sleep(1000);
                 String log = service.readLog();
                 if (log.length() != lastLength) {
@@ -597,7 +979,17 @@ public class AutoRootService extends Service {
                     lastChange = System.currentTimeMillis();
                 }
                 if (log.contains("KSU_LOADED")) {
-                    stage.loaded = true;
+                    /*
+                     * The marker is the stage's own claim, and a loader can
+                     * print it without actually handing out root. Ask the
+                     * kernel, exactly like the late-load paths below do.
+                     */
+                    if (service.ksuActive()) {
+                        stage.loaded = true;
+                    } else {
+                        stage.failure = "the stage printed KSU_LOADED but su does"
+                                + " not hand out u:r:ksu:s0";
+                    }
                     return stage;
                 }
                 if (log.contains("selinux write failed")) {
@@ -649,7 +1041,7 @@ public class AutoRootService extends Service {
                     }
                     return stage;
                 }
-                long secs = (System.currentTimeMillis() - startedAt) / 1000;
+                long secs = (System.currentTimeMillis() - stageStart) / 1000;
                 if (secs - lastProgress >= 5) {
                     lastProgress = secs;
                     String label = attempt > 1 ? " (" + attempt + "/"
@@ -662,10 +1054,31 @@ public class AutoRootService extends Service {
                 stage.loaded = true;
                 return stage;
             }
-            stage.failure = "timed out after 90s";
+            stage.failure = "the KernelSU stage did not finish in time";
+            /*
+             * Only a stage that went silent is worth replacing: a live plant
+             * keeps printing, and a second plant started while the first is
+             * still racing would make both of them lose.
+             */
+            long quiet = System.currentTimeMillis() - lastChange;
+            stage.replant = quiet >= AutoRoot.KSU_STALL_MS;
+            if (stage.replant) {
+                stage.failure += " (no output for " + (quiet / 1000) + "s)";
+            }
+            return stage;
+        } catch (DeadObjectException e) {
+            /*
+             * The shell user service was killed (LMKD, or Shizuku tearing the
+             * record down). The `timer fake` process is detached and keeps
+             * running, so this is not a failed plant: the caller rebinds and
+             * resumes watching the same log.
+             */
+            log("the shell user service died during the KernelSU stage");
+            stage.failure = "the shell user service died mid-stage";
+            stage.reconnect = true;
             return stage;
         } catch (Throwable t) {
-            AutoRoot.log(this, "KernelSU step failed: " + t);
+            log("KernelSU step failed: " + t);
             stage.failure = String.valueOf(t);
             return stage;
         }
@@ -746,7 +1159,7 @@ public class AutoRootService extends Service {
                     pair.getPrivate(), (RSAPublicKey) pair.getPublic(),
                     command, 45000);
             String output = result.output == null ? "" : result.output.trim();
-            AutoRoot.log(this, "adb starter raw: " + (output.isEmpty() ? "(no output)" : tail(output)));
+            log("adb starter raw: " + (output.isEmpty() ? "(no output)" : tail(output)));
             if (result.needsAuthorization) {
                 return "TimerRoot's ADB key is not authorized yet - connect it once"
                         + " from a computer or tap Allow on the device";
@@ -774,7 +1187,7 @@ public class AutoRootService extends Service {
 
             @Override
             public void onServiceDisconnected(ComponentName name) {
-                AutoRoot.log(AutoRootService.this, "user service disconnected");
+                log("user service disconnected");
             }
         };
         try {
@@ -785,10 +1198,38 @@ public class AutoRootService extends Service {
             boundArgs = args;
             boundConnection = connection;
             userService = holder[0];
+            try {
+                // The user service runs as shell and cannot read the app's
+                // device-protected mode preference, so pass it explicitly.
+                userService.setSamsungMode(AutoRoot.isSamsungMode(this));
+            } catch (Throwable t) {
+                log("setSamsungMode failed: " + t);
+            }
             return holder[0];
         } catch (Throwable t) {
-            AutoRoot.log(this, "bind failed: " + t);
+            log("bind failed: " + t);
             return null;
+        }
+    }
+
+    // ------------------------------------------------------------- logging
+
+    /**
+     * Writes one auto-root boot-iteration line to both logs: AutoRoot's own
+     * device-protected history (survives a reboot, readable at BFU) and the
+     * latest timer debug log on /data/local/tmp, appended after the device
+     * probe so the decisions sit next to the spec they explain. The debug
+     * copy is best-effort: without a bound shell user service there is
+     * nothing to append through, and the history line still lands.
+     */
+    private void log(String message) {
+        AutoRoot.log(this, message);
+        IUserService service = this.userService;
+        if (service != null) {
+            try {
+                service.appendDebugLog(message);
+            } catch (Throwable ignored) {
+            }
         }
     }
 
@@ -917,6 +1358,72 @@ public class AutoRootService extends Service {
         return "..." + trimmed.substring(trimmed.length() - 400);
     }
 
+    /**
+     * Turns the shell stage's output into the one sentence a user can act on.
+     * The exploit's raw lines are kernel addresses and race counters, so they
+     * go to {@link UserService#SHELL_LOG} (readable over adb while the phone
+     * is still locked) instead of the notification.
+     */
+    private static String shellStageFailure(String output) {
+        if (output.contains("no successful plant")
+                || output.contains("exhausted retries")) {
+            return "the exploit could not plant in any of its attempts;"
+                    + " reboot to retry (details: " + UserService.SHELL_LOG + ")";
+        }
+        if (output.contains("bad base") || output.contains("victim not captured")) {
+            return "the exploit could not locate the timer slab;"
+                    + " reboot to retry (details: " + UserService.SHELL_LOG + ")";
+        }
+        return tail(output) + " (details: " + UserService.SHELL_LOG + ")";
+    }
+
+    // ------------------------------------------------------------- heartbeat
+
+    /**
+     * Keeps the supervisor heartbeat fresh while the worker is alive. A boot
+     * whose app was killed mid-run leaves a stale heartbeat behind, which is
+     * how {@link AutoRoot#runInterrupted} tells a dead run from a busy one.
+     *
+     * The same thread re-arms the watchdog job. Scheduling with one job id
+     * replaces the pending job, so a live run keeps it in the future and it
+     * only fires after the heartbeats stop. At BFU jobs may be deferred until
+     * the unlock (where BOOT_COMPLETED already re-enters), so this covers the
+     * window after the boot broadcast: a kill there has nothing else left to
+     * bring the supervisor back.
+     */
+    private void startHeartbeat() {
+        beating = true;
+        Thread thread = new Thread(() -> {
+            long armed = 0;
+            while (beating) {
+                AutoRoot.heartbeat(this);
+                long now = System.currentTimeMillis();
+                if (now - armed > 60_000) {
+                    RestartJobService.scheduleWatchdog(this);
+                    armed = now;
+                }
+                try {
+                    Thread.sleep(10_000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+            }
+        }, "auto-root-heartbeat");
+        thread.setDaemon(true);
+        thread.start();
+        heartbeatThread = thread;
+    }
+
+    private void stopHeartbeat() {
+        beating = false;
+        Thread thread = heartbeatThread;
+        heartbeatThread = null;
+        if (thread != null) {
+            thread.interrupt();
+        }
+        RestartJobService.cancelWatchdog(this);
+    }
+
     // ------------------------------------------------------------- wake lock
 
     private void acquireWakeLock() {
@@ -928,7 +1435,11 @@ public class AutoRootService extends Service {
             wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK,
                     "TimerRoot:auto-root");
             wakeLock.setReferenceCounted(false);
-            wakeLock.acquire(10 * 60 * 1000L);
+            /*
+             * Covers the whole chain: the shell stage is bounded at 300 s and
+             * the KernelSU stage at 15 min across replants.
+             */
+            wakeLock.acquire(30 * 60 * 1000L);
         } catch (Throwable ignored) {
         }
     }

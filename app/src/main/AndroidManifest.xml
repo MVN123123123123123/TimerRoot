@@ -17,6 +17,12 @@
     <queries>
         <!-- Only used to locate Shizuku's starter binary for the boot path. -->
         <package android:name="moe.shizuku.privileged.api" />
+        <!-- Samsung mode is pinned to diabl0w/KernelSU; the others are
+             detected so the app can reject a mismatched manager. -->
+        <package android:name="me.weishu.kernelsu" />
+        <package android:name="me.weishu.kernelsu.pr" />
+        <package android:name="com.rifsxd.ksunext" />
+        <package android:name="com.sukisu.ultra" />
     </queries>
 
     <application

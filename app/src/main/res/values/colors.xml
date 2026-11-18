@@ -2,4 +2,17 @@
 <resources>
     <color name="bg">#FF0B0B0B</color>
     <color name="green">#FF2FD06B</color>
+
+    <!--
+        Brand-green seed palette. It is the static fallback for API 30,
+        where Material You dynamic color is unavailable; on Android 12+
+        MainActivity applies the dynamic overlay and the wallpaper palette
+        replaces these roles at runtime.
+    -->
+    <color name="seed_primary">#FF2FD06B</color>
+    <color name="seed_on_primary">#FF00391B</color>
+    <color name="seed_primary_container">#FF14522A</color>
+    <color name="seed_on_primary_container">#FFA6F2BC</color>
+    <color name="seed_secondary_container">#FF31493A</color>
+    <color name="seed_on_secondary_container">#FFCDEFD8</color>
 </resources>

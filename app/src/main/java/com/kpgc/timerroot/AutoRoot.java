@@ -3,6 +3,9 @@ package com.kpgc.timerroot;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.SystemClock;
 
 import java.io.ByteArrayOutputStream;
@@ -35,10 +38,24 @@ final class AutoRoot {
     static final int MAX_RESTARTS = 2;
     static final String KEY_LAST_RESULT = "last_result";
     static final String KEY_LAST_RESULT_TIME = "last_result_time";
+    /** Boot id that produced last_result, so a reboot cannot inherit it. */
+    static final String KEY_LAST_RESULT_BOOT = "last_result_boot";
+    /**
+     * Wall-clock heartbeat of the supervisor process. A run is live only while
+     * this keeps moving; a silent heartbeat plus a claimed boot is what an
+     * LMKD kill leaves behind.
+     */
+    static final String KEY_HEARTBEAT = "run_heartbeat";
+    /** Stage that was in flight ("shell" or "fake") when the app last ran. */
+    static final String KEY_RUN_PHASE = "run_phase";
+    /** Wall-clock start of the KernelSU stage, so a resumed run keeps its budget. */
+    static final String KEY_KSU_STARTED_AT = "ksu_started_at";
     static final String KEY_PRIVATE = "private_key";
     /** Live stage text for the boot status screen (device protected). */
     static final String KEY_STAGE = "stage";
     static final String KEY_STAGE_TIME = "stage_time";
+    /** Boot id that wrote the stage, so a reboot cannot inherit it either. */
+    static final String KEY_STAGE_BOOT = "stage_boot";
     /** 0 = running, 1 = success, -1 = failure. */
     static final String KEY_STAGE_STATE = "stage_state";
     /** Show the full-screen status activity over the lock screen. */
@@ -52,6 +69,13 @@ final class AutoRoot {
      * survives a soft restart, which is why this covers the resumed process.
      */
     static final String KEY_BOOT_UI_SEEN_BOOT = "boot_ui_seen_boot";
+    /**
+     * Samsung endgame selection. -1 = auto (default), 0 = forced generic,
+     * 1 = forced Samsung.  Stored as an int so a user override can be
+     * distinguished from the automatic vendor detection.
+     */
+    static final String KEY_SAMSUNG_MODE = "samsung_mode";
+    static final int SAMSUNG_AUTO = -1;
     /** Restart the Android userspace once KernelSU is loaded (modules apply). */
     static final String KEY_SOFT_RESTART = "soft_restart";
     /** Boot id for which the automatic soft restart was already triggered. */
@@ -62,6 +86,42 @@ final class AutoRoot {
     static final int STAGE_RUNNING = 0;
     static final int STAGE_OK = 1;
     static final int STAGE_FAILED = -1;
+
+    /*
+     * Result kinds. A uid-0 shell and a loaded KernelSU are not the same
+     * outcome: the shell is the exploit's own root and dies with the boot,
+     * while only KernelSU survives. Keeping them apart is what stops a
+     * "... KernelSU failed: ..." result from being reported as a success.
+     */
+    static final int RESULT_FAILED = 0;
+    static final int RESULT_SHELL = 1;
+    static final int RESULT_KSU = 2;
+
+    /**
+     * One `timer fake` run plants three times and took 316 s to reach its
+     * "selinux write failed" line on the Pixel 7a, so the old 90 s window
+     * always expired while the plant was still racing. The exploit's own
+     * `shell` stage is bounded at 300 s in UserService.openRoot().
+     */
+    static final long KSU_STAGE_BUDGET_MS = 8 * 60 * 1000L;
+    /** All KernelSU replants together; a boot must not hang forever on it. */
+    static final long KSU_TOTAL_BUDGET_MS = 15 * 60 * 1000L;
+    /**
+     * No heartbeat for this long means the supervisor is gone: the app was
+     * killed while the detached exploit kept running. The heartbeat itself
+     * ticks every 10 s, and a live run always beats within a few seconds of
+     * that, so anything past four missed ticks is dead.
+     *
+     * This must stay well under the next broadcast: after a userspace
+     * restart, `LOCKED_BOOT_COMPLETED` is redelivered once, about a minute
+     * after the kill (observed 23:32:35 kill → 23:33:49 delivery on the
+     * Pixel 7a). The old 90 s threshold was older than that gap, so the
+     * recovery was thrown away and the boot sat unsupervised until the user
+     * unlocked, 2.5 minutes later.
+     */
+    static final long HEARTBEAT_STALE_MS = 40 * 1000L;
+    /** A stage that stopped printing for this long is dead, not busy. */
+    static final long KSU_STALL_MS = 60 * 1000L;
 
     static final int DEFAULT_ADB_PORT = AdbLocal.DEFAULT_PORT;
 
@@ -80,6 +140,120 @@ final class AutoRoot {
 
     static boolean isEnabled(Context context) {
         return prefs(context).getBoolean(KEY_ENABLED, false);
+    }
+
+    static void setEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_ENABLED, enabled).commit();
+    }
+
+    // ------------------------------------------------------ Samsung mode
+
+    /** True when this is a Samsung-built device (One UI / Exynos or SD). */
+    static boolean isSamsungDevice() {
+        return "samsung".equalsIgnoreCase(Build.MANUFACTURER)
+                || "samsung".equalsIgnoreCase(Build.BRAND);
+    }
+
+    /** Stored override: {@link #SAMSUNG_AUTO}, 0 (generic) or 1 (Samsung). */
+    static int samsungModeOverride(Context context) {
+        return prefs(context).getInt(KEY_SAMSUNG_MODE, SAMSUNG_AUTO);
+    }
+
+    /**
+     * True when the Samsung chain should be used.  A device with no override
+     * follows the vendor automatically; once the user taps the toggle, the
+     * explicit choice wins (so a Samsung phone can still run the generic
+     * profile, and a non-Samsung phone can try the Samsung chain).
+     */
+    static boolean isSamsungMode(Context context) {
+        int override = samsungModeOverride(context);
+        return override != SAMSUNG_AUTO ? override == 1 : isSamsungDevice();
+    }
+
+    /** Stores an explicit on/off choice, replacing auto-detection. */
+    static void setSamsungMode(Context context, boolean enabled) {
+        prefs(context).edit()
+                .putInt(KEY_SAMSUNG_MODE, enabled ? 1 : 0)
+                .apply();
+    }
+
+    /** Drops the explicit choice and returns to vendor auto-detection. */
+    static void useAutoSamsungMode(Context context) {
+        prefs(context).edit().remove(KEY_SAMSUNG_MODE).apply();
+    }
+
+    /** Samsung mode's required manager (diabl0w/KernelSU Samsung build). */
+    static final String SAMSUNG_MANAGER_PACKAGE = "me.weishu.kernelsu";
+    /**
+     * diabl0w/KernelSU keeps the upstream package name, so its Samsung build
+     * is identified by the manager versionName prefix (samsung-v2.x).
+     */
+    static final String SAMSUNG_MANAGER_VERSION_PREFIX = "samsung-";
+    /** Other KernelSU forks that must not be used for the Samsung chain. */
+    private static final String[] OTHER_KSU_MANAGERS = {
+            "me.weishu.kernelsu.pr", "com.rifsxd.ksunext", "com.sukisu.ultra"
+    };
+
+    /**
+     * Returns null when the pinned diabl0w/KernelSU Samsung manager is
+     * installed, or a user-facing reason why Samsung mode cannot run.
+     *
+     * The bundled ksud and its embedded module come from that release, so a
+     * different KernelSU variant (or the upstream manager, which shares the
+     * package name but not the samsung-v version) is rejected rather than
+     * late-loaded into a mismatched module.
+     */
+    static String samsungManagerProblem(Context context) {
+        PackageManager pm = context.getPackageManager();
+        PackageInfo required = null;
+        try {
+            required = pm.getPackageInfo(SAMSUNG_MANAGER_PACKAGE, 0);
+        } catch (PackageManager.NameNotFoundException ignored) {
+        }
+        if (required == null) {
+            String other = installedOtherManager(pm);
+            if (other != null) {
+                return "Samsung mode is pinned to diabl0w/KernelSU ("
+                        + SAMSUNG_MANAGER_PACKAGE + ", manager version"
+                        + " samsung-v*), but " + other + " is installed"
+                        + " instead. Uninstall it and install"
+                        + " github.com/diabl0w/KernelSU";
+            }
+            return "Samsung mode is pinned to the diabl0w/KernelSU Samsung"
+                    + " build (" + SAMSUNG_MANAGER_PACKAGE + ", manager"
+                    + " version samsung-v*). Install github.com/diabl0w/KernelSU"
+                    + " first";
+        }
+        String version = required.versionName;
+        if (version == null
+                || !version.startsWith(SAMSUNG_MANAGER_VERSION_PREFIX)) {
+            return "Samsung mode is pinned to the diabl0w/KernelSU Samsung"
+                    + " build, but the installed " + SAMSUNG_MANAGER_PACKAGE
+                    + " reports version "
+                    + (version == null ? "unknown" : version)
+                    + ". Uninstall it and install github.com/diabl0w/KernelSU"
+                    + " (manager version samsung-v*)";
+        }
+        String other = installedOtherManager(pm);
+        if (other != null) {
+            return "Samsung mode must use only diabl0w/KernelSU, but "
+                    + other + " is also installed. Uninstall the other"
+                    + " KernelSU manager and retry";
+        }
+        return null;
+    }
+
+    /** Package label of the first installed non-Samsung KernelSU manager. */
+    private static String installedOtherManager(PackageManager pm) {
+        for (String pkg : OTHER_KSU_MANAGERS) {
+            try {
+                PackageInfo pi = pm.getPackageInfo(pkg, 0);
+                String version = pi.versionName;
+                return pkg + (version == null ? "" : " " + version);
+            } catch (PackageManager.NameNotFoundException ignored) {
+            }
+        }
+        return null;
     }
 
     /** True when this boot already owns an attempt (running or finished). */
@@ -171,14 +345,105 @@ final class AutoRoot {
     }
 
     static void record(Context context, String result) {
+        /*
+         * commit(), not apply(): an LMKD kill right after the recording must
+         * not lose the outcome, otherwise the boot looks interrupted again.
+         */
         prefs(context).edit()
                 .putString(KEY_LAST_RESULT, result)
                 .putLong(KEY_LAST_RESULT_TIME, System.currentTimeMillis())
-                .apply();
+                .putLong(KEY_LAST_RESULT_BOOT, bootId())
+                .commit();
     }
 
     static String lastResult(Context context) {
         return prefs(context).getString(KEY_LAST_RESULT, "");
+    }
+
+    /**
+     * The recorded result only counts for the boot that produced it. Without
+     * this a reboot leaves the previous boot's "KernelSU active" on disk, and
+     * the status screen reports a success this boot never had.
+     */
+    static String lastResultThisBoot(Context context) {
+        SharedPreferences prefs = prefs(context);
+        return prefs.getLong(KEY_LAST_RESULT_BOOT, Long.MIN_VALUE) == bootId()
+                ? prefs.getString(KEY_LAST_RESULT, "") : "";
+    }
+
+    /** Drops the outcome: a run that starts now owes a fresh one. */
+    static void clearResult(Context context) {
+        prefs(context).edit()
+                .remove(KEY_LAST_RESULT)
+                .remove(KEY_LAST_RESULT_TIME)
+                .remove(KEY_LAST_RESULT_BOOT)
+                .commit();
+    }
+
+    /** Classifies a recorded result into {@link #RESULT_FAILED} and friends. */
+    static int classify(String result) {
+        if (result == null || !result.startsWith("root shell ready")) {
+            return RESULT_FAILED;
+        }
+        return result.contains("KernelSU active") ? RESULT_KSU : RESULT_SHELL;
+    }
+
+    // -------------------------------------------------- supervisor liveness
+
+    /**
+     * Marks the supervisor alive. Refreshed every few seconds by the worker so
+     * a run that lost its app process can be told apart from one that is
+     * simply busy.
+     */
+    static void heartbeat(Context context) {
+        prefs(context).edit()
+                .putLong(KEY_HEARTBEAT, System.currentTimeMillis()).apply();
+    }
+
+    static long heartbeatAge(Context context) {
+        return System.currentTimeMillis() - prefs(context).getLong(KEY_HEARTBEAT, 0);
+    }
+
+    /**
+     * True when this boot's attempt has no outcome: the boot is claimed, no
+     * result was recorded for it, and the supervisor stopped beating. That is
+     * exactly what an LMKD kill leaves behind - the detached exploit may even
+     * still be running, but nothing is watching it and the boot would
+     * otherwise be written off as "already handled".
+     */
+    static boolean runInterrupted(Context context) {
+        return isBootClaimed(context)
+                && lastResultThisBoot(context).isEmpty()
+                && heartbeatAge(context) > HEARTBEAT_STALE_MS;
+    }
+
+    /**
+     * Remembers which stage is running, so a later process knows whether the
+     * exploit was started (the one-shot claim must stay) and whether the
+     * detached KernelSU plant is still worth re-attaching to.
+     */
+    static void setRunPhase(Context context, String phase) {
+        prefs(context).edit().putString(KEY_RUN_PHASE, phase).commit();
+    }
+
+    static String runPhase(Context context) {
+        return prefs(context).getString(KEY_RUN_PHASE, "");
+    }
+
+    /** Clears the in-flight stage bookkeeping (phase and its start time). */
+    static void clearRunPhase(Context context) {
+        prefs(context).edit()
+                .remove(KEY_RUN_PHASE)
+                .remove(KEY_KSU_STARTED_AT)
+                .commit();
+    }
+
+    static long ksuStartedAt(Context context) {
+        return prefs(context).getLong(KEY_KSU_STARTED_AT, 0);
+    }
+
+    static void setKsuStartedAt(Context context, long at) {
+        prefs(context).edit().putLong(KEY_KSU_STARTED_AT, at).commit();
     }
 
     // ------------------------------------------------------- boot status UI
@@ -197,19 +462,33 @@ final class AutoRoot {
                 .putString(KEY_STAGE, text)
                 .putLong(KEY_STAGE_TIME, System.currentTimeMillis())
                 .putInt(KEY_STAGE_STATE, state)
+                .putLong(KEY_STAGE_BOOT, bootId())
                 .commit();
     }
 
+    /**
+     * True when the stored stage belongs to this boot. A reboot leaves the
+     * previous boot's "loading KernelSU... 75s" behind, and the status screen
+     * must show the new boot's state instead of a frozen one.
+     */
+    private static boolean stageIsCurrent(Context context) {
+        return prefs(context).getLong(KEY_STAGE_BOOT, Long.MIN_VALUE) == bootId();
+    }
+
     static String stageText(Context context) {
-        return prefs(context).getString(KEY_STAGE, "waiting for the boot…");
+        return stageIsCurrent(context)
+                ? prefs(context).getString(KEY_STAGE, "waiting for the boot…")
+                : "waiting for the boot…";
     }
 
     static long stageTime(Context context) {
-        return prefs(context).getLong(KEY_STAGE_TIME, 0);
+        return stageIsCurrent(context) ? prefs(context).getLong(KEY_STAGE_TIME, 0) : 0;
     }
 
     static int stageState(Context context) {
-        return prefs(context).getInt(KEY_STAGE_STATE, STAGE_RUNNING);
+        return stageIsCurrent(context)
+                ? prefs(context).getInt(KEY_STAGE_STATE, STAGE_RUNNING)
+                : STAGE_RUNNING;
     }
 
     /**
@@ -438,8 +717,13 @@ final class AutoRoot {
                  * Bump on every AIDL change: Shizuku tears down a cached user
                  * service whose version differs, so a stale shell from an
                  * earlier APK can never answer the new transaction ids.
-                 * 8 -> 9 added softRestart().
+                 * 8 -> 9 added softRestart(); 9 -> 10 added setSamsungMode();
+                 * 10 -> 11 added execSu(); 11 -> 12 added the device-probe
+                 * methods (probe, captureDebugLog, readDebugLog) and
+                 * isSamsungMode(); 12 -> 13 added appendDebugLog() so the
+                 * auto-root iteration can write into the latest timer debug
+                 * log.
                  */
-                .version(9);
+                .version(13);
     }
 }
