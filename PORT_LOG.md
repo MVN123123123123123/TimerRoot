@@ -405,6 +405,28 @@ string is a strict prefix of the 4K one, so the substring test matched the 4K
   `selinux_blob_off = 0x8`.
 - **F6** 0 errors, `--selfcheck` 0 failures. Worst case spills by `0x48` into
   the next object; `run_plant()` retries there by design.
+- **F15 device gate (yogi, 2026-11-19) — slab-order mismatch, fixed:**
+  the first hardware run stopped at
+  `[base] made=512 site=… slide=… best=0 count=0` → `base calibration
+  failed`.  The phone's `posix_timers_cache` is order 0 (16 objects / 1
+  page); the profile declared order 1 (32 / 2), because QEMU validation
+  forces `slub_min_order=1` to reproduce that assumption.  With the order-1
+  filter, no timer-slab `mm_page_alloc` record matched and the base vote was
+  empty.  Reproduced exactly in QEMU by booting the same factory `Image`
+  without `slub_min_order=1`; that run prints the same `count=0` line.
+  Two fixes:
+  - the profile now records `slab_order=0` / `slab_size=4096`; and
+  - `calibrate_base()` tries slab orders 0..3, keeps the strongest vote and
+    logs `[!] slab geometry mismatch: conf ... device ...; using device
+    geometry` before adapting, so a stale profile cannot hard-fail this way
+    again.
+
+  QEMU re-run on the order-0 boot with the old order-1 profile: mismatch
+  logged, `[base] ... count=512 order=0`, plant `pair pfn` agree=1, child
+  `resuid=0/0/0`, `ROOT_SHELL_OK`.  The rebuilt binary is
+  `p7a/timer_p7a` (sha256 `4edece26…`) and the app asset.  The 6.12.81
+  Pixel 11 profiles still declare order 1 and rely on the runtime detection
+  until they get their own hardware run.  Hardware re-test pending.
 
 ---
 
