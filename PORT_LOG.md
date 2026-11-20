@@ -428,6 +428,60 @@ string is a strict prefix of the 4K one, so the substring test matched the 4K
   Pixel 11 profiles still declare order 1 and rely on the runtime detection
   until they get their own hardware run.  Hardware re-test pending.
 
+- **F15 device gate (yogi, 2026-11-19) — spray burst drained before the
+  free, fixed:** with base calibration working, every plant on hardware
+  logged `free_seen=1 burst hit=0 after 15002ms`, three attempts, then
+  `no successful plant -- parking without reap (zombie held)`.  The victim
+  slab *is* freed (the trace shows its `mm_page_free`), but no spray
+  allocation is in flight when that happens.
+
+  Root cause is the spray schedule, not geometry.  `spray_thread()` sent a
+  fixed `SPRAY_POST=10000` per thread in phase 2, and all of phase 1+2
+  completed within tens of milliseconds of the plant starting.  The victim
+  slab is freed later, inside the child's exec/exit path.  Worse, the pool
+  capacity is small and bounded: an unprivileged process cannot raise
+  `net.core.wmem_max`, so the socketpair queues accept only a limited
+  number of skbs before every `send()` returns `EAGAIN`.  Measured in QEMU
+  with Android's `wmem_max=212992`: successful sends stall around 57k and
+  millions of later sends fail.  A flat-out burst therefore spends the
+  whole capacity in a few milliseconds and then allocates nothing for the
+  rest of the 15 s window — exactly the hardware symptom.  QEMU's default
+  initramfs never hit it because its `wmem_max` is 16 MB and `SO_SNDBUF`
+  was raised to 16 MB, so the queues never filled.
+
+  Three fixes in `p7a/timer_p7a.c`:
+  - Phase 2 now *waits* for the parent to see `mm_page_free` for the
+    victim pfn (new `g_free_seen`) and only then spends its send budget, so
+    the queue capacity is still unused at the only instant the page can be
+    taken.  `SPRAY_PRE` dropped 2000 → 256 so phase 1 cannot consume that
+    capacity up front.
+  - The direct zero-write and permissive retry loops call `pool_reset()`
+    per attempt.  Previously attempts 2 and 3 reused queues already
+    saturated by attempt 1, so they sent only `EAGAIN` and could never
+    reclaim.
+  - The result line now logs `send ok=<n> err=<n>` (plus a `free at
+    <ms>ms` line) so a starved burst is visible in the device log instead
+    of presenting as a bare miss.
+
+  QEMU validation of the fix: with `wmem_max` clamped to Android's 212992
+  (the configuration that reproduced `burst hit=0 after 15002ms`),
+  the run now logs `free at 1ms send ok=2048 err=0` then `burst hit=1
+  after 47ms send ok=14526 err=0` and `ROOT_SHELL_OK`; the same holds with
+  default buffers.  Order-0 geometry, 8 CPUs, uid 2000 and a 32k wmem_max
+  were each ruled out separately — all of them pass.  `mass.py` gates for
+  this profile, the 6.12.81 Pixel 11 set, 6.1.162 and 5.15.194 are all
+  PASS; the four `samsung-*` `BOOT-FAIL` rows are pre-existing (that gate
+  boots the tegu/blazer images with `qconf=` and never runs the binary —
+  those profiles are only ever validated through an `--image` shim).
+  The `pool_reset()` change was the one with real regression risk, since
+  the Samsung endgame runs five plants back to back on the recycled pool:
+  re-ran the s23fe shim under `--samsung fake` and all five stages
+  (`defex_hash` ×3, `fake_uid`, `fake_euid`) hit on attempt 1
+  (`burst hit=1`, `err=0`), the worker reported `resuid=0/0/0` and the
+  chain stopped at `[ksu] ksud missing` / `KSU_MISSING` exactly as
+  before.  Rebuilt binary `p7a/timer_p7a` sha256 `3d33c532…`.  Hardware
+  re-test pending.
+
 ---
 
 ## 6.12.69 — Xiaomi 17 Pro Max

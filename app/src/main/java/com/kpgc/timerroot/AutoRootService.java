@@ -552,7 +552,7 @@ public class AutoRootService extends Service {
         }
         String target = service.run("target");
         if (!target.contains("target=lynx")) {
-            return "bundled exploit rejected for this kernel: " + target.trim();
+            return "installed exploit rejected for this kernel: " + target.trim();
         }
 
         boolean samsung = AutoRoot.isSamsungMode(this);

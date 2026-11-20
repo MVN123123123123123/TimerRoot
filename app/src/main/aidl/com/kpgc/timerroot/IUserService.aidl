@@ -57,4 +57,10 @@ interface IUserService {
      * device probe captured by {@link #captureDebugLog()}.
      */
     String appendDebugLog(String line) = 21;
+    /**
+     * Installs the timer bundled in the APK even when a binary is already
+     * installed. {@link #install(String)} keeps a newer downloaded binary;
+     * this is for the explicit "Prepare binary" action only.
+     */
+    String installForce(String apkPath) = 22;
 }

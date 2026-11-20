@@ -72,6 +72,13 @@ Both actions:
 2. extract `assets/conf/**.conf` to `/data/local/tmp/timer-conf`;
 3. run `timer target`.
 
+**Prepare binary** is the only action that replaces an already installed
+binary. Every other install path (Install channel, the auto-root boot run)
+refreshes the profiles and keeps the installed `/data/local/tmp/timer` as long
+as it speaks this app's protocol, so a binary fetched with **Download exploit**
+is never replaced by an older copy bundled in the APK. Press **Prepare
+binary** explicitly to go back to the bundled build.
+
 A binary whose target check fails is rejected before anything touches the
 kernel.
 
@@ -208,7 +215,8 @@ auto-root/restart decisions. **Copy** puts the buffer on the clipboard;
 
 **Exploit**
 
-- **Prepare binary** — install the copy bundled in the APK.
+- **Prepare binary** — install the copy bundled in the APK, replacing whatever
+  is at `/data/local/tmp/timer`.
 - **Download exploit** — fetch the latest release binary and install it with
   the confs.
 
@@ -296,7 +304,8 @@ A `directBootAware` receiver handles `LOCKED_BOOT_COMPLETED`, starts the
 2. reuses or starts `shizuku_server` over `127.0.0.1:5555`;
 3. waits for the Shizuku binder, checks the permission and binds the user
    service;
-4. installs the bundled asset if needed, requires `target=lynx`, and runs
+4. installs the bundled asset only when no usable `/data/local/tmp/timer` is
+   present (a downloaded build is kept), requires `target=lynx`, and runs
    `timer shell`;
 5. runs `timer fake` (late-loads KernelSU and clears enforcing), replanting up
    to three times on a missed race;

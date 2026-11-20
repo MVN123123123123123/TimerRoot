@@ -722,8 +722,9 @@ final class AutoRoot {
                  * methods (probe, captureDebugLog, readDebugLog) and
                  * isSamsungMode(); 12 -> 13 added appendDebugLog() so the
                  * auto-root iteration can write into the latest timer debug
-                 * log.
+                 * log; 13 -> 14 added installForce(), which makes the plain
+                 * install() keep a newer downloaded binary.
                  */
-                .version(13);
+                .version(14);
     }
 }

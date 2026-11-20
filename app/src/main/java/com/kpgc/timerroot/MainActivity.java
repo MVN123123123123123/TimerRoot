@@ -339,8 +339,10 @@ public class MainActivity extends Activity {
         addSection(body, "Exploit");
         LinearLayout exploit = paddedCard();
         exploit.addView(bodyText("The binary is built for this kernel. Prepare "
-                + "installs the copy bundled in the APK; Download fetches the latest "
-                + "build from GitHub."));
+                + "installs the copy bundled in the APK (replacing any newer "
+                + "download); Download fetches the latest build from GitHub. "
+                + "Install channel and auto-root keep the installed binary and "
+                + "only refresh the profiles."));
         exploit.addView(spacer(14));
         exploit.addView(buttonRow(
                 compactButton("Prepare binary", v -> prepare()),
@@ -1322,7 +1324,7 @@ public class MainActivity extends Activity {
         toast("Preparing...");
         new Thread(() -> {
             try {
-                final String result = service.install(getPackageCodePath());
+                final String result = service.installForce(getPackageCodePath());
                 addLog(result);
                 if (result.startsWith("installed")) {
                     String target = service.run("target");
