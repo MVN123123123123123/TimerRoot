@@ -1858,3 +1858,57 @@ byte-identical payloads for both page sizes. The 4K image is
 - **F12-F13** need a device, as always (no SELinux policy / KernelSU in
   the QEMU initramfs). **F15** hardware pending; **F16** rows added to
   `docs/supported-devices.md` as `verified in QEMU`.
+
+## Xiaomi 15 (dada / 24129PN74C), HyperOS 4.0 global — `OS4.0.0.11.XOCMIXM`, 6.6.118-android15-8-g0908354dac1b-ab16143355-4k
+
+Ported from the shipped incremental OTA
+`dada_global-ota_full-OS4.0.0.11.XOCMIXM-user-17.0-19e034272e.zip`
+(metadata: `post-build=OS4.0.0.11.XOCMIXM`, `pre-device=dada`,
+Android 17 / `CP2A.260605.016`, security patch 2026-09-01, payload
+`8766355211` bytes, SHA-256 from `payload_properties.txt`). Artifacts
+extracted locally into `timerroot-port/work/xi/` (boot, vendor_boot,
+dtbo, unpacked kernel/ramdisk/bootconfig, reconstructed vmlinux+BTF):
+boot image SHA-256 `3e8f0134cb685336a4a9b84916036beb48cbee9b2310776c0406278bce83c9e8`,
+kernel raw SHA-256 `1073400e04a4cf94871b40a230b42af0078ff3f07aa6a52bff0469f0c127195b`.
+Different kernel binary from the existing OS3.0.307.0.WOCCNXM port
+(`6.6.118-...-abogki519650608-4k`), so a separate conf is required.
+
+- **F1** same vulnerable ordering as other 6.6 builds:
+  `exec_mmap -> exec_task_namespaces -> posix_cpu_timers_exit -> exit_itimers`;
+  `CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y`; `CLOCK_PROCESS_CPUTIME_ID`
+  returns `2,3,0`.
+- **F2** `do_timer_create` allocates from `posix_timers_cache`
+  (`0xffffffc08234c760`) at `0xffffffc080195d4c` ->
+  `timer_site 0xffffffc080195d50`. `copy_process` allocates `task_struct`
+  from `task_struct_cachep` (`0xffffffc082325990`) via
+  `kmem_cache_alloc_node` at `0xffffffc0800ab938` ->
+  `copy_process_low21 0x0ab93c`.
+- **F3** `task_struct` BTF: `posix_cputimers_work 0xf78`,
+  `signal_struct 0xf70`, `exit_state 0x28`; `signal_struct`
+  `posix_cputimers 0xe50`, size `0x3c8`.
+- **F4** BTF + disassembly: `cred{.uid@0x04,.gid@0x08,.security@0x78}`
+  size `0xf8`, jar `0xf0` (`cred_init` kmem_cache_create size 0xf0, flags
+  0x2000 -> `cred_req 0xb8`, `cred_alloc 0xc0`, `cred_cap_off 0x30`,
+  `cred_cap_count 5`); `task_struct 0x1440` (vendor extension `0x400`
+  from cmdline `android_arch_task_struct_size=512`, `task_alloc_bytes
+  0x1840`); `k_itimer{.it@0x78}` size `0x100`. Cache sizing:
+  `init_posix_timers` creates `posix_timers_cache` with size `0x100`,
+  flags `0x200`; `fork_init` creates `task_struct_cachep` with size
+  `0xeb0` (`0x1440 + 0x400 + 0x70`?), flags `0x4040000`.
+- **F5** `selinux_state 0xffffffc08236a2e0` (`enforcing` @ +0),
+  `panic_on_warn 0xffffffc08211ae0c`, `root_user 0xffffffc08213ef50`,
+  `init_user_ns 0xffffffc08213f9c0`, `init_ucounts 0xffffffc082140cb0`,
+  `init_groups 0xffffffc082140740`, `task_struct_cachep 0xffffffc082325990`,
+  `posix_timers_cache 0xffffffc08234c760`.
+- **F6** `selinux_blob_sizes{cred=24,...}` is the only cred-blob
+  contributor in ordered LSM init for this build (`capability, selinux,
+  bpf, integrity`; bpf lbs_cred 0, landlock absent) ->
+  `selinux_blob_off 0x0`. Conf `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf`
+  passes `validate_conf.py` (slab `0x2000` obj `0x108`: worst node
+  `0x1f68` cred_end `0x2078` spills/retry path, same class as OS3).
+
+Runtime gates not yet run for this build: **F7–F11** QEMU, **F12–F13**
+KernelSU manager smoke, **F14** mass-run inclusion pending workspace
+staging, **F15** hardware verification pending, **F16** doc update pending
+runtime evidence. Port status: static re-derivation complete (F1–F6),
+ready for QEMU/runtime re-evaluation.
