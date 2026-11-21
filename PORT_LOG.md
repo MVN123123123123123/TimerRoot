@@ -1920,9 +1920,26 @@ Different kernel binary from the existing OS3.0.307.0.WOCCNXM port
   `0x14c0` confirming the vendor extension),
   `F7_target` (release/site `0xffffffc080195d50`),
   `F8_ids` (`a=275 f=273 n=1029`), `F9_probe` (`recs=4096 kept=4096`,
-  base/page-pair agree), `F10_leak` (`made=512 votes=512`), and the
-  `F11_verify` zero-write endgame reaching `uid=0 euid=0 resuid=0/0/0`
-  with `ROOT_SHELL_OK`. Transcript: `timerroot-port/work/qemu/logs/mass-dada-os4.json`.
+  base/page-pair agree), `F10_leak` (`made=512 votes=512`). The original
+  F11 transcript reported `uid=0 euid=0 resuid=0/0/0`, but that run was
+  still PID 1/root: the child is root before the plant, so the check
+  proved nothing about the cred write. After the harness started dropping
+  to uid 2000, 1/4 eight-CPU replays reproduced the device failure
+  exactly — `free_seen=1 burst hit=1`, `plant1 reaped status=0x9`,
+  `cred writes landed`, then `[child] woke uid=2000 euid=2000` and
+  `cred writes did not land`. The reclaim/reap success flags do not prove
+  the stale `rb_erase` ran on the payload; when the free lands after the
+  phase-1 burst the page can be recycled after the erase has already
+  passed. `p7a/timer_p7a.c` now reads the child's real uid from
+  `/proc/<pid>/status` after each plant and retries the whole plant (fresh
+  pool, fresh target) up to six times until it is actually 0. With that
+  fix the uid-2000 harness passes: 8/8 eight-CPU runs reached
+  `ROOT_SHELL_OK` (one needed a second plant), and `mass.py` reports
+  `F11_verify=PASS(resuid=0/0/2000)` because an unprivileged `setuid(0)`
+  from a zeroed real uid cannot clear the saved uid. Transcripts:
+  `timerroot-port/work/qemu/logs/mass-dada-os4.json` (old root run),
+  `mass-dada-fixed2.json` (uid-2000 run). Rebuilt binary
+  `p7a/timer_p7a` sha256 `6cf47fb8…`.
 
 Runtime gates still pending for this build: **F12–F13** KernelSU manager
 smoke, **F15** hardware verification (needs a physical dada device). Port

