@@ -1572,6 +1572,7 @@ run.
 | 6.6.118-…-ab15657065-4k | mist | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-abogki536571621-4k | iolite | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-abogki519650608-4k | dada | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-ab16143355-4k | dada (OS4) | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-ab15511674-4k | kunzite | pass | pass | pass | pass | pass | pass |
 | 6.6.127-…-ab16252310-4k | frankel (Pixel 10) | pass | pass | pass | pass | pass | pass |
 | samsung-a15xzh-5.15.189 | a15xzh (Galaxy A15 5G) | pass | pass | pass | pass | pass | pass |
@@ -1876,39 +1877,54 @@ Different kernel binary from the existing OS3.0.307.0.WOCCNXM port
 - **F1** same vulnerable ordering as other 6.6 builds:
   `exec_mmap -> exec_task_namespaces -> posix_cpu_timers_exit -> exit_itimers`;
   `CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y`; `CLOCK_PROCESS_CPUTIME_ID`
-  returns `2,3,0`.
-- **F2** `do_timer_create` allocates from `posix_timers_cache`
-  (`0xffffffc08234c760`) at `0xffffffc080195d4c` ->
+  returns `2,3,0`. Confirmed empirically by the F11 zero-write endgame
+  reaching uid 0 against the real factory kernel in QEMU.
+- **F2** `init_posix_timers` creates `posix_timers_cache` with size `0x108`,
+  flags `0x4040000` (SLAB_PANIC|SLAB_ACCOUNT). `do_timer_create` allocates
+  from it (`0xffffffc08234c760`) at `0xffffffc080195d4c` ->
   `timer_site 0xffffffc080195d50`. `copy_process` allocates `task_struct`
   from `task_struct_cachep` (`0xffffffc082325990`) via
   `kmem_cache_alloc_node` at `0xffffffc0800ab938` ->
-  `copy_process_low21 0x0ab93c`.
-- **F3** `task_struct` BTF: `posix_cputimers_work 0xf78`,
-  `signal_struct 0xf70`, `exit_state 0x28`; `signal_struct`
-  `posix_cputimers 0xe50`, size `0x3c8`.
-- **F4** BTF + disassembly: `cred{.uid@0x04,.gid@0x08,.security@0x78}`
-  size `0xf8`, jar `0xf0` (`cred_init` kmem_cache_create size 0xf0, flags
-  0x2000 -> `cred_req 0xb8`, `cred_alloc 0xc0`, `cred_cap_off 0x30`,
-  `cred_cap_count 5`); `task_struct 0x1440` (vendor extension `0x400`
-  from cmdline `android_arch_task_struct_size=512`, `task_alloc_bytes
-  0x1840`); `k_itimer{.it@0x78}` size `0x100`. Cache sizing:
-  `init_posix_timers` creates `posix_timers_cache` with size `0x100`,
-  flags `0x200`; `fork_init` creates `task_struct_cachep` with size
-  `0xeb0` (`0x1440 + 0x400 + 0x70`?), flags `0x4040000`.
+  `copy_process_low21 0xab93c`.
+- **F3** BTF layout: `cred` `0xb8` (`uid 0x8`, `euid 0x18`,
+  `cap_inheritable 0x30`, `security 0x80`, `user 0x88`, `user_ns 0x90`,
+  `ucounts 0x98`, `group_info 0xa0`); `task_struct` `0x12c0`
+  (`cred 0x820`, `real_cred 0x818`); `k_itimer` `0x108` (`it 0x78`,
+  `rcu 0xf8`).
+- **F4** `cred_req 0xb8`, `cred_alloc 0xc0` (SLAB_HWCACHE_ALIGN rounds
+  the `0xb8` cred object up to `0xc0`), `cred_cap_off 0x30`,
+  `cred_cap_count 5`, `fake_cred_off 0x18`. `task_struct` base `0x12c0`
+  plus `0x200` (cmdline `android_arch_task_struct_size=512`, capped at
+  `0x400` by `task_struct_vendor_size_setup`) -> `task_alloc_bytes 0x14c0`.
+  BTF cross-check: `task_cred_off 0x820`. `timer_alloc 0x108`,
+  `timer_node_off 0x78`, `alloc_req_off 0x10` (bytes_req - call_site in
+  `trace_event_raw_kmem_cache_alloc`).
 - **F5** `selinux_state 0xffffffc08236a2e0` (`enforcing` @ +0),
-  `panic_on_warn 0xffffffc08211ae0c`, `root_user 0xffffffc08213ef50`,
-  `init_user_ns 0xffffffc08213f9c0`, `init_ucounts 0xffffffc082140cb0`,
+  `panic_on_warn 0xffffffc08211ae0c`, `root_user 0xffffffc08213f1e0`,
+  `init_user_ns 0xffffffc08213ef50`, `init_ucounts 0xffffffc082140cb0`,
   `init_groups 0xffffffc082140740`, `task_struct_cachep 0xffffffc082325990`,
-  `posix_timers_cache 0xffffffc08234c760`.
-- **F6** `selinux_blob_sizes{cred=24,...}` is the only cred-blob
-  contributor in ordered LSM init for this build (`capability, selinux,
-  bpf, integrity`; bpf lbs_cred 0, landlock absent) ->
-  `selinux_blob_off 0x0`. Conf `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf`
-  passes `validate_conf.py` (slab `0x2000` obj `0x108`: worst node
-  `0x1f68` cred_end `0x2078` spills/retry path, same class as OS3).
+  `posix_timers_cache 0xffffffc08234c760`. All 6 conf symbols match the
+  reconstructed vmlinux exactly.
+- **F6** `selinux_blob_sizes{cred=24,...}` is the only cred-blob contributor
+  in ordered LSM init for this build (`capability, selinux, bpf, integrity`;
+  bpf lbs_cred 0, landlock absent) -> `selinux_blob_off 0x0`. Conf
+  `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf` passes
+  `validate_conf.py` (slab `0x2000` obj `0x108`: worst node `0x1f68`
+  cred_end `0x2038` spills/retry path, same class as OS3; `alloc_req_off
+  0x10` matches BTF).
+- **F7–F11 / F14 (QEMU)** booted the real arm64 `Image` from this boot.img
+  in `qemu-system-aarch64` at 4K pages with
+  `android_arch_task_struct_size=512` and `slub_min_order=1`, using the
+  shipped aarch64 `timer` binary through `mass.py`. All gates PASS:
+  `slabinfo` (`posix_timers_cache` obj `0x108`/order 1, `task_struct` obj
+  `0x14c0` confirming the vendor extension),
+  `F7_target` (release/site `0xffffffc080195d50`),
+  `F8_ids` (`a=275 f=273 n=1029`), `F9_probe` (`recs=4096 kept=4096`,
+  base/page-pair agree), `F10_leak` (`made=512 votes=512`), and the
+  `F11_verify` zero-write endgame reaching `uid=0 euid=0 resuid=0/0/0`
+  with `ROOT_SHELL_OK`. Transcript: `timerroot-port/work/qemu/logs/mass-dada-os4.json`.
 
-Runtime gates not yet run for this build: **F7–F11** QEMU, **F12–F13**
-KernelSU manager smoke, **F14** mass-run inclusion pending workspace
-staging, **F15** hardware verification pending, **F16** doc update pending
-runtime evidence. Port status: static re-derivation complete (F1–F6),
-ready for QEMU/runtime re-evaluation.
+Runtime gates still pending for this build: **F12–F13** KernelSU manager
+smoke, **F15** hardware verification (needs a physical dada device). Port
+status: static re-derivation (F1–F6) and QEMU runtime (F7–F11, F14) complete;
+hardware/manager gates remain.
