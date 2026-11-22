@@ -233,6 +233,9 @@ auto-root/restart decisions. **Copy** puts the buffer on the clipboard;
   exploit already ran this boot.
 - **Install channel** — one-time persistent localhost ADB setup (see below).
 - **View auto-root log** — open the rotating auto-root history in the Log tab.
+- **View debug log** — open `/data/local/tmp/timer-debug.log` in the Log tab.
+  It carries the kernel boot parameters, resolved profile and this boot's
+  iteration decisions, and is captured automatically before every exploit run.
 
 **Boot screen**
 

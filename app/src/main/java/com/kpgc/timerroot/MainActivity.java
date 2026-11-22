@@ -377,11 +377,9 @@ public class MainActivity extends Activity {
                 compactButton("Run now", v -> confirmAutoRootNow()),
                 compactButton("Install channel", v -> installChannel())));
         body.addView(spacer(10));
-        body.addView(compactButton("View auto-root log", v -> {
-            addLog(AutoRoot.readLog(this).isEmpty() ? "auto-root log is empty"
-                    : AutoRoot.readLog(this));
-            showTab(1);
-        }));
+        body.addView(buttonRow(
+                compactButton("View auto-root log", v -> showAutoRootLog()),
+                compactButton("View debug log", v -> showDebugLog())));
         body.addView(spacer(12));
         body.addView(hintCard("Auto-root reruns the exploit once per real boot. "
                 + "Install the channel once so later boots can reach Shizuku without "
@@ -2283,23 +2281,32 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Opens the rotating auto-root history in the Log tab. */
+    private void showAutoRootLog() {
+        String log = AutoRoot.readLog(this);
+        addLog(log.isEmpty() ? "auto-root log is empty" : log);
+        showTab(1);
+    }
+
     /**
      * Opens the latest device-probe capture. The file lives on
      * /data/local/tmp, so the shell user service reads it (and can capture a
      * fresh one when none exists yet), then the text is shown on the Log tab.
+     * Binds the service first when needed, so the debug log is as reachable
+     * as the auto-root log.
      */
     private void showDebugLog() {
-        if (service == null) {
-            addLog("bind the service first");
-            return;
-        }
-        new Thread(() -> {
+        withService(() -> new Thread(() -> {
+            final IUserService svc = service;
+            if (svc == null) {
+                return;
+            }
             try {
-                String log = service.readDebugLog();
+                String log = svc.readDebugLog();
                 if (log == null || log.trim().isEmpty()) {
                     addLog("no device probe yet - capturing one now...");
-                    addLog(service.captureDebugLog());
-                    log = service.readDebugLog();
+                    addLog(svc.captureDebugLog());
+                    log = svc.readDebugLog();
                 }
                 final String text = log == null || log.trim().isEmpty()
                         ? "device debug log is empty (" + DeviceProbe.DEBUG_LOG + ")"
@@ -2311,16 +2318,40 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 addLog("device debug log failed: " + t);
             }
-        }).start();
+        }).start());
     }
 
     // ------------------------------------------------------------ plumbing
+
+    /** Runs {@code action} now, or after the user service binds. */
+    private void withService(Runnable action) {
+        if (service != null) {
+            action.run();
+            return;
+        }
+        if (!safePing()) {
+            showShizukuHelp();
+            return;
+        }
+        if (safePermission() != 0) {
+            try {
+                Shizuku.requestPermission(REQUEST_CODE);
+                toast("Grant Shizuku permission, then try again");
+            } catch (Throwable t) {
+                addLog("permission request failed: " + t);
+            }
+            return;
+        }
+        pendingServiceAction = action;
+        bindService();
+    }
 
     private void bindService() {
         try {
             Shizuku.bindUserService(serviceArgs(), connection);
             addLog("binding user service...");
         } catch (Throwable t) {
+            pendingServiceAction = null;
             addLog("bind failed: " + t);
         }
     }

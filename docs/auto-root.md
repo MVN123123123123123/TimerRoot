@@ -766,9 +766,11 @@ What it records:
 
 The capture runs **before** `openRoot()` / `timer fake` on every path —
 auto-root boot iteration, the manual *Get root shell* run, and the
-**Device debug log** button under *Settings -> Tools* (which also shows the
-log and captures one if none exists yet). Probing starts no exploit stage,
-so it cannot spend the one-shot trigger or park a process.
+**Device debug log** buttons under *Home -> Tools* and
+*Settings -> Auto-root -> View debug log* (which also show the log, capture
+one if none exists yet, and bind the shell user service if needed). Probing
+starts no exploit stage, so it cannot spend the one-shot trigger or park a
+process.
 
 Three logs have distinct jobs:
 
