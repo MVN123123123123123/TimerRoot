@@ -1762,6 +1762,32 @@ After the fix (scanner accepts `+0x310`, rebuilt binary md5
   limiting factor, not the geometry; parked zombies from misses require a
   reboot before another run (SKILL hard rule).
 
+#### Reclaim-burst timing fix (husky hardware report, 2026-11-22)
+
+A husky run with the same kernel/profile showed the shell stage winning on
+its first plant (`free at 85ms`, `burst hit=1 after 105ms`) while all three
+`fake_cred` plants missed.  The two useful signatures in that log were
+`free_seen=0 burst hit=0 after 15078ms` on two attempts (one of them after a
+3843ms PCP slabinfo wait) and `free_seen=1 burst hit=0` with the full
+162048-send budget spent on the third.
+
+Both come from the same place in `run_plant()`: the parent did not read
+`trace_pipe_raw` until `wait_zombie()` and the PCP slabinfo wait were over.
+During those waits the rings wrap, so either the victim's `mm_page_free` is
+lost (phase 2 waits its whole window and bursts after the page is gone) or
+the reclaim `page_alloc` is lost (a successful reclaim is scored as a miss
+and the zombie is never reaped).  The PCP slab drop was also only a
+confirmation: phase 2 still waited for a traced `mm_page_free` that these
+kernels need not emit.
+
+`p7a/timer_p7a.c` now starts a `reclaim_watcher` thread at `trace_start()`
+that drains all eight per-CPU rings continuously and keeps one ordered
+`free_seen -> hit` state for the whole plant.  For `pcp_free=1` profiles the
+slabinfo drop publishes `g_free_seen` itself, so the burst starts at the
+confirmed free rather than 14s later; the poll interval went 200ms -> 20ms.
+The final after-stop pass and the `free at` line are preserved.  Syntax
+checked with `gcc -fsyntax-only`; hardware F15 re-run is still pending.
+
 Two follow-ups from the same sweep, recorded in
 `timerroot-port/pixel/KERNELS.md`:
 

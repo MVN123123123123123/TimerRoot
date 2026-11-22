@@ -155,6 +155,9 @@ public class MainActivity extends Activity {
     private String selinux = "-";
     private String seccomp = "-";
 
+    /** Root-dependent Settings action; disabled until a uid-0 path exists. */
+    private MaterialButton installChannelButton;
+
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -389,9 +392,18 @@ public class MainActivity extends Activity {
                 "Run the exploit on every boot", (b, on) -> applyAutoRoot(on));
         body.addView(autoCard);
         body.addView(spacer(10));
+        installChannelButton = compactButton("Install channel", v -> installChannel());
+        // Single-color tints ignore setEnabled(false); give this button
+        // explicit disabled-state colors so the gate is visible to the user.
+        installChannelButton.setBackgroundTintList(new ColorStateList(
+                new int[][]{{-android.R.attr.state_enabled}, {}},
+                new int[]{cSurfaceContainerHighest, cSecondaryContainer}));
+        installChannelButton.setTextColor(new ColorStateList(
+                new int[][]{{-android.R.attr.state_enabled}, {}},
+                new int[]{cOnSurfaceVariant, cOnSecondaryContainer}));
         body.addView(buttonRow(
                 compactButton("Run now", v -> confirmAutoRootNow()),
-                compactButton("Install channel", v -> installChannel())));
+                installChannelButton));
         body.addView(spacer(10));
         body.addView(buttonRow(
                 compactButton("View auto-root log", v -> showAutoRootLog()),
@@ -399,7 +411,8 @@ public class MainActivity extends Activity {
         body.addView(spacer(12));
         body.addView(hintCard("Auto-root reruns the exploit once per real boot. "
                 + "Install the channel once so later boots can reach Shizuku without "
-                + "Wi-Fi; unlocking is still required."));
+                + "Wi-Fi; unlocking is still required. Install channel needs an "
+                + "active root shell or KernelSU - get root first."));
 
         addSection(body, "Boot screen");
         LinearLayout bootCard = card();
@@ -1203,8 +1216,21 @@ public class MainActivity extends Activity {
         refreshDetails();
     }
 
+    /**
+     * A uid-0 path is required for root-dependent actions. Install channel
+     * writes /data/property and /data/misc/adb: the exploit's shell root shell
+     * (rootOpen) or KernelSU's su (ksu=active) are the only supported ways.
+     * The service must also be bound, otherwise neither path can be used.
+     */
+    private boolean rootAvailable() {
+        return service != null && (rootOpen || "active".equals(ksu));
+    }
+
     private void applyDetails() {
         boolean active = rootOpen || "active".equals(ksu);
+        if (installChannelButton != null) {
+            installChannelButton.setEnabled(rootAvailable());
+        }
         if (statusCard != null) {
             statusCard.setBackground(cardBackground(
                     active ? cPrimaryContainer : cSurfaceContainer));
@@ -1536,8 +1562,11 @@ public class MainActivity extends Activity {
                 }
                 String out = service.openRoot();
                 // Only a real uid=0 shell counts; a failed attempt parks the
-                // exploit and prints diagnostics that must not look like success.
-                rootOpen = out.startsWith("root shell ready");
+                // exploit and prints diagnostics that must not look like
+                // success. A shell left over from an earlier run (activity
+                // recreated, service still bound) is still usable.
+                rootOpen = out.startsWith("root shell ready")
+                        || out.contains("root shell already open");
                 addLog(out);
                 ui.post(this::applyDetails);
                 if (rootOpen && samsung) {
@@ -2118,6 +2147,11 @@ public class MainActivity extends Activity {
             toast("Bind the service first");
             return;
         }
+        if (!rootAvailable()) {
+            toast("Get root first - Install channel needs a root shell or KernelSU");
+            addLog("install channel skipped: no root shell and KernelSU is not active");
+            return;
+        }
         final String key = AutoRoot.publicKeyLine(this);
         if (key == null) {
             toast("Could not create the ADB key");
@@ -2184,6 +2218,7 @@ public class MainActivity extends Activity {
                             || out.contains("root shell already open");
                     rootOpen = ready;
                     addLog(out);
+                    ui.post(this::applyDetails);
                     if (!ready) {
                         ui.post(() -> {
                             toast("Could not get a root shell - reboot and retry");

