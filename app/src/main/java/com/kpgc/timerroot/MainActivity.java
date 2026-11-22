@@ -66,9 +66,18 @@ public class MainActivity extends Activity {
      * targets a 6.12.69 OnePlus kernel and must not be used here: its timer
      * call site, cred layout and task offsets are all different.
      */
-    private static final String TIMER_URL =
+    static final String TIMER_URL =
             "https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/timer";
     private static final String TIMER_TARGET = "target=lynx";
+
+    /**
+     * Beta builds only (the beta workflow flips this to true): re-download and
+     * force-install the rolling beta timer on every run. The shell service
+     * keeps any installed protocol-3 binary, so an APK update alone cannot
+     * replace a binary that predates an exploit fix. Leave the source value
+     * false so main/stable builds never silently switch channels.
+     */
+    static final boolean AUTO_REFRESH_BETA = false;
 
     /*
      * Material You 3 color roles, resolved from the activity theme once at
@@ -104,6 +113,8 @@ public class MainActivity extends Activity {
     private boolean bound;
     private boolean rootOpen;
     private boolean downloading;
+    private boolean autoRefreshRunning;
+    private static boolean autoRefreshDone;
     private Runnable pendingServiceAction;
 
     private LinearLayout statusCard;
@@ -157,6 +168,7 @@ public class MainActivity extends Activity {
                 pendingServiceAction = null;
                 ui.post(action);
             }
+            maybeAutoRefreshBeta();
         }
 
         @Override
@@ -223,7 +235,11 @@ public class MainActivity extends Activity {
         updateAutoRootUi();
         updateUpdateUi();
         maybeAutoCheckUpdates();
-        if (safePing() && safePermission() == 0) {
+        if (AUTO_REFRESH_BETA) {
+            /* Beta builds bind through the refresh path (it retries from
+             * onServiceConnected); avoid a second bindUserService call here. */
+            maybeAutoRefreshBeta();
+        } else if (safePing() && safePermission() == 0) {
             bindService();
         }
     }
@@ -1340,6 +1356,44 @@ public class MainActivity extends Activity {
                 ui.post(() -> toast("prepare failed: " + t));
             }
         }).start();
+    }
+
+    /**
+     * Beta-channel only: pull the rolling beta asset once per app process and
+     * force-install it before any exploit stage can run. Silent on purpose -
+     * no permission prompt, no toast - because this runs at startup. If
+     * Shizuku is not ready yet the service-connected callback retries; if it
+     * never is, the manual Download/Prepare actions still work.
+     */
+    private void maybeAutoRefreshBeta() {
+        if (!AUTO_REFRESH_BETA || autoRefreshDone || autoRefreshRunning) {
+            return;
+        }
+        if (downloading) {
+            return; // a manual download owns /data/local/tmp/timer right now
+        }
+        if (!safePing() || safePermission() != 0) {
+            return;
+        }
+        if (service == null) {
+            if (!bound) {
+                bindService();
+            }
+            return; // onServiceConnected() calls us again
+        }
+        autoRefreshDone = true;
+        autoRefreshRunning = true;
+        final IUserService svc = service;
+        addLog("beta binary auto-refresh: downloading " + TIMER_URL);
+        new Thread(() -> {
+            BetaBinaryRefresh.Result result =
+                    BetaBinaryRefresh.refresh(this, svc, TIMER_URL);
+            ui.post(() -> {
+                addLog(result.message);
+                autoRefreshRunning = false;
+                refreshDetails();
+            });
+        }, "beta-binary-refresh").start();
     }
 
     /**

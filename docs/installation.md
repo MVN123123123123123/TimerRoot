@@ -79,6 +79,14 @@ as it speaks this app's protocol, so a binary fetched with **Download exploit**
 is never replaced by an older copy bundled in the APK. Press **Prepare
 binary** explicitly to go back to the bundled build.
 
+**Beta builds only** (`beta-test` channel): the app re-downloads the rolling
+`beta/timer` asset and force-installs it once per app process start, and again
+before each auto-root boot run. This exists because a stale protocol-3 binary
+can otherwise survive an APK update indefinitely. The refresh is silent and
+best effort: a failed download leaves the current binary in place and is
+recorded in the app log and the device debug log. Stable builds keep the
+"newer download wins" behaviour above.
+
 A binary whose target check fails is rejected before anything touches the
 kernel.
 

@@ -164,8 +164,14 @@ jobs:
           set -euo pipefail
           f=app/src/main/java/com/kpgc/timerroot/MainActivity.java
           sed -i 's#/releases/download/bingchiling/timer#/releases/download/beta/timer#' "$f"
+          # Every beta run force-installs the newest beta asset. Without this
+          # the shell service keeps a stale protocol-3 binary across app
+          # updates, which is indistinguishable by the protocol marker.
+          sed -i 's/AUTO_REFRESH_BETA = false/AUTO_REFRESH_BETA = true/' "$f"
           grep -q '/releases/download/beta/timer' "$f"
           ! grep -q '/releases/download/bingchiling/timer' "$f"
+          grep -q 'AUTO_REFRESH_BETA = true' "$f"
+          ! grep -q 'AUTO_REFRESH_BETA = false' "$f"
 
       # The beta release is a prerelease, so /releases/latest still resolves to
       # the stable one. Point the update check at the fixed beta tag too, or a

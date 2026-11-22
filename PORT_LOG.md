@@ -1945,3 +1945,14 @@ Runtime gates still pending for this build: **F12–F13** KernelSU manager
 smoke, **F15** hardware verification (needs a physical dada device). Port
 status: static re-derivation (F1–F6) and QEMU runtime (F7–F11, F14) complete;
 hardware/manager gates remain.
+
+**First hardware attempt (2026-11-21, uid 2000):** failed with the pre-fix
+binary staged (`sha256 1da4329d…`, 2,144,472 bytes). `timer-shell-dada-OS4-1.log`
+shows `plant attempt 1/3`, `free_seen=1 burst hit=1`, `plant1 reaped status=0x9`,
+`cred writes landed`, then `[child] woke uid=2000` / `cred writes did not
+land` — the exact signature reproduced in QEMU before commit `97f1d71`.
+`timer_last-dada-OS4-1.log` stops after the profile line (dirty device; reboot
+required between attempts). The beta workflow now force-refreshes the rolling
+beta asset (`plant attempt %d/6`) on every app run and every auto-root boot,
+because the shell service keeps a stale protocol-3 binary across APK updates.
+F15 re-run with the refreshed binary is still pending.

@@ -534,6 +534,20 @@ public class AutoRootService extends Service {
             return "root shell ready; " + ksu;
         }
 
+        /*
+         * Beta builds only: force-refresh the binary before install()/probe so
+         * the probe records the hash that actually runs. Best effort - a bad
+         * network at locked boot must not stop auto-root from using the copy
+         * already on the device.
+         */
+        String refreshed = null;
+        if (MainActivity.AUTO_REFRESH_BETA) {
+            BetaBinaryRefresh.Result result =
+                    BetaBinaryRefresh.refresh(this, service, MainActivity.TIMER_URL);
+            refreshed = result.message;
+            log(refreshed);
+        }
+
         String installed = service.install(getPackageCodePath());
         log(installed);
         if (!installed.startsWith("installed")) {
@@ -547,6 +561,11 @@ public class AutoRootService extends Service {
          */
         try {
             log(service.captureDebugLog());
+            /* The probe truncates the debug log; keep the refresh line next to
+             * the spec so a pulled log shows which binary was about to run. */
+            if (refreshed != null) {
+                service.appendDebugLog(refreshed);
+            }
         } catch (Throwable t) {
             log("device probe failed: " + t);
         }
