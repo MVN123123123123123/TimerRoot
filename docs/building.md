@@ -137,8 +137,12 @@ replaced. The app fetches
 Add one `conf/<release>.conf` (or `conf/samsung/*.conf`, or `conf/dirty/*.conf`)
 and rebuild the app; the asset sync picks it up automatically. No Java or C
 change is needed. The profile must be derived from the exact factory
-`boot.img`/`vendor_boot.img`; use [SKILL.md](../SKILL.md) for the F1-F16
-procedure and record the evidence in [PORT_LOG.md](../PORT_LOG.md).
+`boot.img`/`vendor_boot.img`.
+
+For a readable walkthrough of the whole process see
+[Porting a kernel](porting.md). Use [SKILL.md](../SKILL.md) for the F1-F16
+procedure (scripts, disassembly patterns, cross-checks and diagnostics) and
+record the evidence in [PORT_LOG.md](../PORT_LOG.md).
 
 Before shipping a profile, run its parser and invariants:
 
