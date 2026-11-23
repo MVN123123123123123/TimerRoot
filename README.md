@@ -9,6 +9,8 @@ gives a root shell in the shell domain, then late-loads **KernelSU**
 
 **recommends using [Shizuku Next](https://github.com/rushiranpise/Shizuku-Next) for Auto root operation.**
 
+**When having problems, read debug log [here](docs/images/Device-debug-button.png)**
+
 ![TimerRoot status screen](docs/images/status.png)
 
 ## Overview
