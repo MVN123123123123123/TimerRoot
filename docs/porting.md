@@ -355,9 +355,21 @@ Boot parameters are derived, not guessed:
 
 The conf's `slab_order` / `slab_size` are a **hint**, not a fixed truth: SLUB
 derives the real order from the phone's possible-CPU count, which can differ
-from the QEMU boot. The binary votes orders 0–3 from the trace records and, on
-a clear win, overrides the profile and logs `slab geometry mismatch … using
-device geometry`. Record the `[base] … order=… size=…` line as a finding.
+from the QEMU boot. The binary reads `/proc/slabinfo` first — the
+`pagesperslab` column of `posix_timers_cache` gives the order directly — and
+logs either `slab geometry confirmed by slabinfo` or `slab geometry mismatch …
+using slabinfo geometry`. Record the `[base] … order=… size=…` line as a
+finding.
+
+Do not trust the page-event vote by itself. It only sees slabs created inside
+its capture window, so a warm cache (a second run in the same boot) allocates
+almost nothing and the vote collapses to the wrong order — `count=31 order=0`
+on a device whose real geometry is order 1 with 31 objects. That halves
+`slab_size`, which puts the fake cred in the other half of the block and makes
+the spray cover only the half without the stale node: root fails while every
+"hit" and "reaped" line still looks successful. Calibration now drains the
+free objects slabinfo reports before measuring, and a plant whose victim
+offset is not a multiple of `timer_alloc` is rejected and retried.
 
 Run the gates in order and keep the log:
 

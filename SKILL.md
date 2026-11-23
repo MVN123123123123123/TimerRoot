@@ -95,13 +95,44 @@ accepted by `--selfcheck`); `slab_order = 1`, `slab_size = 8192` at 4K;
 `fullcap = 0x1ffffffffff` unless `CAP_LAST_CAP` changed;
 `selinux_sid_kernel = 1`.
 
-Runtime correction: `slab_order`/`slab_size` in the conf are a **hint**. SLUB
-derives the real order from the device's possible-CPU count, so a phone can
-differ from the QEMU boot used to validate the profile. `calibrate_base()`
-votes orders 0–3 from the trace records and, with ≥4 votes, overrides the
-conf and logs `[!] slab geometry mismatch: conf order=… device order=…;
-using device geometry`. Treat that line as a finding to investigate and
-record — not as a reason to edit the conf blindly.
+Runtime correction: `slab_order`/`slab_size` in the conf are a **hint**, and
+`/proc/slabinfo` is the **authority**. SLUB derives the real order from the
+device's possible-CPU count, so a phone can differ from the QEMU boot used to
+validate the profile. `posix_timers_cache`'s `pagesperslab` column states the
+order outright (`2` pages → order 1 → 8K).
+
+`/proc/slabinfo` is world-readable (`0444`) on the Android kernels handled
+here, so the shell domain **can** read it — verified in the field probe
+(`uid=2000` printing `posix_timers_cache 248 248 264 31 2`). That matters
+because the tracefs metadata next to it is *not* readable
+(`events/.../enable: Permission denied`), so slabinfo is the only
+unprivileged way to see the geometry. Some hardened kernels ship it `0400`
+instead; then the binary falls back to deriving the order from the periodicity
+of the captured timer addresses (`derive_order_from_ptrs`), which needs no
+slabinfo and no root either. `calibrate_base()` reads it
+first and logs either `[+] slab geometry confirmed by slabinfo: order=… size=…
+obj=… per=…` or `[!] slab geometry mismatch: conf order=… slabinfo order=…
+(…); using slabinfo geometry`. Record that line.
+
+Do **not** rely on the page-event vote alone. It pairs a slab with the
+`mm_page_alloc` that created it, so it only sees slabs allocated inside the
+capture window — and a warm cache (any second run in one boot) serves
+`timer_create()` from free objects in existing slabs and allocates almost
+nothing. The observed signature is a working cold run voting
+`count=483 order=1` and every later run voting `count=31 order=0`, which
+halves `SLAB_SIZE` and breaks the attack in two independent ways:
+
+- the fake cred is built at `V & 0x0fff`, half a slab away from the node the
+  kernel will actually erase (the object sits at `0x19c8`, not `0x09c8`), so
+  the stale node is never overwritten and the child keeps its old uid even
+  though the plant reports `hit=1`/`reaped`;
+- the spray sends 4K skbuffs, so a 4K page alloc at the head of the freed 8K
+  block only ever covers the first half — the half without the node.
+
+`calibrate_base()` therefore drains the free objects reported by slabinfo
+before measuring, restoring the cold profile. `run_plant()` additionally
+rejects a victim whose in-slab offset is not a multiple of `timer_alloc` and
+retries, so a wrong geometry fails loudly instead of writing elsewhere.
 
 16K-page builds keep the same family values but override `page_size = 16384`,
 `page_shift = 14`, `slab_order = 0`, `slab_size = 16384`, and a different
@@ -545,7 +576,9 @@ Grep the log; each line maps to one cause.
 | `KSU_MISSING` | no manager / `ksu_kmi` wrong | fix `ksu_kmi` |
 | `conf release prefix mismatch` | banner ≠ profile | correct port or new conf — never bypass |
 | `plant n left child uid=…; retrying` | reaped but the stale erase missed the payload (free landed late) | expected; fresh-pool retry handles it — check spray/timing if all 6 fail |
-| `[!] slab geometry mismatch: conf order=… device order=…` | SLUB chose a different order than the conf | calibration used device geometry; check `slub_min_order`, record the finding |
+| `[!] slab geometry mismatch: conf order=… slabinfo order=…` | SLUB chose a different order than the conf | calibration used the slabinfo geometry; record the finding and, if it is stable, write the real `slab_order`/`slab_size` into the conf |
+| `victim offset … is not a multiple of timer_alloc` | `slab_size` is not the kernel's real slab size, so the object sits in the other half of the block | trust `[+] slab geometry confirmed by slabinfo`; if the conf and slabinfo disagree, fix the conf |
+| `slabinfo unreadable; address periodicity says order=…` | `/proc/slabinfo` is `0400` on this kernel | the order was derived from the timer addresses; confirm it matches the conf or fix the conf |
 | `OLD_APP_DETECTED` / `TIMER_PROTOCOL=3` | app/binary protocol mismatch, or binary started without `--conf` | update app / refresh binary; pass `--conf … --protocol 3` |
 | `resuid=0/0/0` in QEMU | harness ran as root, so F11 proved nothing | drop to uid 2000 with `runhigh` and re-run |
 | `no KASLR slide` on `fake` | slide missing before the first endgame write | `calibrate_base()` must store `g_slide` from `site0`; re-run probe |

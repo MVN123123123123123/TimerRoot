@@ -1675,6 +1675,21 @@ public class MainActivity extends Activity {
                         break;
                     }
                     /*
+                     * The fake-cred stage gave up before ksud could run: the
+                     * child never reached euid 0, so the credential swap did
+                     * not land.  Check this before the generic "parked"
+                     * branch, which would otherwise blame ksud for a failure
+                     * that happened during the exploit's own writes.
+                     */
+                    if (tail.contains("child did not reach euid 0")
+                            || tail.contains("fake cred write failed")
+                            || tail.contains("no KASLR slide")) {
+                        failure = "the fake credential did not take effect, so"
+                                + " ksud never ran - see the plant/stage lines"
+                                + " in the log";
+                        break;
+                    }
+                    /*
                      * The exploit parent always parks (and says so) once the
                      * stage is done, even when the late-load succeeded - the
                      * line alone means nothing. What matters is whether the

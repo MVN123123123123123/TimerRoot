@@ -1982,3 +1982,73 @@ required between attempts). The beta workflow now force-refreshes the rolling
 beta asset (`plant attempt %d/6`) on every app run and every auto-root boot,
 because the shell service keeps a stale protocol-3 binary across APK updates.
 F15 re-run with the refreshed binary is still pending.
+
+**Second hardware attempt (2026-11-23, kernel root then KernelSU load fails):**
+the zero-write endgame succeeded (`[child] woke uid=0`, `resuid=0/0/2000`,
+`root shell ready`), then every `fake` stage failed with
+`[+] plant1 free_seen=1 burst hit=1` / `plant1 reaped status=0x9` followed by
+`[child] woke uid=2000 euid=2000 mode=fake` and
+`[fake] worker setuid(0)=-1 errno=1`. The app reported
+`the exploit parked before loading ksud`, which blames ksud for a failure that
+happened before it ran.
+
+Root cause is **slab geometry, not the fake-cred trail**. `[base]` in the same
+log tells it:
+
+```
+13:42:18  [base] ... count=483 order=1 size=0x2000   <- zero stage, works
+13:42:20  [base] ... count=31  order=0 size=0x1000   <- every fake stage
+```
+
+`posix_timers_cache` on this device is `248 248 264 31 2` in `/proc/slabinfo`:
+object 264, **31 objects, 2 pages** — order 1, 8K, which is what the conf says.
+The order-0 vote is an artefact of the vote itself: it pairs a slab with the
+`mm_page_alloc` that created it, so it only sees slabs allocated inside the
+capture window. Once an earlier run has warmed the cache, `timer_create()`
+serves free objects from existing slabs, almost nothing is allocated, and the
+vote collapses. Cross-checking every victim pointer in the log against both
+geometries:
+
+| run | victim | offset in used slab | `% timer_alloc` | offset in 8K slab |
+|---|---|---|---|---|
+| 13:42:18 zero | `…27c8ef78` | `0x0f78` | 0 | `0x0f78` |
+| 13:42:20 fake | `…6d8ab9c8` | `0x09c8` | **128** | `0x19c8` |
+| 13:43:16 fake | `…18a29080` | `0x0080` | **128** | `0x1080` |
+
+So with `slab_size = 0x1000` the payload is built at `V & 0x0fff`, half a slab
+away from the object the kernel erases at `0x19c8`, and the 4K skbuffs only
+ever cover the half without the node. The stale node is never overwritten, the
+erase finds zeroes, and the child keeps uid 2000 while every
+`hit=1`/`reaped status=0x9` line still looks healthy.
+
+Fixes:
+- `slabinfo_geometry()` reads `posix_timers_cache`'s `pagesperslab` and makes
+  it authoritative (`[+] slab geometry confirmed by slabinfo: order=1
+  size=0x2000 obj=264 per=31`), overriding a disagreeing conf. The vote is now
+  only used for the linear-map base.
+- `calibrate_base()` drains the free objects slabinfo reports before
+  measuring, so the vote sees a cold cache again.
+- `vote_base()` no longer silently drops votes past the 64th distinct key.
+- `run_plant()` rejects a victim whose in-slab offset is not a multiple of
+  `timer_alloc` and retries, with a base fallback so calibration cannot hard-fail.
+- The app now reports `the fake credential did not take effect, so ksud never
+  ran` instead of blaming ksud.
+
+QEMU re-run on the identical 6.6.118 dada Image: `slab geometry confirmed by
+slabinfo: order=1 size=0x2000 obj=264 per=31`, `[base] count=512 order=1`,
+`child report uid=0 euid=0 setuid(0)=0 resuid=0/0/0`, `ROOT_SHELL_OK`.
+Hardware re-test still pending.
+
+**Why `/proc/slabinfo` is a usable oracle without root:** it is mode `0444` on
+this kernel, so the shell domain reads it. The field probe in
+`timerroot-port/timer-debug.log` proves it — it ran as `uid=2000` and printed
+`posix_timers_cache 248 248 264 31 2`, the line that settles the geometry.
+Note the contrast in the same probe: `/sys/kernel/tracing/events/timer/...`
+returns `Permission denied`, which is exactly why the geometry must come from
+slabinfo rather than from tracing metadata. The exploit already depended on
+this (`slab_usage()`, `slab_active()`), and the log's `[slab] pre-exec
+active=…` lines are those calls succeeding as uid 2000. For kernels that ship
+slabinfo `0400`, `derive_order_from_ptrs()` recovers the order from address
+periodicity alone: on the 11 victim addresses above it scores order 1 at
+11/11 aligned (31 objects/slab) against 5/11 for order 0, so the fallback
+reaches the same answer with no slabinfo and no root.
