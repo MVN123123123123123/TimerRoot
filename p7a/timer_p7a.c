@@ -684,8 +684,11 @@ static void slab_usage(const char *tag)
 /*
  * Read the *real* geometry of posix_timers_cache from /proc/slabinfo.
  *
- * This is the authoritative source and it is readable from the shell domain,
- * unlike the tracefs metadata.  The slabinfo columns are
+ * This is the authoritative source when the shell can read it.  The
+ * kernel normally creates slabinfo 0400; Android may relax it to 0440
+ * root:log, but shell access also needs supplementary gid log and an
+ * SELinux allow for proc_slabinfo.  Tracefs metadata is a separate,
+ * commonly denied path.  The slabinfo columns are
  *   name active_objs num_objs objsize objperslab pagesperslab
  * so pagesperslab alone fixes the SLUB order, no voting required.
  *
@@ -776,8 +779,9 @@ static long slab_free_objects(void)
 
 /*
  * Derive posix_timers_cache's SLUB order from timer allocation addresses
- * alone, for the case where /proc/slabinfo is unreadable (some hardened
- * kernels ship it as 0400).  No root is involved either way: this uses only
+ * alone, for the case where /proc/slabinfo is unreadable (the kernel creates
+ * it 0400 and Android may not relax the DAC mode for shell).  No root is
+ * involved either way: this uses only
  * the shell-domain trace records the exploit already reads.
  *
  * The lowest set bit of a slab address is NOT the order: SLUB keeps the
@@ -1554,8 +1558,8 @@ static unsigned long long calibrate_base(unsigned char *raw)
                  (unsigned long long)TIMER_ALLOC);
         /*
          * No slabinfo: derive the order from the captured addresses instead
-         * of trusting a vote.  This keeps the run working on a kernel that
-         * hides /proc/slabinfo behind 0400, which needs no root either way.
+         * of trusting a vote.  This keeps the run working when userspace
+         * leaves the file 0400 or another access-chain link denies shell.
          */
         if (!have_si && c > 0)
         {

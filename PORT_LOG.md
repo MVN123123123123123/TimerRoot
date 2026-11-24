@@ -2034,21 +2034,52 @@ Fixes:
 - The app now reports `the fake credential did not take effect, so ksud never
   ran` instead of blaming ksud.
 
-QEMU re-run on the identical 6.6.118 dada Image: `slab geometry confirmed by
-slabinfo: order=1 size=0x2000 obj=264 per=31`, `[base] count=512 order=1`,
-`child report uid=0 euid=0 setuid(0)=0 resuid=0/0/0`, `ROOT_SHELL_OK`.
-Hardware re-test still pending.
+QEMU re-run on the identical OS3 6.6.118 dada Image (2026-11-24) passed as
+`uid=2000`: `runhigh: uid=2000 euid=2000 gid=2000`, slabinfo geometry
+`order=1 size=0x2000 obj=264 per=31`, `[base] count=512 order=1`, and
+`child report uid=0 euid=2000 setuid(0)=0 resuid=0/0/2000` + `ROOT_SHELL_OK`.
+The fake stage reached `[child] woke uid=0 euid=0 mode=fake` and
+`[fake] worker setuid(0)=0`; `KSU_MISSING` is expected because the initramfs has
+no manager. The stock initramfs leaves kernel-created slabinfo `0400`, so it
+also exercised the address-periodicity fallback. A second, audit-only
+initramfs exposed slabinfo to uid 2000 and exercised the authoritative read and
+both endgames. Evidence: `logs/mass-dada-os3-uid2000-20261124.json` and
+`logs/dada-os3-uid2000-{zero,fake}{,-slabinfo}-20261124.log`.
 
-**Why `/proc/slabinfo` is a usable oracle without root:** it is mode `0444` on
-this kernel, so the shell domain reads it. The field probe in
-`timerroot-port/timer-debug.log` proves it — it ran as `uid=2000` and printed
-`posix_timers_cache 248 248 264 31 2`, the line that settles the geometry.
-Note the contrast in the same probe: `/sys/kernel/tracing/events/timer/...`
-returns `Permission denied`, which is exactly why the geometry must come from
-slabinfo rather than from tracing metadata. The exploit already depended on
-this (`slab_usage()`, `slab_active()`), and the log's `[slab] pre-exec
-active=…` lines are those calls succeeding as uid 2000. For kernels that ship
-slabinfo `0400`, `derive_order_from_ptrs()` recovers the order from address
-periodicity alone: on the 11 victim addresses above it scores order 1 at
+The beta workflow for fix commit `5adcee3` also completed successfully
+(run `45316418891`). Its `timer` asset is 2,164,208 bytes, sha256
+`1ece3a4c7d9853128d6727dafbfc2a6170df8dcca0e35f2af938c36d19142dc2`, and its
+`.text` is byte-identical to the locally rebuilt binary used for these QEMU
+replays. The later source edits only correct comments; the rebuilt tracked
+`p7a/timer_p7a` is an NDK r29 build of the current source,
+2,153,512 bytes, sha256
+`c9706844bfd0a4567123fd3652512a1eabe7b0833c04f689d13280e6697571f0`, with
+the same `.text`. Hardware re-test on the affected Android 15 device is still
+pending.
+
+**Why `/proc/slabinfo` can be a usable oracle without root:** the Linux
+kernels inspected here create it `root:root 0400`; Android userspace may then
+apply `chown root log /proc/slabinfo` and `chmod 0440 /proc/slabinfo`. The Xiaomi
+`dada` OS4 field probe proves effective access for that exact build: it ran as
+`uid=2000` with supplementary `gid=1007(log)` under enforcing SELinux and printed
+`posix_timers_cache 248 248 264 31 2`. The probe did not record the inode mode,
+label or init rule. A separate live Pixel 7a (`lynx`, Android 17) reference
+recorded all four links: `root:log 0440`, label
+`u:object_r:proc_slabinfo:s0`, supplementary gid 1007, and a loaded policy
+allowing `shell proc_slabinfo:file read`; its matching system `init.rc` contains
+the DAC pair. That Pixel evidence is a reference, not proof of the Xiaomi init
+configuration. All four links — kernel mode, later userspace DAC change, shell
+group, and SELinux label/rule — matter. The contrast in the Xiaomi probe is
+`/sys/kernel/tracing/events/timer/...` returning `Permission denied`, which is
+exactly why geometry must come from slabinfo rather than tracing metadata.
+The exploit already depended on this (`slab_usage()`, `slab_active()`), and the
+log's `[slab] pre-exec active=…` lines are those calls succeeding as uid 2000.
+If any link is absent, `derive_order_from_ptrs()` recovers the order from
+address periodicity alone: on the 11 victim addresses above it scores order 1 at
 11/11 aligned (31 objects/slab) against 5/11 for order 0, so the fallback
-reaches the same answer with no slabinfo and no root.
+reaches the same answer with no slabinfo and no root. See
+[the factory-image audit](docs/slabinfo-access-audit.md) for which images prove
+each link and which remain inconclusive. That audit confirms the exact Pixel 9a
+`tegu` CP3A.261005.005 factory set statically, including its product
+`system.img`; the remaining offline-only sets are inconclusive, and none is
+unsupported.

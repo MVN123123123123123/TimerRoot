@@ -1,7 +1,7 @@
 ---
 name: timerroot-kernel-port
 description: Port the TimerRoot exploit (CVE-2026-98260, POSIX CPU timer UAF) to a new arm64 Android/GKI kernel. Re-derive the per-build constants from the factory vmlinux (kallsyms + BTF), write a conf/ profile, validate it statically, then prove it in QEMU and on the device. Use when asked to port, retarget, add a profile for, or re-derive TimerRoot for another kernel build.
-version: 4.1
+version: 4.2
 applies_to: [arm64]
 reference_impl: MVN123123123123123/TimerRoot, p7a/timer_p7a.c
 ---
@@ -96,23 +96,28 @@ accepted by `--selfcheck`); `slab_order = 1`, `slab_size = 8192` at 4K;
 `selinux_sid_kernel = 1`.
 
 Runtime correction: `slab_order`/`slab_size` in the conf are a **hint**, and
-`/proc/slabinfo` is the **authority**. SLUB derives the real order from the
-device's possible-CPU count, so a phone can differ from the QEMU boot used to
-validate the profile. `posix_timers_cache`'s `pagesperslab` column states the
-order outright (`2` pages → order 1 → 8K).
+`/proc/slabinfo` is the **authority when the shell can read it**. SLUB derives
+the real order from the device's possible-CPU count, so a phone can differ from
+the QEMU boot used to validate the profile. `posix_timers_cache`'s
+`pagesperslab` column states the order outright (`2` pages → order 1 → 8K).
 
-`/proc/slabinfo` is world-readable (`0444`) on the Android kernels handled
-here, so the shell domain **can** read it — verified in the field probe
-(`uid=2000` printing `posix_timers_cache 248 248 264 31 2`). That matters
-because the tracefs metadata next to it is *not* readable
-(`events/.../enable: Permission denied`), so slabinfo is the only
-unprivileged way to see the geometry. Some hardened kernels ship it `0400`
-instead; then the binary falls back to deriving the order from the periodicity
-of the captured timer addresses (`derive_order_from_ptrs`), which needs no
-slabinfo and no root either. `calibrate_base()` reads it
-first and logs either `[+] slab geometry confirmed by slabinfo: order=… size=…
-obj=… per=…` or `[!] slab geometry mismatch: conf order=… slabinfo order=…
-(…); using slabinfo geometry`. Record that line.
+Do **not** assume slabinfo is world-readable. The Linux kernels inspected here
+create it as `root:root 0400`; Android userspace commonly relaxes it later to
+`root:log 0440`. A normal `adb shell` can then read it only if `adbd` grants the
+shell supplementary group `log` (gid 1007) **and** the enforcing SELinux policy
+labels `/slabinfo` as `proc_slabinfo` and allows `shell` to read that type.
+These are independent requirements; neither a `ueventd.rc` rule nor a matching
+`init.rc` rule proves the complete access chain. Audit `boot`, `init_boot`
+(Android 13+), `vendor_boot`, and the matching system image; call incomplete
+sets **inconclusive**. See
+[the factory-image audit](docs/slabinfo-access-audit.md).
+
+When slabinfo is readable, `calibrate_base()` reads it first and logs either
+`[+] slab geometry confirmed by slabinfo: order=… size=… obj=… per=…` or
+`[!] slab geometry mismatch: conf order=… slabinfo order=… (…); using slabinfo
+geometry`. Record that line. When DAC, groups, or SELinux deny access, the
+binary falls back to deriving the order from the periodicity of captured timer
+addresses (`derive_order_from_ptrs`), which needs neither slabinfo nor root.
 
 Do **not** rely on the page-event vote alone. It pairs a slab with the
 `mm_page_alloc` that created it, so it only sees slabs allocated inside the
@@ -193,6 +198,13 @@ harness in `work/qemu/` — PORT_LOG.md uses the absolute paths). Keep extracted
 | `vmlinux-to-elf` | kallsyms ELF when `nm` on the bare vmlinux comes up short |
 | `derive.py`, `sitecheck.py`, `blobsim2.py`, `evidence.py` | step 2 |
 | `validate_conf.py` | step 4 |
+
+Keep `init_boot.img` too on Android 13+; init moved there. For an access audit,
+decode the policy in `vendor_boot`, inspect `adbd`'s compiled groups, disassemble
+the factory kernel's `slab_proc_init`, and read the **matching** system
+`init.rc`. Never infer the final DAC mode from `ueventd.rc` alone. If any
+artifact is missing, record the access chain as inconclusive rather than
+assuming the common `0440 root:log` configuration.
 
 ```sh
 nm vmlinux | wc -l                       # symbols must exist; else vmlinux-to-elf
@@ -578,7 +590,7 @@ Grep the log; each line maps to one cause.
 | `plant n left child uid=…; retrying` | reaped but the stale erase missed the payload (free landed late) | expected; fresh-pool retry handles it — check spray/timing if all 6 fail |
 | `[!] slab geometry mismatch: conf order=… slabinfo order=…` | SLUB chose a different order than the conf | calibration used the slabinfo geometry; record the finding and, if it is stable, write the real `slab_order`/`slab_size` into the conf |
 | `victim offset … is not a multiple of timer_alloc` | `slab_size` is not the kernel's real slab size, so the object sits in the other half of the block | trust `[+] slab geometry confirmed by slabinfo`; if the conf and slabinfo disagree, fix the conf |
-| `slabinfo unreadable; address periodicity says order=…` | `/proc/slabinfo` is `0400` on this kernel | the order was derived from the timer addresses; confirm it matches the conf or fix the conf |
+| `slabinfo unreadable; address periodicity says order=…` | shell lacks DAC permission/supplementary `log`, or SELinux denies `proc_slabinfo` (the kernel normally creates the file `0400`) | the order was derived from timer addresses; audit the complete access chain and confirm the derived order matches the conf |
 | `OLD_APP_DETECTED` / `TIMER_PROTOCOL=3` | app/binary protocol mismatch, or binary started without `--conf` | update app / refresh binary; pass `--conf … --protocol 3` |
 | `resuid=0/0/0` in QEMU | harness ran as root, so F11 proved nothing | drop to uid 2000 with `runhigh` and re-run |
 | `no KASLR slide` on `fake` | slide missing before the first endgame write | `calibrate_base()` must store `g_slide` from `site0`; re-run probe |

@@ -134,8 +134,11 @@ Log the banner, fingerprint, page size and the call sequence.
 
 From the factory image of that exact build:
 
-1. Get `payload.bin` / `boot.img` (and `vendor_boot.img`, `dtbo.img` when you
-   need the vendor command line).
+1. Get `payload.bin` / `boot.img` (and `init_boot.img` on Android 13+,
+   `vendor_boot.img`, `dtbo.img` when you need the vendor command line). To audit
+   unprivileged slabinfo access, also keep the matching system image: Pixel
+   factory boot ramdisks contain recovery-style init files, not the platform
+   `system/etc/init/hw/init.rc` that changes slabinfo's DAC mode.
 2. Unpack `boot.img` and extract the raw kernel `Image` and the `vmlinux` with
    symbols.
 3. Extract the `.BTF` section:
@@ -355,11 +358,16 @@ Boot parameters are derived, not guessed:
 
 The conf's `slab_order` / `slab_size` are a **hint**, not a fixed truth: SLUB
 derives the real order from the phone's possible-CPU count, which can differ
-from the QEMU boot. The binary reads `/proc/slabinfo` first — the
+from the QEMU boot. The binary reads `/proc/slabinfo` first when it can — the
 `pagesperslab` column of `posix_timers_cache` gives the order directly — and
 logs either `slab geometry confirmed by slabinfo` or `slab geometry mismatch …
 using slabinfo geometry`. Record the `[base] … order=… size=…` line as a
-finding.
+finding. Do not assume slabinfo is world-readable: the inspected kernels create
+it `0400`, and Android commonly changes it to `0440 root:log`. Shell access then
+also requires supplementary gid `log` and an SELinux label/rule that permits
+`shell` to read `proc_slabinfo`; see
+[the factory-image audit](slabinfo-access-audit.md). If any link is missing,
+record `slabinfo unreadable` and the geometry derived from timer addresses.
 
 Do not trust the page-event vote by itself. It only sees slabs created inside
 its capture window, so a warm cache (a second run in the same boot) allocates
