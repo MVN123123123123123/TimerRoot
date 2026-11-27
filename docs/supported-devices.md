@@ -12,6 +12,7 @@ Status legend:
 |---|---|
 | **tested** | Run on physical hardware. |
 | **verified in QEMU** | The shipped aarch64 binary ran against that factory kernel in `qemu-system-aarch64`, through `target`, `ids`, `probe`, `leak` and `verify` (F7-F11). The kernel is real; userspace, SELinux policy and KernelSU are not, so this does not replace a hardware run. |
+| **unsupported by configuration** | The profile is complete and passes F1–F10 (including the QEMU `target`/`ids`/`probe`/`leak` gates), but the factory kernel's embedded config lacks `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`. Without it the fired timer is expired inline in tick/IRQ context, so the exit path never dequeues the stale node and F11 cannot land a write. No conf change fixes it. |
 | **untested** | Profile exists but has not been run, or not even booted in QEMU (see the per-family notes). |
 
 
@@ -252,17 +253,12 @@ Full F1–F11 evidence is in [`PORT_LOG.md`](../PORT_LOG.md).
 | Redmi Note 13 Pro+ 5G | `zircon` | `OS3.0.305.0.WNOCNXM` | `5.15.194` | `conf/5.15.194-android13-8-00038-g853eb7b6b965-ab15936612.conf` | unsupported by configuration |
 | Redmi Note 13 Pro 5G / POCO X6 5G | `garnet` | `OS3.0.306.0.WNRCNXM` | `5.10.236` | `conf/5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284.conf` | unsupported by configuration |
 
-**Unsupported by configuration** means the factory kernel was ported and
-passes F1–F10 (banner, artifacts, derivations, static validation, and the
-QEMU `target`/`ids`/`probe`/`leak` gates), but its embedded config lacks
-`CONFIG_POSIX_CPU_TIMERS_TASK_WORK`. Without that option the fired timer is
-expired inline in tick/IRQ context instead of on the task-work exit path, so
-the stale timer node is never dequeued after the spray reclaims its page and
-F11 cannot land a write — the plant reports `hit=1` and still leaves the
-child at uid 2000. This is a property of those factory kernels, not of
-the profiles; there is no conf change or retry that fixes it. `zephyr`
-(Redmi Note 17 4G, `5.15.194`) is blocked for the same reason and appears in
-the standalone-payload table above.
+The three Xiaomi 5.x kernels in this table — plus `zephyr` (Redmi Note 17 4G,
+`5.15.194`) in the standalone-payload table above — have
+`CONFIG_POSIX_TIMERS=y` but no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` in the
+config embedded in their factory `Image`; the status legend above explains
+the consequence. The four are the whole 5.10/5.15 group: every 6.x kernel in
+this batch has the option `=y` and is supported.
 
 ### Xiaomi 17 series — 6.12.69 (4K)
 
