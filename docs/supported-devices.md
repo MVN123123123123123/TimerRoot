@@ -182,9 +182,9 @@ selected automatically on a Samsung device, or manually under
 |---|---|---|---|---|---|---|
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | — | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy S24 FE | SM-S721B (Exynos 2400e) | `S721BXXUFEZJ6` (EUX) | — | 2026-10 | `conf/samsung/samsung-s24fe-6.1.162.conf` | verified in QEMU |
-| Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
-| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23-5.15.197.conf` | verified in QEMU |
-| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23fe-5.10.240.conf` | verified in QEMU |
+| Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/samsung/samsung-a15xzh-5.15.189.conf` | unsupported by configuration |
+| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23-5.15.197.conf` | unsupported by configuration |
+| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23fe-5.10.240.conf` | unsupported by configuration |
 | Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | — | 2026-11-05 | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
 | Galaxy S25 Edge | SM-S937B | `S937BXXUBDZJB` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s25edge-6.6.127.conf` | verified in QEMU |
 
