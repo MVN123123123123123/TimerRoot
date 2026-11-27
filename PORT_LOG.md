@@ -1881,7 +1881,7 @@ ones in this batch (plus `zephyr` from the earlier port).
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors on all 48 profiles (41 generic + 7 Samsung); `--selfcheck` 0 failures, run in QEMU against each factory `Image` so it sees that kernel's real slab geometry |
 | F7 `timer target` | pass (QEMU) | every generic profile with a workspace `Image`, plus the s23fe, s24fe, s25edge and s23 shim runs, prints its own `timer_site`, exit 0 |
-| F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile; `mass.py` now rejects an out-of-range id (the discover loop only accepts 1..1024) and names the printable-ASCII case, which is how a text-mode trace read is caught |
+| F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile; `mass.py` now rejects an out-of-range id (the discover loop only stores a 16-bit-masked id and accepts only 1..1024) and names the case, which is how an uninitialised `free_type` is caught |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/2000`; nine of the twelve 2026-batch kernels pass, the other three (no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`) are blocked, see the batch section above, as is zephyr |
@@ -2099,12 +2099,20 @@ Two 16K findings came out of this pass:
   and `p11-16k` pass in 20–35 s. Only `blazer16k` is genuinely tight, and its
   `invoked oom-killer` (`alloc_skb_with_frags` ← `unix_stream_sendmsg`) is a
   symptom of six failed plants, not the cause.
-- **`ids` can read the trace as text.** `blazer16k` intermittently reports
-  `page_free=1701669690` = `0x656d6b3a` = ASCII `":kme"`, i.e. a fragment of an
-  event name rather than an event id. The discover loop only accepts ids
-  1..1024, so `mass.py` now fails such a line instead of passing it, and prints
-  the decoded text to make the cause obvious. That bad id leaves the page-free
-  event wrong and blinds `scan_reclaim`, which is what causes the six misses.
+- **`ids` can report an uninitialised field.** `blazer16k` intermittently
+  reports `page_free=1701669690` = `0x656d6b3a`. That value cannot come from
+  the trace: `discover_page_types()` stores `u32(...) & 0xffff` and skips
+  anything above 1024, so its high 16 bits being set proves it was never
+  parsed. The actual defect is that `pairs[np].free_type` is never
+  initialised — a pfn that got an alloc record but no matching free record
+  inside the capture window keeps stack garbage there, and the selection loop
+  accepts it because it only tests `!= alloc_type`. (`0x656d6b3a`'s low half
+  reads as `":kme"`, which is why the value *looks* like a text fragment;
+  that resemblance is a coincidence, not the mechanism.) The bad id leaves
+  `scan_reclaim()` watching an event that never fires, which is what causes
+  the six misses and, in turn, the OOM. `mass.py` now fails such a line
+  instead of passing it, and prints the decoded text so the case is
+  recognisable.
 
 ### What has been verified without a device
 

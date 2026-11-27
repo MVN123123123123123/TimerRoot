@@ -563,10 +563,14 @@ payload write landing. `plant n left child uid=…; retrying` is expected; six
 failures are not.
 
 Stop before retrying if F8 printed an event id outside 1..1024 — classically
-`page_free=1701669690`, which is the ASCII fragment `":kme"`, not an id. The
-trace was read as text, `scan_reclaim()` then watches an event that never
-fires, and all six plants miss for a reason the profile does not control.
-Re-run the profile from the start and record the miss.
+`page_free=1701669690`. The discover loop stores `type` as `u32(...) & 0xffff`
+and skips anything `> 1024`, so a value with its high 16 bits set *cannot* have
+come from the trace: it is the uninitialised `pairs[np].free_type` of a pfn that
+got an alloc record but no matching free record inside the capture window.
+`scan_reclaim()` then watches an event that never fires and all six plants miss
+for a reason the profile does not control. Re-run the profile from the start
+and record the miss; the fix is a longer settle before `ids` (so the free
+lands in the window), never more guest memory.
 
 `calibrate_base()` runs on every mode before the gates: it votes the linear
 base for slab orders 0–3 and can override the conf geometry (see §2). Record
@@ -734,7 +738,7 @@ Grep the log; each line maps to one cause.
 | `pair missing` | slab↔page ordering broken | check `slab_order`; try `pcp_free` |
 | `fake cred spills` | node offset or cred size wrong | re-derive `timer_node_off` / `cred_size` |
 | `burst missed` | spray too slow, device loaded | more `SPRAY_POST`, settle longer |
-| `[ids] page_alloc=… page_free=<huge>` (`FAIL(ids=… text=':kme')`) | the trace buffer was read as text, not binary records, so the "id" is ASCII from an event name (e.g. `0x656d6b3a` = `":kme"`). Seen intermittently at 16K pages | not a profile defect — re-run the profile. Do **not** raise the guest memory (that starves the reclaim these profiles need); if it repeats, lengthen the settle before `ids`. `mass.py` rejects the value because the discover loop only accepts ids 1..1024 |
+| `[ids] page_alloc=… page_free=<huge>` (`FAIL(ids=… text=':kme')`) | `pairs[np].free_type` is never initialised; a pfn whose free record fell outside the capture window keeps stack garbage there, and the selection loop accepts it because it only tests `!= alloc_type`. The stored id is masked to 16 bits, so any value with high bits set (e.g. `0x656d6b3a`, whose low half happens to read as `":kme"`) is proof it was never parsed. Seen intermittently at 16K pages | not a profile defect — re-run the profile with a longer settle before `ids` so the free lands in the window. Do **not** raise the guest memory (that starves the reclaim these profiles need). `mass.py` rejects the value because the discover loop only accepts ids 1..1024 |
 | `no zombie` | killer race lost | check the `CLOCK_THREAD_CPUTIME_ID` path |
 | `cred writes did not land` | wrong `cred_uid_off` | re-derive |
 | `setuid(0) failed` | caps missing → `fake_caps_off` wrong | re-derive |

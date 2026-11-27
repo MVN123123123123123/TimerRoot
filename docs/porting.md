@@ -562,10 +562,10 @@ Boot parameters are derived, not guessed:
   `alloc_skb_with_frags` ← `unix_stream_sendmsg`), treat the OOM as a
   **symptom, not the cause**. The guest only exhausts memory because every
   plant missed and retried six times; the miss comes from a bad `[ids]` line
-  (see the `FAIL(ids=… text=…)` row in `SKILL.md`), which leaves the wrong
-  page-free event id and makes `scan_reclaim` blind. Fix the `ids` reading —
-  re-run, and if it repeats raise the settle before `ids` — rather than giving
-  the guest more memory, which suppresses the reclaim the exploit needs.
+  (see the `FAIL(ids=… text=…)` row in `SKILL.md`), which leaves a garbage
+  `page_free` id and makes `scan_reclaim` blind. Fix the `ids` reading —
+  re-run with a longer settle before `ids` — rather than giving the guest
+  more memory, which suppresses the reclaim the exploit needs.
 - raise the socket buffer sysctls in the initramfs (`wmem_max` / `rmem_max`
   around 1 MB) **if the spray starves**. The shipped `base/init` does *not*
   set them, and every 5.10/5.15/6.1/6.6/6.12/6.18 profile that has a
@@ -663,12 +663,14 @@ profile fault: retry once and record both attempts. A 16K build needs its own
 QEMU pass.
 
 **Do not retry over a bad `[ids]` line.** If F8 reports an event id outside
-1..1024 — most often `page_free=1701669690`, which is `":kme"` read as
-ASCII — the trace was consumed as text, not binary records. That wrong id
-makes `scan_reclaim()` compare against an event that never fires, so every
-plant misses for a reason that has nothing to do with the profile. Stop,
-re-run the whole profile, and record the miss; retrying F11 or adding guest
-memory only buries it.
+1..1024 — most often `page_free=1701669690` — the discover loop cannot have
+produced it: it stores `u32(...) & 0xffff` and skips anything above 1024, so a
+value with its high 16 bits set is the uninitialised `pairs[np].free_type` of a
+pfn that got an alloc record but no free record inside the capture window.
+`scan_reclaim()` then watches an event that never fires, so every plant misses
+for a reason that has nothing to do with the profile. Stop, re-run the whole
+profile with a longer settle before `ids`, and record the miss; retrying F11 or
+adding guest memory only buries it.
 
 **`hit=1` proves the reclaim, never the write.** `scan_reclaim()` sets the hit
 when *any* spray thread's `page_alloc` took the victim pfn after a `page_free`.
