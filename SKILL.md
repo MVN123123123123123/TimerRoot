@@ -793,7 +793,9 @@ proved the block, but it invites "the harness was broken". Re-run with the
 current canonical `timer` (sha256 `b05a46ff…`) and the log gains `slab
 geometry confirmed by slabinfo: order=1 size=0x2000` plus a real
 `slab 8711 -> 4805` delta — and F11 still fails on all six plants. Keep the
-post-fix transcript (`logs/recheck-*.json`) as the evidence of record.
+post-fix run (`logs/<release>.f11-1.log`/`.f11-2.log` plus the runner summary
+`logs/recheck-*.json`, which carries the read slab geometry) as the evidence
+of record.
 
 ---
 
