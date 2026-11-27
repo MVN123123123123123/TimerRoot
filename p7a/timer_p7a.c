@@ -1398,6 +1398,12 @@ static int discover_page_types(unsigned char *raw)
         {
             pairs[np].pfn = pfn;
             pairs[np].alloc_type = type;
+            /* A pfn whose free record never lands inside the capture window
+             * must stay ineligible for selection.  Without this, free_type
+             * holds stack garbage, the `alloc_type != free_type` test passes,
+             * and the garbage is reported as page_free -- which leaves
+             * scan_reclaim() watching an event that never fires. */
+            pairs[np].free_type = 0;
             pairs[np].hits = 1;
             np++;
         }
