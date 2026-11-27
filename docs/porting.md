@@ -555,8 +555,9 @@ Boot parameters are derived, not guessed:
   page-size profile, and it can break one: a 16K profile whose slab is order 0
   (`slab_size = 0x4000`) relies on real memory pressure to push the freed page
   out of the buddy allocator before the spray catches it. At 6144 MB every
-  plant logged `free_seen=0 burst hit=0` for all six attempts, while the same
-  profiles pass in well under a minute at the default 3072 MB.
+  plant logged `free_seen=0 burst hit=0` for all six attempts, while at the
+  default 3072 MB `tegu` 16K and `p11` 16K pass on the first attempt in
+  20-35 s. Only `blazer` 16K stays tight at 3072 and needs a retry.
 - when a 16K run does log `invoked oom-killer` (blazer 16K does, at ~73 s in
   `alloc_skb_with_frags` ← `unix_stream_sendmsg`), treat the OOM as a
   **symptom, not the cause**. The guest only exhausts memory because every
