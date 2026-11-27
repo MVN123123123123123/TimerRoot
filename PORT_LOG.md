@@ -1487,8 +1487,8 @@ below).
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
 | F14 QEMU | pass | every generic profile with a workspace `Image` passes every gate (table below); s23fe, s24fe, s25edge and s23 pass in their own shim runs; s26u is the only provenance exception, not a binary result |
-| F15 hardware | pending | no device |
-| F16 app | defer | tables added as `verified in QEMU`; flip to `tested` only after F15 |
+| F15 hardware | pass (OnePlus 13) | CPH2653 on `2026-11-27`: first-attempt plant, `resuid=0/0/0`; not yet run on the other profiles |
+| F16 app | defer | tables carry `verified in QEMU`, or `tested` where F15 ran (OnePlus 13); other rows flip to `tested` only after their own hardware run |
 
 ### F14 — QEMU mass run
 
@@ -2283,7 +2283,40 @@ constant below was nevertheless derived independently from this `Image`
   satisfy another profile's F7.
 
 **Runtime gates still pending**: **F12** (`timer permissive`),
-**F13** (`timer fake` + KernelSU) and **F15** need a physical CPH2653.
-The **F16** row is in `docs/supported-devices.md` as `verified in QEMU`.
-Port status: static re-derivation (F1-F6) and QEMU runtime (F7-F11, F14)
-complete for this build.
+**F13** (`timer fake` + KernelSU) need a physical CPH2653 — the hardware run
+below exercised the root chain but neither permissive mode nor `fake`.
+The **F16** row is in `docs/supported-devices.md` as `tested`.
+Port status: static re-derivation (F1-F6), QEMU runtime (F7-F11, F14) and
+the device root chain (F15) complete for this build.
+
+### F15 device run (CPH2653, 2026-11-27)
+
+The shipped aarch64 binary (`./timer --conf …`) on the phone, run the normal
+way as the shell user:
+
+```
+[+] device=OP5D55L1 kernel=6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k
+    pagesize=4096 profile=6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf
+[ids] page_alloc=275 page_free=273 pairs=1029
+[base] made=512 site=0xffffffe9ccd95d48 slide=0x294cc00000 best=0xffffff81e727e000 count=31
+[cred] attempt=0 child=798 R=0xffffff8826034600 site_low=0xe4064 task=0xffffff882daf12c0
+```
+
+- F7 skew: `site=0xffffffe9ccd95d48` with `slide=0x294cc00000` — KASLR moves
+  the runtime image, and `site_low` `0x195d48` is the conf's `timer_site`.
+- F8 `275/273/1029` and F9 `pairs=1029` are identical to the QEMU run, so
+  trace event ids and the page-pair signal are the same on hardware.
+- Plant landed on attempt **1/3** (`slab_own=31`, `pair pfn=0xa4c0a4`
+  agreeing with `base`), `burst hit=1 after 8ms`, zombie reaped, writes landed.
+- Endgame: `[child] woke uid=0 euid=0`, `setresgid(0)=0`, `setuid(0)=0`,
+  `[+] child exit status=0` -> **`resuid=0/0/0`**.
+
+`uid=0 euid=0` here is the real result, not the root-harness artifact the
+QEMU section warns about: the binary was started by the shell user (uid 2000)
+as `./timer`, so a child already at uid 0 can only come from the cred write.
+
+Two differences from the QEMU profile worth noting for future ports: `[base]`
+`count=31` (one slab's worth) rather than the QEMU `512`, and the `best`
+address sits in the `0xffffff81…` range instead of `0xffffff7f…`. Both are
+KASLR/slide artifacts; the `pair_slab_pfn()` agreement is what validated the
+base, and the plant still succeeded on the first attempt.

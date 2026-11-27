@@ -259,7 +259,7 @@ the port workspace, unlike the imported profiles below).
 
 | Device | Model | Factory build | Android build ID | Security patch | Kernel | Profile | Status |
 |---|---|---|---|---|---|---|---|
-| OnePlus 13 | CPH2653 | `17.0.0.102(EX01)` | — | — | `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k` | `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` | verified in QEMU |
+| OnePlus 13 | CPH2653 | `17.0.0.102(EX01)` | — | — | `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k` | `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` | **tested** (hardware 2026-11-27) |
 
 ### Imported OPPO vendor profiles
 
@@ -323,8 +323,8 @@ not publish the value for that build; read the real value on a device with
 ### Verification levels and known gaps
 
 - **tested** means a cold boot, a settled device and the full chain ran on
-  hardware. Only the Pixel 7a (`CP3A.261005.002.A1`) and Pixel 9a
-  (`CP3A.261005.005`) meet that bar.
+  hardware. The Pixel 7a (`CP3A.261005.002.A1`), the Pixel 9a
+  (`CP3A.261005.005`) and the OnePlus 13 (`17.0.0.102(EX01)`) meet that bar.
 - **verified in QEMU** means F7-F11 passed against the unmodified factory
   kernel (or a throwaway vendor-hook-patched `Image` where the factory kernel
   calls Knox/RKP, noted under Samsung). F12 (`permissive`) and F13 (`fake`)
@@ -332,8 +332,8 @@ not publish the value for that build; read the real value on a device with
   A QEMU pass is not a hardware substitute.
 - **untested** rows fall into two groups: profiles whose factory artifacts are
   in the workspace but that have no hardware run, and imported profiles with no
-  factory artifact in the workspace (the OPPO, realme and Meizu rows), which
-  could not even join the QEMU mass run.
+  factory artifact in the workspace (most of the OPPO, realme and Meizu rows),
+  which could not even join the QEMU mass run.
 - If your device is in a table but its status is untested, check the `kernel=`
   line first (the app runs `timer --conf ... target` and logs it) and compare
   it with the conf you intend to use. Do not run the exploit on a kernel that
@@ -466,14 +466,18 @@ not publish the value for that build; read the real value on a device with
 
 ### OPPO, realme and Meizu
 
-- The OnePlus 13 (`CPH2653`, OxygenOS/ColorOS `17.0.0.102 (EX01)`) is a
-  **full port** from its factory `boot.img`/`vendor_boot.img`:
-  `timer_site 0xffffffc080195d48`, `copy_process_low21 0xab93c`,
-  `task_alloc_bytes 0x12c0` (the image sets no
+- The OnePlus 13 (`CPH2653`, reported by the device as `OP5D55L1`, OxygenOS/
+  ColorOS `17.0.0.102 (EX01)`) is a **full port** from its factory
+  `boot.img`/`vendor_boot.img`: `timer_site 0xffffffc080195d48`,
+  `copy_process_low21 0xab93c`, `task_alloc_bytes 0x12c0` (the image sets no
   `android_arch_task_struct_size=`), `selinux_blob_off 0x0`. It passes
-  `validate_conf.py` with 0 errors and all of F7-F11 in QEMU as uid 2000
-  (`resuid=0/0/2000`, `ROOT_SHELL_OK`); see `PORT_LOG.md`. F12-F16 still
-  need the device.
+  `validate_conf.py` with 0 errors, all of F7-F11 in QEMU as uid 2000, and
+  F7-F11/F15 on the device itself: the shipped binary matched profile
+  `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k` at 4096-byte pages and
+  completed the plant on the first attempt
+  (`pair pfn` agreed, `slab_own=31`), reaching `uid=0 euid=0` and
+  `setuid(0)=0` -> `resuid=0/0/0`. F12/F13 (permissive, KernelSU) were not
+  exercised by that run.
 - The three other OPPO profiles and the realme profile are imported vendor
   profiles from `rikumi/TimerRoot`. No factory image for them is in the port
   workspace, so F7-F11 could not be run: they pass the parser, release/page-size
