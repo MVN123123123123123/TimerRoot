@@ -1594,7 +1594,9 @@ by `scripts/derive_conf.py` and re-checked by
 Notable per-kernel findings:
 
 - **athens (6.12.69)** is the only kernel in the batch with `timer_alloc
-  0x100` and `cred 0xb8`; its `vendor_boot` command line carries
+  0x100` (every other build is `0x108`) and one of the `cred 0xb8` /
+  `uid_off 0x8` (8-byte `usage`) group, which also covers the three 6.6
+  builds. Its `vendor_boot` command line carries
   `android_arch_task_struct_size=1024`, so `task_struct_vendor_size_setup()`
   turns BTF's `0x1440` into `0x1840`. `selinux_blob_off = 0x8` (landlock
   registers a cred blob before SELinux on this build).
