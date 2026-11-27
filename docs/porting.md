@@ -163,6 +163,47 @@ From the factory image of that exact build:
    `CONFIG_ARM64_4K_PAGES` vs 16K, the real `CONFIG_LSM`, and which
    `CONFIG_SECURITY_*` options are actually enabled.
 
+   Read `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` **now**, before deriving
+   anything. It decides whether F11 can ever land. `POSIX_CPU_TIMERS_TASK_WORK`
+   is `default y if POSIX_TIMERS && HAVE_POSIX_CPU_TIMERS_TASK_WORK`, and
+   arm64 selects `HAVE_POSIX_CPU_TIMERS_TASK_WORK` only from 6.1 onward
+   (`arch/arm64/Kconfig`: no hit in 5.10.236/5.15.194, one in
+   6.1.157/6.6.118). A 6.1+ arm64 kernel therefore always has it; a
+   5.10/5.15 one has it only if the vendor opted in. If both
+   `CONFIG_HAVE_POSIX_CPU_TIMERS_TASK_WORK` and
+   `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` are absent, **stop**: the profile can
+   pass F7–F10 and will never pass F11, because the fired timer is expired
+   inline in tick/irq context and the exit path never dequeues the stale node.
+   Four factory kernels are known like this — the 5.15.194 `vermeer` and
+   `zircon` (Redmi Note 13 Pro/Pro+), the 5.15.194 `zephyr` (Redmi Note 17 4G)
+   and the 5.10.236 `garnet` (Redmi Note 13 Pro 5G). Their profiles are kept
+   as *unsupported by configuration*; do not retry the plant or bisect.
+   Details and the diagnostic signature are in `SKILL.md` §11.
+
+   Some `boot.img`s store an **LZ4-legacy compressed** `kernel` instead of a
+   raw `Image` (`chagall`, `klimt`, `duchamp`, `degas`, `zircon` in the
+   November-2026 Xiaomi batch). `file` says `LZ4 compressed data, legacy`;
+   decompress it to `kernel.raw` before the `IKCFG` scan, the BTF scan or any
+   disassembly. The `IKCFG_ST` blob sits near the end of the decompressed
+   image (around 24-25 MB), so a "no IKCFG" result on the compressed file is
+   expected — do not conclude the config is absent from the compressed bytes.
+
+   A kernel with **no BTF at all** still ports, but every geometry constant
+   must then come from disassembly and static data. The 5.10.236 `garnet`
+   build is the worked example: `cred` `0xa8` with a 4-byte `usage`, no
+   `cred->ucounts` (that field arrived after 5.10, so `cred_ucounts_off` is
+   pinned onto the `group_info` slot at `0x90` and `init_ucounts` points at
+   `ucounts_hashtable`, which is written but never dereferenced), `task_struct`
+   `0x1280` from the `fork_init` literal, and `cred_req = cred_size = 0xa8`
+   from `cred_init`. Confirm each against `prepare_creds`, `put_cred_rcu`,
+   `getuid`/`geteuid` and `dup_task_struct`.
+
+   BTF has a trap when the banner is derived from it: some builds' strings
+   table only carries the literal `Linux version %s (%s)`, so a naive banner
+   read returns that format string, not a release. `scripts/derive_conf.py`
+   now rejects it; read the banner from `/proc/version`/the `Image` header or
+   the OTA manifest instead.
+
 4. Record a few **runtime facts** from the device (these are allowed because
    they are observations, not constants to derive from):
 
@@ -448,6 +489,33 @@ initramfs leaves them root-only. Confirm the drop from the transcript line
 `runhigh: uid=2000 euid=2000 gid=2000`; a `uid=0` there means the helper is an
 old build that only raised the fd limit.
 
+**F11 evidence older than the uid-2000 rule is void.** The rule was recorded
+in `AGENTS.md` on 2026-11-22, and the harness gained the privilege drop on
+2026-11-21 23:37 (`runhigh.c` mtime; the file is in the gitignored port tree,
+so the date comes from the filesystem, not from git). Any F11 transcript
+before that is a **root** run: the child starts at uid 0, so `resuid=0/0/0`
+and `ROOT_SHELL_OK` prove nothing — the exploit may never have fired. Treat
+such a profile as "F7–F10 done, F11 never run" and re-run it. Do not cite a
+pre-rule pass as a regression control either: a pre-rule pass that a current
+run fails is expected and says nothing about the profile or the binary.
+
+**Ship the committed binary, every build.** `mkinitramfs.sh` installs
+`p7a/timer_p7a` as `initramfs/timer` by name and prints its sha256, so a
+hand-copied experiment left in `initramfs/` can never silently become the
+thing every gate is measured against. The current canonical blob is
+`b05a46ff9af187eedf5daa81cda028ce9d8f65dfd135d0a85c934b19d94f2616`; a
+transcript recorded before the initramfs gained that hash may have run a
+different `timer`. `TIMER_BIN=<path>` overrides it for a deliberate
+instrumented build — the hash still prints, so such a transcript cannot be
+mistaken for the shipped binary. Keep `INIT_OVERRIDE` for a probe `init`.
+
+**Keep one F11 transcript per passing profile** in
+`work/qemu/logs/<release>.f11-pass.log`. `mass.py` only saves failing gates
+(`_save_log` on `f11-1`/`f11-2`), so a pass leaves no log behind and the
+evidence has to be reproduced later; a pass log is the only way to show the
+uid-2000 line, the `pcp reclaim go` line and `resuid=0/0/2000` together for
+that exact binary.
+
 When the profile's slab geometry should be proven rather than pinned, boot
 once **without** `slub_min_order` and read the `posix_timers_cache` line from
 `/proc/slabinfo`: if `pagesperslab` still gives the profile's order, the
@@ -461,7 +529,13 @@ Boot parameters are derived, not guessed:
 - pin `slub_min_order=<slab_order>` so SLUB picks the phone's geometry instead
   of choosing from the VM's CPU count,
 - raise the socket buffer sysctls in the initramfs (`wmem_max` / `rmem_max`
-  around 1 MB), otherwise the spray starves.
+  around 1 MB) **if the spray starves**. The shipped `base/init` does *not*
+  set them, and every 5.10/5.15/6.1/6.6/6.12/6.18 profile that has a
+  `CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y` kernel passes F7–F11 without them: the
+  phase-2 burst now waits for `mm_page_free` before spending its send budget,
+  so the default 212 992-byte queues are enough. Only add the sysctls when a
+  transcript shows `send ok` collapsing early with `err` climbing into the
+  millions, i.e. the pre-fix starvation signature.
 
 The conf's `slab_order` / `slab_size` are a **hint**, not a fixed truth: SLUB
 derives the real order from the phone's possible-CPU count, which can differ
@@ -475,6 +549,19 @@ also requires supplementary gid `log` and an SELinux label/rule that permits
 `shell` to read `proc_slabinfo`; see
 [the factory-image audit](slabinfo-access-audit.md). If any link is missing,
 record `slabinfo unreadable` and the geometry derived from timer addresses.
+
+**In the QEMU harness, make slabinfo readable to uid 2000.** The factory
+kernel creates `/proc/slabinfo` `0400` (and field Android usually relabels it
+`0440 root:log`, which the shell can read). A plain initramfs leaves it
+`0400`, so a uid-2000 run cannot open it — and a `pcp_free = 1` profile reads
+the `posix_timers_cache` object count as its authoritative free signal. The
+burst then guesses instead of waiting, `hit=1` fires against the wrong
+lifetime, and the plant misses while every line still looks plausible.
+`base/init` does `$BB chmod 0444 /proc/slabinfo` right before it dumps the
+three `slabinfo` lines; keep that line, and check the transcript's
+`=== slabinfo ===` block appears before `=== RUN` (it is the same state the
+phone's shell user sees). This is a harness reproduction of a field fact, not
+a privilege bypass — nothing is derived from it.
 
 Do not trust the page-event vote by itself. It only sees slabs created inside
 its capture window, so a warm cache (a second run in the same boot) allocates
@@ -536,6 +623,26 @@ plant with a fresh pool up to six times; `plant n left child uid=…; retrying`
 is a normal recoverable miss. A lost race here is a harness artefact, not a
 profile fault: retry once and record both attempts. A 16K build needs its own
 QEMU pass.
+
+**`hit=1` proves the reclaim, never the write.** `scan_reclaim()` sets the hit
+when *any* spray thread's `page_alloc` took the victim pfn after a `page_free`.
+The payload write additionally needs the exit path to run `rb_erase` on the
+armed node after that recycle. A transcript can therefore show
+`free_seen=1 burst hit=1`, `reaping`, a clean `write mode=zero` and
+`EXIT status=0` while the target word never changes — do not read `hit=1`,
+`permissive done` or `EXIT status=0` as proof of the primitive. For the
+zero-write the proof is `resuid=0/0/2000`; for `permissive` it is the
+discriminating readback (`sysctl_perf_event_paranoid` `2` → `0`), because
+selinuxfs is not mounted in the stock initramfs and `getenforce` proves
+nothing. `timer fake` is no better as a fallback: on a config-blocked kernel
+it also ends with the child still at uid 2000 (`mode=fake`,
+`resuid=2000/2000/2000`), so the miss is general, not zero-write-specific.
+
+If a `pcp_free = 1` transcript has no `pcp reclaim go (slab N -> M, Xms)`
+line, do not trust the result at all: the slabinfo gate did not run, the
+burst spent its budget blind, and `hit=1` means something other than what
+you think. Check the initramfs hash and the conf's `pcp_free` before reading
+anything else in that log.
 
 Some Samsung kernels call the phone's Knox hypervisor and will not boot in QEMU.
 For those, boot a **throwaway patched copy** (a "shim") that neutralises those

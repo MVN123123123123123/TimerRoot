@@ -240,6 +240,34 @@ followed by gzip); decompress it — `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`,
 not set` line are all there and settle questions that the `CONFIG_LSM` string
 alone cannot.
 
+**Read `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` before deriving anything.** It is
+the cheapest possible stop and it decides whether F11 can land at all:
+
+```python
+data = open('kernel.raw', 'rb').read()          # decompress LZ4 first
+i, j = data.rfind(b'IKCFG_ST'), data.rfind(b'IKCFG_ED')
+cfg  = gzip.decompress(data[i + 8:j]).decode()
+print([l for l in cfg.splitlines()
+       if l.startswith('CONFIG_POSIX_CPU_TIMERS_TASK_WORK')])
+```
+
+Four arm64 vendor kernels hit so far have the key **absent** while
+`CONFIG_POSIX_TIMERS=y` is present: the two 5.15.194 Redmi Note 13 payloads
+(`vermeer`, `zircon`), the 5.15.194 Redmi Note 17 4G (`zephyr`) and the
+5.10.236 Redmi Note 13 Pro 5G (`garnet`). On those, every gate F7–F10 passes
+and F11 fails all six plants with `burst hit=1`, a clean `write mode=zero`,
+and `left child uid=2000` — the spray reclaims the page but the stale
+`rb_erase` never runs on it. See §11 "Config-gated erase" for why, and treat
+the release as **unsupported by configuration**, not as a derivation bug:
+retrying, changing constants, or picking different plant modes will not help.
+
+Cheat sheet: `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` is `default y if
+CONFIG_POSIX_TIMERS && CONFIG_HAVE_POSIX_CPU_TIMERS_TASK_WORK`, and arm64 only
+`select`s `HAVE_POSIX_CPU_TIMERS_TASK_WORK` from **6.1** onward. So a 6.1+
+arm64 build always has it; a 5.10/5.15 arm64 build has it only if the vendor
+opted in. Absent `HAVE_POSIX_CPU_TIMERS_TASK_WORK` in the extracted config is
+the same stop signal as an absent `..._TASK_WORK`.
+
 Also grab, from the running device (these are runtime facts, allowed):
 
 ```sh
@@ -439,9 +467,15 @@ Boot parameters are derived, not guessed:
 - `slub_min_order=<slab_order>` — SLUB picks the order from online CPU count;
   a 4-vCPU VM would get order 0. This pins the phone's geometry.
 - 4K/16K Pixel pairs share a release string; `mass.py` selects by page size.
-- initramfs `init` sets `net.core.{wmem,rmem}_max = 1048576` — `SO_SNDBUF`
-  16 MB is otherwise clamped to ~416 KB per socket and starves plant 2.
-  16 MB sysctls fail (RAM exhaustion), 4 MB regresses.
+- Socket buffers: the shipped `base/init` does **not** raise
+  `net.core.{wmem,rmem}_max`, and that is correct for the current binary.
+  `spray_thread()` waits for the parent's `mm_page_free` before spending its
+  send budget, so the default 212 992-byte queues cover the burst; each pass
+  log shows `send ok` in the thousands with `err=0` (6.1/6.12) or a large
+  `ok` with a later `err` climb (6.6), which is expected. Raising the sysctls
+  to 1 MB was needed by the old flat-out burst and is the thing to try only
+  if `send ok` stalls almost immediately. 16 MB sysctls also fail (RAM
+  exhaustion in an 8 GB guest).
 
 Gates (each prints its evidence in the log):
 
@@ -464,6 +498,14 @@ Gates (each prints its evidence in the log):
   gate checks real uid 0, post-setuid effective uid 0 and the root shell;
   old transcripts showing `0/0/0` are not evidence for the current binary.
 
+  **F11 evidence predating the uid-2000 rule is void.** The rule was recorded
+  in `AGENTS.md` on 2026-11-22 and the harness gained the privilege drop on
+  2026-11-21 23:37 (`runhigh.c` mtime). Any older F11 transcript is a **root**
+  run: the child starts at uid 0, so `resuid=0/0/0` proves nothing and the
+  exploit may never have fired. Such a profile is "F7–F10 done, F11 never
+  run", and a pre-rule pass that a current run fails is *expected* — it is not
+  a regression control, so do not bisect the binary against it.
+
   **Verify the drop actually happened before you read the report line.** The
   line is `child report uid=0 euid=2000 …` on a real uid-2000 run — the plant
   writes `uid`, not `euid` — so a `gate_verify()` that pattern-matches
@@ -472,6 +514,25 @@ Gates (each prints its evidence in the log):
   gid=2000` first; if it says `uid=0`, the drop is missing (an older `runhigh`
   in the port tree only raised `RLIMIT_NOFILE`) and the whole gate is void.
   Accept `uid=0 euid=0` as a wake value only for old root-harness transcripts.
+
+  **`hit=1` proves the reclaim, not the write.** `scan_reclaim()` sets `hit`
+  when a spray thread's `page_alloc` took the victim pfn after a `page_free`.
+  That is necessary and not sufficient: the write also needs the exit path to
+  run `rb_erase` on the armed node afterwards. A run can log `free_seen=1
+  burst hit=1`, `reaping`, a clean `write mode=zero` and
+  `EXIT status=0` while the target word is untouched. So never read
+  `hit=1`/`permissive done`/`EXIT status=0` as "the primitive works" — the
+  only proof is the readback (`resuid=0/…` for the zero-write, or the
+  `sysctl_perf_event_paranoid` flip for `permissive`). This is how the four
+  config-blocked profiles look: every plant reports a hit, none lands.
+
+  **Verify the `pcp reclaim go` line exists before trusting a transcript.**
+  `pcp_free = 1` profiles gate the burst on `/proc/slabinfo`
+  (`pcp reclaim go (slab N -> M, Xms)`). If that line is missing, the
+  initramfs changed, the conf's `pcp_free` is wrong for the kernel, or the
+  log is from an older binary — and `hit=1` means something different than
+  you think. It is also the first thing to check when a worked-before profile
+  suddenly misses.
 
 Known harness artefacts (not profile faults): run `mass.py` at `-j 2` on a
 12-core host — oversubscription makes bursts miss their 15 s window
@@ -665,11 +726,53 @@ Grep the log; each line maps to one cause.
 | `slabinfo unreadable; address periodicity says order=…` | shell lacks DAC permission/supplementary `log`, or SELinux denies `proc_slabinfo` (the kernel normally creates the file `0400`) | the order was derived from timer addresses; audit the complete access chain and confirm the derived order matches the conf |
 | `OLD_APP_DETECTED` / `TIMER_PROTOCOL=3` | app/binary protocol mismatch, or binary started without `--conf` | update app / refresh binary; pass `--conf … --protocol 3` |
 | `resuid=0/0/0` in QEMU | harness ran as root, so F11 proved nothing | drop to uid 2000 with `runhigh` and re-run |
-| `FAIL(no-report)` while the transcript shows `cred writes landed` + `ROOT_SHELL_OK` | the gate still wants `euid=0`, but a uid-only plant wakes with `euid=2000` | fix `gate_verify()` to accept `uid=0 euid=(0|2000)` and require `resuid=0/0/…` |
+| `FAIL(no-report)` while the transcript shows `cred writes landed` + `ROOT_SHELL_OK` | the gate still wants `euid=0`, but a uid-only plant wakes with `euid=2000` | fix `gate_verify()` to accept `uid=0 euid=0` or `euid=2000` and require `resuid=0/0/…` |
 | F7 passes for a profile whose Image is not the one booted | the gate only checked `target=lynx`, a constant the binary prints for every profile | also compare `kernel=`/`pagesize=` against the conf (current `gate_target()`) |
 | `runhigh: uid=0 …` in a transcript claimed as F11 evidence | the port tree's `runhigh` only raised `rlimit`, it never dropped privileges | rebuild `runhigh` so it `setresgid`/`setresuid`s to 2000; the gate now fails such a run outright |
 | `no KASLR slide` on `fake` | slide missing before the first endgame write | `calibrate_base()` must store `g_slide` from `site0`; re-run probe |
+| `burst hit=1`, clean `write mode=zero`, then `left child uid=2000` on **all six** plants | the kernel has no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`, so the fired timer is expired inline in tick/irq context and the exit path never dequeues the stale node — the reclaim succeeds, the `rb_erase` never happens | not fixable from the conf: mark the release unsupported by configuration (see "Config-gated erase" below) |
 | panic on first touch | any wrong constant | the log names the stage |
+
+### Config-gated erase — `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`
+
+A `burst hit=1` line proves only that a spray thread's `page_alloc` took the
+victim pfn. It does **not** prove the write: the payload write needs the exit
+path to run `rb_erase` on the armed node *after* the page was recycled.
+
+In upstream `kernel/time/posix-cpu-timers.c`, `run_posix_cpu_timers()` hands
+the fired timers to `task_work_add(&tsk->posix_cpu_timers_work, …)` when
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y`, so expiry runs in task work on the exit
+path — the same context that walks and dequeues the stale node. Without that
+config, `run_posix_cpu_timers()` calls `handle_posix_cpu_timers()` inline from
+the tick/IRQ path, and `posix_cpu_timers_exit{,_group}` only run
+`cleanup_timers()` (a plain dequeue). The node the spray reclaimed is then
+never part of the erase the exploit needs, so the target word never changes —
+which is exactly what the blocked profiles log: `hit=1`, `reaped`, `write
+mode=zero`, `resuid=0/0/2000` unchanged on all six plants.
+
+Config arithmetic: `POSIX_CPU_TIMERS_TASK_WORK` is `default y if
+POSIX_TIMERS && HAVE_POSIX_CPU_TIMERS_TASK_WORK`, and `arch/arm64/Kconfig`
+`select`s `HAVE_POSIX_CPU_TIMERS_TASK_WORK` only from 6.1 (grep the tree:
+0 hits in `arch/arm64/Kconfig` for 5.10.236/5.15.194, 1 for 6.1.157/6.6.118).
+Therefore:
+
+- **6.1+ arm64** — always present. No concern.
+- **5.10/5.15 arm64** — present only if the vendor opted in. Read the key out
+  of the embedded `IKCFG_ST` blob (F2) *before* deriving anything.
+
+Four factory kernels found so far are blocked this way:
+
+| release | devices | kernel |
+|---|---|---|
+| `5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284` | garnet (Redmi Note 13 Pro 5G / POCO X6 5G) | 5.10.236 |
+| `5.15.194-android13-8-00019-gf4321180a397-ab15212794` | vermeer (Redmi K70 / POCO F6 Pro) | 5.15.194 |
+| `5.15.194-android13-8-00038-g853eb7b6b965-ab15936612` | zircon (Redmi Note 13 Pro+ 5G) | 5.15.194 |
+| `5.15.194-android13-8-00015-gf5526d1116e5-ab15004895` | zephyr (Redmi Note 17 4G) | 5.15.194 |
+
+Their profiles are kept, documented and validated (F7–F10 all pass), but F11
+stays unfilled and the device row reads *unsupported by configuration*. Do not
+bisect the binary, re-derive constants, or retry the plant for these: the
+reclaim is not the problem.
 
 ---
 

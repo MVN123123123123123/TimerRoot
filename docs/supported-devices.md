@@ -223,8 +223,46 @@ profile.
 |---|---|---|---|---|---|---|---|
 | Redmi Note 15 4G | `spinel` | `OS3.0.303.0.WPGMIXM` | — | — | `6.12.69` | `conf/6.12.69-android16-6-g014ca48a80ee-ab15889839-4k.conf` | verified in QEMU |
 | Redmi Note 15 Pro 4G | `charoite` | `OS3.0.304.0.WPFMIXM` | — | — | `6.12.30` | `conf/6.12.30-android16-5-g6e872b4863d6-ab13847919-4k.conf` | verified in QEMU |
-| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | — | — | `5.15.194` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | verified in QEMU |
+| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | — | — | `5.15.194` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | unsupported by configuration |
 | Redmi Note 17 Pro Max 5G | `brussels` | `OS3.0.311.0.WDRMIXM` | — | — | `6.12.69` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | verified in QEMU |
+
+### Redmi Note 13, Redmi K70/K80/K100, Xiaomi 14/14T/15T/17T — Nov 2026 batch
+
+Each row is one factory kernel; the profile serves every device whose
+decompressed `Image` is byte-identical, so one conf can cover several models.
+Full F1–F11 evidence is in [`PORT_LOG.md`](../PORT_LOG.md).
+
+| Device | Codename | Factory build | Kernel | Profile | Status |
+|---|---|---|---|---|---|
+| Redmi K100 Pro / POCO F9 Pro | `athens` | `OS4.0.6.0.XPICNXM` | `6.12.69` | `conf/6.12.69-android16-6-g0a1dc0413ec7-ab16271006-4k.conf` | verified in QEMU |
+| Redmi K100 Pro Max / POCO F9 Ultra | `songyuan` | `OS4.0.8.0.XGNCNXM` | `6.12.69` | same as above | verified in QEMU |
+| Xiaomi 17T Pro | `warhol` | `OS4.0.5.0.XPSCNXM` | `6.12.69` | same as above | verified in QEMU |
+| Xiaomi 15 Pro | `haotian` | `OS4.0.4.0.XOBCNXM` | `6.6.118` | `conf/6.6.118-android15-8-gf72a02f47f4b-abogki551678766-4k.conf` | verified in QEMU |
+| Redmi K80 Pro | `miro` | `OS4.0.3.0.XOMCNXM` | `6.6.118` | same as above | verified in QEMU |
+| Xiaomi 15 Ultra | `xuanyuan` | `OS4.0.4.0.XOACNXM` | `6.6.118` | same as above | verified in QEMU |
+| Xiaomi 15T Pro | `klimt` | `OS3.0.342.0.XOSEUXM` | `6.6.118` | `conf/6.6.118-android15-8-g30c6145e49e0-ab15416827-4k.conf` | verified in QEMU |
+| Xiaomi 17T / Redmi Turbo 5 | `chagall` / `klee` | `OS4.0.5.0.XPTCNXM` / `OS4.0.5.0.XPJCNXM` | `6.6.118` | `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` (shared with OnePlus 13) | verified in QEMU |
+| Xiaomi 14 Ultra | `aurora` | `OS3.0.308.0.WNACNXM` | `6.1.157` | `conf/6.1.157-android14-11-g2b8d37d00a12-mi.conf` | verified in QEMU |
+| Redmi K80 / POCO F7 Pro | `zorn` | `OS4.0.3.0.XOKCNXM` | `6.1.157` | `conf/6.1.157-android14-11-g2de7246565ac-mi.conf` | verified in QEMU |
+| MIX Fold 4 | `goku` | `OS3.0.310.0.WNVCNXM` | `6.1.157` | `conf/6.1.157-android14-11-g5655d633b31a-mi.conf` | verified in QEMU |
+| Redmi K70E / POCO X6 Pro | `duchamp` | `OS3.0.305.0.WNLCNXM` | `6.1.138` | `conf/6.1.138-android14-11-g6ab8c9a86a33-ab14396278.conf` | verified in QEMU |
+| Xiaomi 14T Pro / Redmi K70 Ultra | `rothko` | `OS3.0.308.0.WNNCNXM` | `6.1.138` | same as above | verified in QEMU |
+| Xiaomi 14T | `degas` | `OS3.0.304.0.WNERUXM` | `6.1.138` | `conf/6.1.138-android14-11-g44bda9e8f6e9-ab13792638.conf` | verified in QEMU |
+| Redmi K70 / POCO F6 Pro | `vermeer` | `OS3.0.308.0.WNKCNXM` | `5.15.194` | `conf/5.15.194-android13-8-00019-gf4321180a397-ab15212794.conf` | unsupported by configuration |
+| Redmi Note 13 Pro+ 5G | `zircon` | `OS3.0.305.0.WNOCNXM` | `5.15.194` | `conf/5.15.194-android13-8-00038-g853eb7b6b965-ab15936612.conf` | unsupported by configuration |
+| Redmi Note 13 Pro 5G / POCO X6 5G | `garnet` | `OS3.0.306.0.WNRCNXM` | `5.10.236` | `conf/5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284.conf` | unsupported by configuration |
+
+**Unsupported by configuration** means the factory kernel was ported and
+passes F1–F10 (banner, artifacts, derivations, static validation, and the
+QEMU `target`/`ids`/`probe`/`leak` gates), but its embedded config lacks
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK`. Without that option the fired timer is
+expired inline in tick/IRQ context instead of on the task-work exit path, so
+the stale timer node is never dequeued after the spray reclaims its page and
+F11 cannot land a write — the plant reports `hit=1` and still leaves the
+child at uid 2000. This is a property of those factory kernels, not of
+the profiles; there is no conf change or retry that fixes it. `zephyr`
+(Redmi Note 17 4G, `5.15.194`) is blocked for the same reason and appears in
+the standalone-payload table above.
 
 ### Xiaomi 17 series — 6.12.69 (4K)
 
