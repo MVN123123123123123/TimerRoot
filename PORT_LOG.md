@@ -1656,8 +1656,9 @@ against each factory Image (`qmode=selfcheck`): all twelve report
 retries)` on every one, because the fake cred on the last object runs past
 the slab end; that is informational and the plant retries that object, which
 is why each pass log reaps a victim in the first half of the slab.
-Slot table: `copy_process_linux21` and `timer_site` match every vmlinux;
-`alloc_req_off 0x10` matches BTF on the eleven BTF builds.
+Slot table: `copy_process_low21` (the conf key; the binary reads it as
+`g_cfg.copy_process_low21`, `COPY_PROCESS_LOW21`) and `timer_site` match
+every vmlinux; `alloc_req_off 0x10` matches BTF on the eleven BTF builds.
 
 Three `derive_conf.py` fixes came out of this batch (shipped with the same
 commit as the confs):
