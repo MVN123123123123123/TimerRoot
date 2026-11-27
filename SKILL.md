@@ -158,7 +158,12 @@ adb shell getconf PAGESIZE
   suffix is a different kernel, and `-4k` suffix presence varies by vendor.
   Sibling devices shipping the *same* release string may still carry different
   text layouts (the two 6.1 Redmis differ only in `timer_site`; the S25 family
-  vs S26 FE differ everywhere). Verify per build, never per family.
+  vs S26 FE differ everywhere). Verify per build, never per family. This
+  includes two devices on one GKI tag with different vendor defconfigs: the
+  `do_timer_create` call site moves, so the 6.6.118 family alone has four
+  different `timer_site` values. `uname -r` matching is necessary, not
+  sufficient — a run that dies at `base calibration failed` with
+  `site=0 count=0` prints the captured call sites, and those decide.
 - 16K devices print a page size of 16384 — that is a second profile.
 
 **Vulnerability check — do not skip this.** Disassemble `begin_new_exec` in
@@ -194,6 +199,16 @@ harness in `work/qemu/` — PORT_LOG.md uses the absolute paths). Keep extracted
 |---|---|
 | `get_hdr.py` / `fetch_part.py` | `payload.bin` header + one partition via range workers |
 | `fetchvb.sh`, `fetchdtbo_all.sh` | same for `vendor_boot` / `dtbo` (needed in step 2) |
+| `timerroot-port/xiaomi/fetch_xi.py` | Xiaomi/Redmi/POCO: all three partitions in one pass from a HyperOS **full** OTA, plus a per-device `manifest.json` with hashes |
+| `timerroot-port/xiaomi/{summarize,verify_payloads}.py` | index the fetched banners and prove which devices share a byte-identical `Image` |
+
+Xiaomi ships one GKI payload across a generation, so a new device often lands
+on a profile that already exists: of the 32 Xiaomi/Redmi/POCO images in
+`timerroot-port/xiaomi/`, 14 are byte-identical to an already-ported payload
+(the Xiaomi 14 `houji` kernel equals the Redmi Note 15 Pro+ `flourite` one).
+Hash the *decompressed* `Image` before treating a release-string match as the
+same port — `verify_payloads.py` does exactly that. Only the **full** OTA
+(`*-ota_full-*.zip`) carries a `payload.bin`; recovery incrementals do not.
 | `unpack_bootimg`, `extract-vmlinux` / LZ4 unwrap | `boot.img` → kernel → raw `Image`/vmlinux |
 | `vmlinux-to-elf` | kallsyms ELF when `nm` on the bare vmlinux comes up short |
 | `derive.py`, `sitecheck.py`, `blobsim2.py`, `evidence.py` | step 2 |
@@ -244,6 +259,18 @@ path (6.12/6.18 have a second `bl` bracketed by alloc-tag swaps — not it).
 
 `timer_site` is the **return address** (`bl` + 4): the caller reloads `x0`
 there, and that reload is what the planted fake node sees.
+
+Only the low 21 bits are used to scan the trace, and that is sound because the
+arm64 KASLR slide is `MIN_KIMG_ALIGN` (2 MB) aligned: `static_site & 0x1fffff`
+is the same at runtime, and the full captured address gives the slide
+(`site0 - timer_site`). So a low21 that never matches is **not** a KASLR
+problem — it means the device is running a different *image* than the one the
+profile was derived from, even when `uname -r` is identical. Vendor builds
+share a GKI release string but not the vendor defconfig, and the
+`do_timer_create` call site moves with it (the 6.6.118 family already has
+`0x195d48`, `0x195d50`, `0x195d94` and `0x1a4dfc`). The binary now prints the
+call sites it actually captured (`observed call_site=… low21=… count=…`) when
+the profile's site matches nothing; port that device, do not relax the filter.
 
 ### `copy_process_low21` (F3)
 
@@ -576,6 +603,11 @@ Grep the log; each line maps to one cause.
 | Log | Cause | Fix |
 |---|---|---|
 | `victim not captured` | `timer_alloc` / `timer_site` wrong | re-derive F3 |
+| `no call_site has low21 … (conf timer_site=…)` followed by `observed call_site=… low21=…` | the profile's `timer_site` belongs to another image; same `uname -r` is not enough (the low21 is KASLR-invariant, so this is a text-layout difference, not a bad slide) | port that device's boot.img (F3) — the observed `low21` narrows it to a known build; never relax the filter, the same value anchors the slide |
+| `N kmem_cache_alloc records …, none with bytes_req == bytes_alloc == …` | the trace works but `posix_timers_cache` has another object size | re-derive `timer_alloc` from `sizeof(struct k_itimer)`; compare `obj=` in the slabinfo line |
+| `the trace holds no kmem_cache_alloc record for pid …` | the `kmem:kmem_cache_alloc` event is not recording (tracefs instance without the event, or the enable write was rejected) | the binary now retries through `events/kmem/<event>/enable`; if it persists, check the tracefs instance |
+| `[!] kmem:… is not enabled (…)` | both the `rss_stat` trigger and the event's own `enable` file were rejected | check that `TR` is the instance the exploit reads and that the event exists |
+| `[!] cannot pin to cpu N (…)` | the shell cpuset does not contain the trigger CPU; tracing it would read an empty buffer and look like a bad profile | the binary traces an allowed CPU instead; record which one |
 | `victim index missing` | `NTIMERS` too low, slab order changed | re-derive geometry |
 | `bad base` | `linear_min/max` wrong for the VA layout | fix from the new layout |
 | `pair missing` | slab↔page ordering broken | check `slab_order`; try `pcp_free` |

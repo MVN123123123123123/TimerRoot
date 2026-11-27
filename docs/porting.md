@@ -162,6 +162,33 @@ From the factory image of that exact build:
 
 Log the hashes, symbol count and the three slabinfo lines.
 
+### Where the factory artifacts come from
+
+- **Pixel** — the factory zip on `developers.google.com/android/images`. The
+  inner `image-*.zip` is stored uncompressed, so `boot.img` and friends are
+  readable with HTTP ranges (`timerroot-port/pixel/fetch_boot.py`).
+- **Xiaomi / Redmi / POCO** — the HyperOS **full** OTA
+  (`<codename>-ota_full-<build>-*.zip` on `bigota.d.miui.com`). Only the full
+  OTA carries a `payload.bin`; recovery incrementals do not.
+  `timerroot-port/xiaomi/fetch_xi.py` reads the payload manifest with range
+  requests and reassembles `boot`, `vendor_boot` and `dtbo` without pulling the
+  7-10 GB zip. Take the build the device actually runs — the CN build for
+  CN-first models, otherwise the newest global/EEA one — because the banner,
+  not the model name, is the identity.
+- **Samsung** — the full firmware zip from SamMobile/Frija; the per-model
+  folders are listed in `timerroot-port/samsung/MANIFEST.md`.
+
+Two checks before deriving anything from a Xiaomi payload:
+
+- **The banner may already be in the tree.** Xiaomi ships one GKI payload
+  across a generation, so e.g. the Xiaomi 14 (`houji`) kernel `Image` is
+  byte-identical to the Redmi Note 15 Pro+ (`flourite`) one. A byte-identical
+  `Image` under the same release means an existing `conf/` is a candidate — but
+  its addresses still have to be verified against *this* vmlinux.
+- **`vendor_boot`/`dtbo` carry the vendor command line.** An
+  `android_arch_task_struct_size=` parameter there changes `task_alloc_bytes`;
+  read it before copying that value from a sibling device.
+
 ---
 
 ## Step 2 — Derive the numbers
@@ -379,6 +406,37 @@ the spray cover only the half without the stale node: root fails while every
 free objects slabinfo reports before measuring, and a plant whose victim
 offset is not a multiple of `timer_alloc` is rejected and retried.
 
+A matching `uname -r` does **not** mean the profile's text layout matches.
+Vendor builds on one GKI tag use different defconfigs, so the
+`do_timer_create` `kmem_cache_alloc` return address moves while the release
+string stays identical — the 6.6.118 family already has `0x195d48`,
+`0x195d50`, `0x195d94` and `0x1a4dfc`. The scan filters on
+`timer_site & 0x1fffff`, which the 2 MB-aligned KASLR slide does not change,
+so a wrong site is not a KASLR accident and must not be "fixed" by relaxing
+the filter: the same captured address is the slide anchor
+(`site0 - timer_site`), and a profile whose site is off writes the endgame to
+the wrong kernel address. Instead, calibration now distinguishes the three
+ways the scan can come up empty:
+
+- `the trace holds no kmem_cache_alloc record for pid …` — the event is not
+  recording. `enable_events()` used to write the `rss_stat` trigger and ignore
+  the result; a rejected write left the page events on, so `ids` passed and
+  only the timer scan starved. It now reads every event back and retries
+  through `events/kmem/<event>/enable`, naming any event that stays off.
+- `… none with bytes_req == bytes_alloc == …` — the object size is different;
+  re-derive `timer_alloc`.
+- `no call_site has low21 …` plus `observed call_site=… low21=… count=…` — the
+  text layout is different. Take the observed `low21`, match it against the
+  known builds for that family, and port that boot.img; do not reuse the
+  sibling's `timer_site`.
+
+The same applies to the CPU: every capture reads one CPU's `trace_pipe_raw`,
+so the allocating process must be pinned to it. `sched_setaffinity()` to
+`CPU_TRIG` can be denied by the vendor cpuset for the shell domain; the binary
+then traces an allowed CPU and logs `[!] cannot pin to cpu …` instead of
+reading a buffer the allocations never touched (which looks exactly like a bad
+profile).
+
 Run the gates in order and keep the log:
 
 | Gate | Command | What you want to see |
@@ -488,10 +546,15 @@ use the throwaway shim described in Step 5.
     child that starts as root proves nothing.
 12. **Never trust a stale binary** — check `TIMER_PROTOCOL=3` and the built
     asset's hash before blaming a profile for a missing fix.
+13. **Never widen the `timer_site` match to make a device calibrate.** The
+    captured address is the slide anchor; a profile whose site is off writes
+    the endgame to the wrong kernel address. Port the image instead.
 
 If something goes wrong, [SKILL.md §11](../SKILL.md#11-diagnostics) maps the
 log lines (`victim not captured`, `bad base`, `fake cred spills`, …) to their
-causes.
+causes. `base calibration failed` in particular is no longer opaque: the lines
+immediately above it say whether the trace event was off, the object size was
+different, or the profile's call site belongs to another image.
 
 ---
 

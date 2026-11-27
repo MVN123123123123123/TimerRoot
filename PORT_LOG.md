@@ -2083,3 +2083,45 @@ each link and which remain inconclusive. That audit confirms the exact Pixel 9a
 `tegu` CP3A.261005.005 factory set statically, including its product
 `system.img`; the remaining offline-only sets are inconclusive, and none is
 unsupported.
+
+**Same release string, different text (the `moon` failure class).** A field log
+from a device reporting `moon` with
+`6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k` — the `kunzite`/`goya`
+release, and the only profile that release selects — died at
+`[base] made=512 site=0 slide=0 best=0 count=0` with slabinfo confirming
+`order=1 size=0x2000 obj=264 per=31`. Geometry, page-event ids
+(`page_alloc=275 page_free=273 pairs=1029`) and the PID filter were all fine,
+so the trace held no `kmem_cache_alloc` record whose `call_site` matched
+`timer_site`. `TIMER_SITE_LOW21` is KASLR-invariant (the arm64 slide is 2 MB
+aligned), so that is a text-layout difference, not a slide: a vendor build on
+the same GKI tag with a different defconfig moves `do_timer_create`'s call
+site. The 6.6.118 family alone already has `0x195d48` (kunzite/goya),
+`0x195d50` (dada), `0x195d94` (iolite) and `0x1a4dfc` (Samsung).
+
+Two real defects were found while chasing it, neither sufficient to explain
+this log on its own:
+
+- `enable_events()` wrote the three `enable_event:kmem:…` commands to
+  `events/kmem/rss_stat/trigger` and ignored every result. A rejected write
+  left a run with the page events on — so `ids` passed and looked healthy —
+  and `kmem_cache_alloc` off, which is exactly `site=0 count=0`. Verified in
+  QEMU with the trigger `chmod 444` as uid 2000: the old binary exits 1 right
+  after the banner, the fixed one reads every event back, retries through
+  `events/kmem/<event>/enable`, and completes the run.
+- `pin()` ignored `sched_setaffinity()` failure. Every capture reads one CPU's
+  `trace_pipe_raw`, so a denied pin (vendor cpuset for the shell domain)
+  traces a buffer the allocations never touched and again produces
+  `site=0 count=0`. The binary now falls back to an allowed CPU and logs
+  `[!] cannot pin to cpu …`.
+
+Calibration now names the three empty-scan cases instead of only printing
+`site=0 count=0`: no `kmem_cache_alloc` records at all (event off), none with
+`bytes_req == bytes_alloc == timer_alloc` (object size differs), or the size
+matches but no `call_site` has the profile's low21 — in which case it prints
+the captured sites (`observed call_site=… low21=… count=…`) so the device can
+be ported. The `bestc < 4` floor stays: the base is the physical-page anchor
+used when `pair_slab_pfn()` misses, so a 1-3 vote base is a wrong-address
+write, and a slabinfo-confirmed *geometry* does not confirm the *pairing*.
+QEMU 6.6.118 gates re-run after the change: `slabinfo`, `F7_target`,
+`F8_ids`, `F9_probe`, `F10_leak` and `F11_verify`
+(`resuid=0/0/2000`, `ROOT_SHELL_OK`) all pass on the factory Image.
