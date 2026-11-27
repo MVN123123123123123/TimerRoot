@@ -237,23 +237,36 @@ def find_cache_alloc_site(path, func_addr, func_size, cachep_addr, label,
     """
     Return address (bl + 4) of the non-profiling kmem_cache_alloc that
     allocates `cachep_addr` inside the function at func_addr.
+
+    The alloc-tag twin allocates the *same* cachep, so the cachep dataflow
+    alone cannot separate them: collect every candidate and drop the
+    alloc-tag one only when a second candidate exists.  Classifying first and
+    filtering afterwards loses single-candidate functions where an unrelated
+    `mrs xN, SP_EL0` happens to sit in the post-call window (5.15
+    do_timer_create reads SP_EL0 right after the cache alloc for the
+    sigqueue).
     """
     if not func_addr or not cachep_addr:
         return None
     scan = min(max(func_size, 0x100) + 0x80, 0x4000)
     insns = disassemble_at(path, func_addr, scan)
+    candidates = []
     for i, (addr, mnem, ops) in enumerate(insns):
         if mnem != 'bl' or 'kmem_cache_alloc' not in ops:
-            continue
-        if is_alloc_tag_path(insns, i):
             continue
         if not resolve_cachep_before(insns, i, cachep_addr):
             if verbose:
                 print(f"[!] {label}: bl at 0x{addr:x} does not load "
                       f"0x{cachep_addr:x} into x0; skipping", file=sys.stderr)
             continue
-        return addr + 4
-    return None
+        candidates.append((addr, i))
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        plain = [c for c in candidates if not is_alloc_tag_path(insns, c[1])]
+        if plain:
+            candidates = plain
+    return candidates[0][0] + 4
 
 
 def find_timer_site(path, symbols, sizes):
@@ -538,11 +551,19 @@ def get_vendor_ext(vendor_boot_img):
 # ---------------------------------------------------------------------------
 
 def get_banner(image_path):
-    """The `Linux version <banner>` released by the Image, i.e. `uname -r`."""
+    """
+    The `Linux version <banner>` released by the Image, i.e. `uname -r`.
+
+    `printk("Linux version %s (%s)")` puts a literal format string in the
+    early-print path ahead of the real banner, so only accept a release
+    shaped like `X.Y.Z-...` (starts with a digit and carries a dash).  Without
+    that filter a 5.15 image yields the release `%s` and every later step
+    fails on a banner that uname -r will never print.
+    """
     out = run(['strings', '-a', image_path], check=False)
     for line in out.splitlines():
         m = re.search(r'Linux version (\S+)', line)
-        if m:
+        if m and m.group(1)[:1].isdigit() and '-' in m.group(1):
             return m.group(1)
     raise DeriveError("no 'Linux version' banner in the Image")
 
