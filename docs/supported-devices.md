@@ -480,7 +480,8 @@ not publish the value for that build; read the real value on a device with
   payload, so they have separate profiles. `charoite` is 6.12.30 and has no
   landlock cred blob (`selinux_blob_off = 0`). The three 6.12 kernels carry
   `android_arch_task_struct_size=512`, giving `task_alloc_bytes = 0x1440 +
-  0x200 = 0x1640`. `zephyr` is the repository's only 5.15 profile: 4-byte
+  0x200 = 0x1640`. `zephyr` is a 5.15 profile like the November-2026
+  `vermeer`/`zircon`, all three sharing the 5.15 data block: 4-byte
   `cred.usage`, `timer_alloc 0x108`, no vendor-size extension so
   `task_alloc_bytes` stays `0x1200`, and `pcp_free = 1`.
 - The Xiaomi 17 series is split by payload: `popsicle` has its own profile,
