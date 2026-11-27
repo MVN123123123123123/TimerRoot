@@ -531,11 +531,13 @@ instrumented build — the hash still prints, so such a transcript cannot be
 mistaken for the shipped binary. Keep `INIT_OVERRIDE` for a probe `init`.
 
 **Keep one F11 transcript per passing profile** in
-`work/qemu/logs/<release>.f11-pass.log`. `mass.py` only saves failing gates
-(`_save_log` on `f11-1`/`f11-2`), so a pass leaves no log behind and the
-evidence has to be reproduced later; a pass log is the only way to show the
-uid-2000 line, the `pcp reclaim go` line and `resuid=0/0/2000` together for
-that exact binary.
+`work/qemu/logs/<release>.f11-pass.log`. `mass.py` writes the passing
+transcript as `f11-pass` alongside the failing `f11-1`/`f11-2` attempts
+(a retry pass also keeps its `f11-0` miss), so the uid-2000 line, the
+`pcp reclaim go` line and `resuid=0/0/2000` are all recoverable for the exact
+binary that produced them. Earlier harness revisions saved only failures,
+which is why some older cells cite a JSON summary no one can re-audit;
+re-running such a profile is the only fix.
 
 When the profile's slab geometry should be proven rather than pinned, boot
 once **without** `slub_min_order` and read the `posix_timers_cache` line from
@@ -549,6 +551,20 @@ Boot parameters are derived, not guessed:
 - pass `android_arch_task_struct_size=<value>` if the firmware sets it,
 - pin `slub_min_order=<slab_order>` so SLUB picks the phone's geometry instead
   of choosing from the VM's CPU count,
+- leave `--mem` at the harness default. Raising it is not a fix for a 16K
+  page-size profile, and it can break one: a 16K profile whose slab is order 0
+  (`slab_size = 0x4000`) relies on real memory pressure to push the freed page
+  out of the buddy allocator before the spray catches it. At 6144 MB every
+  plant logged `free_seen=0 burst hit=0` for all six attempts, while the same
+  profiles pass in well under a minute at the default 3072 MB.
+- when a 16K run does log `invoked oom-killer` (blazer 16K does, at ~73 s in
+  `alloc_skb_with_frags` ← `unix_stream_sendmsg`), treat the OOM as a
+  **symptom, not the cause**. The guest only exhausts memory because every
+  plant missed and retried six times; the miss comes from a bad `[ids]` line
+  (see the `FAIL(ids=… text=…)` row in `SKILL.md`), which leaves the wrong
+  page-free event id and makes `scan_reclaim` blind. Fix the `ids` reading —
+  re-run, and if it repeats raise the settle before `ids` — rather than giving
+  the guest more memory, which suppresses the reclaim the exploit needs.
 - raise the socket buffer sysctls in the initramfs (`wmem_max` / `rmem_max`
   around 1 MB) **if the spray starves**. The shipped `base/init` does *not*
   set them, and every 5.10/5.15/6.1/6.6/6.12/6.18 profile that has a
@@ -644,6 +660,14 @@ plant with a fresh pool up to six times; `plant n left child uid=…; retrying`
 is a normal recoverable miss. A lost race here is a harness artefact, not a
 profile fault: retry once and record both attempts. A 16K build needs its own
 QEMU pass.
+
+**Do not retry over a bad `[ids]` line.** If F8 reports an event id outside
+1..1024 — most often `page_free=1701669690`, which is `":kme"` read as
+ASCII — the trace was consumed as text, not binary records. That wrong id
+makes `scan_reclaim()` compare against an event that never fires, so every
+plant misses for a reason that has nothing to do with the profile. Stop,
+re-run the whole profile, and record the miss; retrying F11 or adding guest
+memory only buries it.
 
 **`hit=1` proves the reclaim, never the write.** `scan_reclaim()` sets the hit
 when *any* spray thread's `page_alloc` took the victim pfn after a `page_free`.
