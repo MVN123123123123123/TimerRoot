@@ -758,11 +758,16 @@ under `conf/samsung/`.
 - **F1 vulnerability** `begin_new_exec` still calls `posix_cpu_timers_exit`
   (`0xffffffc0084c8e4c`) before `exit_itimers` (`0xffffffc0084c8e5c`).
 - **F6** `validate_conf.py` 0 errors, `--selfcheck` 0 failures.
-- **F7–F11** all pass in QEMU against the factory `Image`, first attempt:
+- **F7–F10** pass in QEMU against the factory `Image`, first attempt:
   `target` prints `timer_site=0xffffffc0082048c4` and `samsung=1`; `ids`
   `page_alloc=263 page_free=261 pairs=1029`; `probe` votes
-  `base=0xffffff7fc0000000` with `pair … agree=1`; `leak` 512/512 votes;
-  verify reaches `resuid=0/0/0` + `ROOT_SHELL_OK`.
+  `base=0xffffff7fc0000000` with `pair … agree=1`; `leak` 512/512 votes.
+- **F11 blocked: no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`.** The 5.15 arm64
+  kernel does not select `HAVE_POSIX_CPU_TIMERS_TASK_WORK`, so the
+  `exit_itimers` position is never reached from the timer-free path this
+  exploit arms. The old `resuid=0/0/0` line here is a pre-uid-2000,
+  root-harness run and is not evidence. Unsupported by configuration; do not
+  retry (see the config-gate section).
 - **Samsung endgame** verified separately under `--samsung fake`: the
   `defex_hash` stage clears `creds_fast_hash[105]`, the `fake_cred` stage
   plants the fake cred and `selinux_state`, then `fake_uid`/`fake_euid` repair
@@ -955,8 +960,9 @@ were re-derived from the SM-S937B factory `boot.img`.
   `timer_site=0xffffffc0801962b0`; `ids` `page_alloc=275 page_free=273
   pairs=1029`; `probe` `recs=4096 kept=4096` with
   `base=0xffffff7fc0000000` and `pair … agree=1`; `leak` 512/512 votes;
-  verify reaches `child report uid=0 euid=0 setuid(0)=0 errno=0
-  resuid=0/0/0` and `ROOT_SHELL_OK`.
+  verify reaches `child report uid=0 euid=2000 setuid(0)=0 errno=0
+  resuid=0/0/2000` and `ROOT_SHELL_OK` (re-run 2026-11-28 under the uid-2000
+  rule, transcript `logs/samsung-s25edge-6.6.127.f11-pass.log`).
 - **Samsung endgame** under `--samsung fake` (same QEMU shim; harness log
   `logs/samsung-s25edge-fake.log`): `defex_hash`
   clears `creds_fast_hash[134]`, the `fake_cred` stage plants the fake cred
@@ -1060,7 +1066,7 @@ hashes differ), so `release_prefix` pins the full banner including the
   binary refuses with `conf release prefix mismatch: conf=…abS911BXXUAGZIF
   running=…abS916BXXUAGZIF`, exit 1, before any kernel access. All 29 bundled
   confs still validate with 0 errors.
-- **F7–F11** all pass in QEMU on the first attempt
+- **F7–F10** pass in QEMU on the first attempt
   (`timerroot-port/work/qemu/logs/mass.json` at the time of the port; the
   current file of that name holds a later kunzite run, so cite the s23
   transcript — `logs/samsung-s23-*` — or re-run it), against the factory
@@ -1069,8 +1075,16 @@ hashes differ), so `release_prefix` pins the full banner including the
   `pagesperslab 2` (order 1), `task_struct` `4608` (`0x1200`) and `cred_jar`
   `192` (`0xc0`); `target` prints the banner, `pagesize=4096` and the profile
   `timer_site`; `ids` `page_alloc=263 page_free=261 pairs=1029`; `probe`
-  `recs=4096 kept=4096`; `leak` 512/512 votes; verify reaches
-  `uid=0 euid=0 … resuid=0/0/0`. F12/F13 stay pending on a device.
+  `recs=4096 kept=4096`; `leak` 512/512 votes.
+- **F11 blocked: no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`.** This is a 5.15
+  arm64 kernel, which does not select `HAVE_POSIX_CPU_TIMERS_TASK_WORK`, so
+  the timer-free (`posix_cpu_timers_exit`) path is never armed the way the
+  exploit needs. The old `resuid=0/0/0` line came from a pre-uid-2000,
+  root-harness run. A 2026-11-28 re-run reproduces the batch signature
+  verbatim (`pcp reclaim go`, `free_seen=1 burst hit=1`, `reaping`,
+  `write mode=zero`, then `[!] plant N left child uid=2000` ×6).
+  Unsupported by configuration; do not retry. F12/F13 stay pending on a
+  device.
 - **QEMU note** the factory `Image` does **not** boot under
   `qemu-system-aarch64` unmodified (same class of failure as a15xzh and
   s25edge): RKP calls into the Knox secure monitor (`smc #0` in the `uh_call`
@@ -1180,23 +1194,33 @@ is not usable for this profile.
   foreign 5.15 Samsung banner is refused with
   `conf release prefix mismatch` before any kernel access, and the 16K
   profile still refuses a 4K host page size.
-- **F7–F11** all pass in QEMU on the first shim boot (`logs/mass-s23fe.json`),
+- **F7–F10** pass in QEMU on the first shim boot (`logs/mass-s23fe.json`),
   against the factory kernel booted through the QEMU-only vendor-hook shim
   below. Slabinfo reports `posix_timers_cache` object `264` (`0x108`), 31
   objects at `pagesperslab 2` (order 1), `task_struct` `4736` (`0x1280`) and
   `cred_jar` `192` (`0xc0`); `target` prints the banner, `pagesize=4096` and
   `timer_site=0xffffffc0081a2db0`; `ids` `page_alloc=260 page_free=258
   pairs=1029`; `probe` `recs=4096 kept=4096` with a `pair … agree=1`; `leak`
-  512/512 votes; verify reaches `child report uid=0 euid=0 setuid(0)=0
-  errno=0 resuid=0/0/0` and `ROOT_SHELL_OK` (a standalone verify transcript
-  is kept in `logs/samsung-s23fe-f11.log`). F12/F13 stay pending on a
+  512/512 votes.
+- **F11 blocked: no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`.** A 5.10 arm64
+  kernel does not select `HAVE_POSIX_CPU_TIMERS_TASK_WORK`, so the exploit's
+  timer-free path is not armed. The old `resuid=0/0/0` + `ROOT_SHELL_OK`
+  lines in `logs/samsung-s23fe-f11.log` come from the pre-uid-2000
+  root harness and are not evidence. A 2026-11-28 re-run reproduces the batch
+  signature (`pcp reclaim go`, `free_seen=1 burst hit=1`, `reaping`,
+  `write mode=zero`, then `[!] plant N left child uid=2000` ×6).
+  Unsupported by configuration; do not retry. F12/F13 stay pending on a
   device.
 - **Samsung endgame** under `--samsung fake` (same shim; harness log
   `logs/samsung-s23fe-fake.log`): `defex_hash` clears
   `creds_fast_hash[197]`, then the `fake_cred`, `selinux_state`, `fake_uid`
   and `fake_euid` plants each land on the first attempt (`free_seen=1` /
-  `burst hit=1`, `[ksu] panic_on_warn=0`), the worker reports `uid=0 euid=0`
-  and `setuid(0)=0 errno=0 resuid=0/0/0`. The KDP-safe setup then
+  `burst hit=1`, `[ksu] panic_on_warn=0`), and the worker reports
+  `uid=0 euid=0` with `setuid(0)=0 errno=0`. **This log is pre-rule**: it has
+  no `runhigh: uid=2000` line, so the `resuid=0/0/0` it records comes from
+  the root harness and does not prove the write landed from an unprivileged
+  caller. It is recorded here only as the stage-ladder evidence it is. The
+  KDP-safe setup then
   `unshare(CLONE_NEWNS)`es, remounts `/` private and fails the ksud bind
   mount with `errno=2` (the QEMU initramfs has no ksud source), runs the
   stage script and stops at `[ksu] ksud missing` / `KSU_MISSING`, worker
@@ -1351,9 +1375,12 @@ NDK command) on both zephyr 5.15 and spinel 6.12:
 | fixed | writes `fake_cred` + `selinux_state`, child `resuid=0/0/0` | full chain, see the a15xzh section |
 
 The zero-write `verify` path was unaffected either way (it never reads
-`g_slide`) and was re-run after the fix on a15xzh and zephyr: still
-`resuid=0/0/0` + `ROOT_SHELL_OK`. `app/src/main/assets/timer` was rebuilt from
-the fixed source.
+`g_slide`) and was re-run after the fix on a15xzh and zephyr. Those runs are
+**pre-rule**: they record `resuid=0/0/0` with no `runhigh: uid=2000` line, so
+they show the path still works, not that the write lands from an unprivileged
+caller. a15xzh is config-blocked anyway (see the config-gate section); zephyr
+is 5.15 and blocked for the same reason. `app/src/main/assets/timer` was
+rebuilt from the fixed source.
 
 `validate_conf.py` needed two fixes for this port, both in the tool and not the
 profiles: it resolved a profile to a vmlinux by the `release` field, which
@@ -1439,8 +1466,10 @@ below).
   `target` prints the banner, `pagesize=4096` and
   `timer_site=0xffffffc008194fe0`; `ids` `page_alloc=264 page_free=262
   pairs=1029`; `probe` `recs=4096 kept=4096`; `leak` 512/512 votes; verify
-  reaches `child report uid=0 euid=0 setuid(0)=0 errno=0 resuid=0/0/0` plus
-  `ROOT_SHELL_OK`. F12/F13 stay pending on a device.
+  reaches `child report uid=0 euid=2000 setuid(0)=0 errno=0 resuid=0/0/2000`
+  plus `ROOT_SHELL_OK` (re-run 2026-11-28 under the uid-2000 rule, transcript
+  `logs/samsung-s24fe-6.1.162.f11-pass.log`). F12/F13 stay pending on a
+  device.
 - **Profile selection** the four 6.1.162 Exynos models share one `uname -r`,
   so `confMatches()` alone cannot tell their profiles apart. `UserService`
   now keeps a `device_model`-pinned Samsung conf only when
@@ -1858,8 +1887,8 @@ ones in this batch (plus `zephyr` from the earlier port).
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/2000`; nine of the twelve 2026-batch kernels pass, the other three (no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`) are blocked, see the batch section above, as is zephyr |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
-| F14 QEMU | pass | every generic profile with a workspace `Image` passes every gate (table below); s23fe, s24fe, s25edge and s23 pass in their own shim runs; s26u is the only provenance exception, not a binary result |
-| F15 hardware | pass (OnePlus 13) | CPH2653 on `2026-11-27`: first-attempt plant, `resuid=0/0/0`; not yet run on the other profiles |
+| F14 QEMU | pass | every generic profile with a workspace `Image` passes every gate (table below); s24fe and s25edge pass in their own shim runs, while s23 and s23fe stop at F11 as config-blocked; s26u is the only provenance exception, not a binary result |
+| F15 hardware | pass (OnePlus 13) | CPH2653 on `2026-11-27`: first-attempt plant; the `resuid=0/0/0` recorded then predates the uid-2000 rule, so the device run needs one repeat with the current harness before it can be cited as proof; not yet run on the other profiles |
 | F16 app | defer | tables carry `verified in QEMU`, or `tested` where F15 ran (OnePlus 13); other rows flip to `tested` only after their own hardware run |
 
 ### F14 — QEMU mass run
@@ -2335,10 +2364,13 @@ byte-identical payloads for both page sizes. The 4K image is
     at order 1, `task_struct` `0x1750` rounded to `0x1780` for align 64);
     F8 ids `a=334 f=332 n=1029`; F9 probe `recs=4096 kept=4096`,
     `pair agree=1`; F10 leak `made=512 votes=512`; F11 verify
-    `resuid=0/0/0`, `ROOT_SHELL_OK`.
+    `resuid=0/0/2000`, `ROOT_SHELL_OK` (re-run under the uid-2000 rule:
+    `/tmp/opencode/x/u2000/p11.json`).
   - 16K: slabinfo pass (order 0); F8 ids `a=334 f=332 n=1027`; F9 probe
     `recs=4096 kept=4096`; F10 leak `made=512 votes=512`; F11 verify
-    `resuid=0/0/0`, `ROOT_SHELL_OK`.
+    `resuid=0/0/2000`, `ROOT_SHELL_OK` (re-run at the default 3072 MB:
+    `/tmp/opencode/x/u2000/p11-16k-3g.json`, transcript
+    `logs/6.12.81-…-gf5369e7496cb-ab16467452-16k.f11-pass.log`).
 - **F12-F13** need a device, as always (no SELinux policy / KernelSU in
   the QEMU initramfs). **F15** hardware pending; **F16** rows added to
   `docs/supported-devices.md` as `verified in QEMU`.
