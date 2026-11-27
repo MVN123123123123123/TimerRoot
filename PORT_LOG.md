@@ -844,14 +844,23 @@ under `conf/samsung/`.
   (`…abogkiS931BXXUDDZJB-4k`, the S25 Ultra kernel) is refused with
   `conf release prefix mismatch` and no kernel access.
 - **F7–F11** all pass in QEMU against the **unmodified factory `Image`**
-  (first attempt, `logs/mass-s26fe.json`; re-run after the spray-write fix and
-  pool recycle, `logs/mass.json`, still 0 failing gates): slabinfo reports
-  `posix_timers_cache` object `264` (`0x108`) at `pagesperslab 2` (order 1)
-  and `task_struct` `4800` (`0x12c0`); `target` prints
+  (`logs/mass-s26fe.json` for the pre-uid-2000 sweep, and
+  `logs/mass-recl.json` — the 27-profile re-run after the spray-write fix and
+  pool recycle — where s26fe's row is the second `PASS` entry): slabinfo
+  reports `posix_timers_cache` object `264` (`0x108`) at `pagesperslab 2`
+  (order 1) and `task_struct` `4800` (`0x12c0`); `target` prints
   `timer_site=0xffffffc080197280` and `samsung=1`; `ids`
   `page_alloc=275 page_free=273 pairs=1029`; `probe` votes
   `base=0xffffff7fc0000000` with `pair pfn` `agree=1`, `recs=4096 kept=4096`;
-  `leak` 512/512 votes; verify reaches `resuid=0/0/0` + `ROOT_SHELL_OK`.
+  `leak` 512/512 votes.
+
+  **F11 evidence.** `mass-recl.json` (2026-11-13) and `mass-s26fe.json`
+  (2026-11-18) are both pre-rule: the first records a bare `PASS` with no
+  `resuid=` suffix and the second `FAIL(plant)`, so neither is evidence.
+  s26fe was re-run on 2026-11-28 with the canonical binary and now has
+  `PASS(resuid=0/0/2000)` plus the transcript
+  `logs/samsung-s26fe-6.6.127.f11-pass.log` (`free_seen=1 burst hit=1`,
+  `child report uid=0 euid=2000 … resuid=0/0/2000`, `ROOT_SHELL_OK`).
 - **Samsung endgame** under `--samsung fake`: `defex_hash` clears
   `creds_fast_hash[pid]`, the `fake_cred` stage plants the fake cred, then
   `selinux_state` and the uid/euid repair writes run, and the worker reaches
@@ -1051,8 +1060,11 @@ hashes differ), so `release_prefix` pins the full banner including the
   binary refuses with `conf release prefix mismatch: conf=…abS911BXXUAGZIF
   running=…abS916BXXUAGZIF`, exit 1, before any kernel access. All 29 bundled
   confs still validate with 0 errors.
-- **F7–F11** all pass in QEMU on the first attempt (`logs/mass.json`), against
-  the factory kernel booted through the QEMU-only vendor-hook shim below.
+- **F7–F11** all pass in QEMU on the first attempt
+  (`timerroot-port/work/qemu/logs/mass.json` at the time of the port; the
+  current file of that name holds a later kunzite run, so cite the s23
+  transcript — `logs/samsung-s23-*` — or re-run it), against the factory
+  kernel booted through the QEMU-only vendor-hook shim below.
   Slabinfo reports `posix_timers_cache` object `264` (`0x108`), 31 objects at
   `pagesperslab 2` (order 1), `task_struct` `4608` (`0x1200`) and `cred_jar`
   `192` (`0xc0`); `target` prints the banner, `pagesize=4096` and the profile
@@ -1533,6 +1545,22 @@ it absent:
 (`zephyr`'s 5.15.194 `gf5526d1116e5`, from the earlier Redmi Note 17 port, is
 blocked the same way and is counted in the blocked group there.)
 
+**The three Samsung 5.x profiles belong to this group as well.** Checking the
+same `IKCFG_ST` blob in their factory `Image`s (2026-11-28) gives
+`CONFIG_POSIX_TIMERS=y`, **no** `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` and **no**
+`CONFIG_HAVE_POSIX_CPU_TIMERS_TASK_WORK` for `samsung-s23` (5.15.197,
+`abS911BXXUAGZIF`), `samsung-s23fe` (5.10.240, `abS711BXXSJGZI6`) and
+`samsung-a15xzh` (5.15.189, `33641424`); `samsung-s24fe` (6.1.162),
+`samsung-s25edge` and `samsung-s26fe` (6.6.127) all have both `=y`. That
+matches upstream exactly — arm64 `select`s `HAVE_…` only from 6.1 — so the
+split is kernel-family, not vendor: **every** 5.x arm64 profile here is
+blocked and every 6.1+ one is not. Re-running `samsung-s23` under the current
+harness reproduces the batch signature verbatim (`pcp reclaim go (slab 8711 ->
+4805, 23ms)`, `free_seen=1 burst hit=1`, `reaping`, `write mode=zero`, then
+`[!] plant N left child uid=2000`, `logs/samsung-s23-5.15.197.f11-{1,2}.log`).
+Its old `pass` cell in the F14 table came from a pre-rule root run and is not
+evidence.
+
 Upstream backing, read from the 5.15.194/6.1.157 trees: `run_posix_cpu_timers()`
 either `task_work_add(&tsk->posix_cpu_timers_work, …)` when
 `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` is set, or calls
@@ -1824,7 +1852,7 @@ ones in this batch (plus `zephyr` from the earlier port).
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
 | F6 build the profile | pass | `validate_conf.py` 0 errors on all 48 profiles (41 generic + 7 Samsung); `--selfcheck` 0 failures, run in QEMU against each factory `Image` so it sees that kernel's real slab geometry |
 | F7 `timer target` | pass (QEMU) | every generic profile with a workspace `Image`, plus the s23fe, s24fe, s25edge and s23 shim runs, prints its own `timer_site`, exit 0 |
-| F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
+| F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile; `mass.py` now rejects an out-of-range id (the discover loop only accepts 1..1024) and names the printable-ASCII case, which is how a text-mode trace read is caught |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
 | F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/2000`; nine of the twelve 2026-batch kernels pass, the other three (no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`) are blocked, see the batch section above, as is zephyr |
@@ -1916,6 +1944,8 @@ run.
 | 6.1.138-…-ab13911623 | lapis | pass | pass | pass | pass | pass | pass |
 | 6.1.162-…-ab16261587 | tegu (Pixel 8/9) | pass | pass | pass | pass | pass | pass |
 | 6.1.162-…-ab16261587-16k | tegu 16K | pass | pass | pass | pass | pass | pass (retry) |
+| 6.1.172-…-ab16385437 | Pixel 6a-10a (15 devices) | pass | pass | pass | pass | pass | pass |
+| 6.1.172-…-ab16385437-16k | Pixel 6a-10a 16K | pass | pass | pass | pass | pass | pass |
 | 6.12.30-…-ab13847919-4k | charoite | pass | pass | pass | pass | pass | pass |
 | 6.12.69-…-ab15889839-4k | spinel | pass | pass | pass | pass | pass | pass |
 | 6.12.69-…-abogki558343811-4k | popsicle | pass | pass | pass | pass | pass | pass |
@@ -1923,7 +1953,7 @@ run.
 | 6.12.69-…-abogki537510563-4k | brussels | pass | pass | pass | pass | pass | pass |
 | 6.12.69-…-ab16108597-4k | cubs (Pixel 11) | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-ab16388316-4k | blazer (Pixel 10 Pro) | pass | pass | pass | pass | pass | pass |
-| 6.12.81-…-ab16388316-16k | blazer 16K | pass | pass | pass | pass | pass | pass |
+| 6.12.81-…-ab16388316-16k | blazer 16K | pass | pass | **pass (intermittent)** | pass | pass | pass (retry) |
 | 6.12.81-…-gf5369e7496cb-4k | cubs/grizzly/kodiak/yogi (Pixel 11) | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-gf5369e7496cb-16k | Pixel 11 16K | pass | pass | pass | pass | pass | pass |
 | 6.18.21-…-abogki555938958-4k | hongkong/madrid | pass | pass | pass | pass | pass | pass |
@@ -1935,11 +1965,11 @@ run.
 | 6.6.118-…-ab15511674-4k | kunzite | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-gc4127a25dcf3-ab15863337-4k | OnePlus 13 (CPH2653) | pass | pass | pass | pass | pass | pass |
 | 6.6.127-…-ab16252310-4k | frankel (Pixel 10) | pass | pass | pass | pass | pass | pass |
-| samsung-a15xzh-5.15.189 | a15xzh (Galaxy A15 5G) | pass | pass | pass | pass | pass | pass |
+| samsung-a15xzh-5.15.189 | a15xzh (Galaxy A15 5G) | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
 | samsung-s26fe-6.6.127 | s26fe (Galaxy S26 FE) | pass | pass | pass | pass | pass | pass |
 | samsung-s25edge-6.6.127 | s25edge (Galaxy S25 Edge) | pass | pass | pass | pass | pass | pass |
-| samsung-s23-5.15.197 | s23 (Galaxy S23) | pass | pass | pass | pass | pass | pass |
-| samsung-s23fe-5.10.240 | s23fe (Galaxy S23 FE) | pass | pass | pass | pass | pass | pass |
+| samsung-s23-5.15.197 | s23 (Galaxy S23) | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
+| samsung-s23fe-5.10.240 | s23fe (Galaxy S23 FE) | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
 | samsung-s26u-6.1.162 | s26u (Galaxy S24/S26 Ultra) | pass | pass | pass | n/a | n/a | n/a |
 | samsung-s24fe-6.1.162 | s24fe (Galaxy S24 FE) | pass | pass | pass | pass | pass | pass |
 
@@ -2003,6 +2033,49 @@ F2's `slabinfo` lines are now confirmed for every profile that has an image.
 F12 and F13 stay pending because the QEMU initramfs has neither an SELinux
 policy nor KernelSU; those two are the remaining gates that a device has to
 supply.
+
+### Re-audit under the uid-2000 rule (2026-11-28)
+
+Everything in the earlier sweep sections above was produced before the
+uid-2000 rule was adopted, so a bare `PASS` cell there is not evidence: only a
+transcript or JSON that spells out `resuid=0/0/2000` proves the write primitive
+landed from an unprivileged caller. Each profile was re-run with the canonical
+binary (`b05a46ff…`) and the same `initramfs.cpio.gz`, and the result recorded
+as `PASS(resuid=0/0/2000)`.
+
+**36 of the 50 confs now carry auditable post-rule evidence.** The 14 that do
+not split cleanly, with no unexplained gaps:
+
+| group | confs | why |
+|---|---|---|
+| config-blocked 5.x | garnet (5.10.236), vermeer/zircon/zephyr (5.15.194), s23 (5.15.197), s23fe (5.10.240), a15xzh (5.15.189) | no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`; they pass F7–F10 and stop at F11 by design |
+| no factory image | the two `maybe-dirty` confs, the four OPPO/realme imports | nothing to boot; one was derived from a device dump |
+| provenance mismatch | s26u | `release_prefix` prefix-matches the S24 FE `Image`, whose build is not this profile's |
+
+The seven config-blocked entries are one kernel-family property, not seven
+incidents: arm64 only `select`s `HAVE_POSIX_CPU_TIMERS_TASK_WORK` from 6.1, so
+**every 5.x arm64 profile in this tree is blocked and every 6.1+ one is not.**
+Checking the `IKCFG_ST` blob of each Samsung factory `Image` extended the group
+to `s23`, `s23fe` and `a15xzh`; their old `pass` cells came from pre-rule root
+runs. `s23` re-run under the current harness reproduces the batch signature
+verbatim (`pcp reclaim go (slab 8711 -> 4805, 23ms)`, `free_seen=1 burst hit=1`,
+`reaping`, `write mode=zero`, then `[!] plant N left child uid=2000`).
+
+Two 16K findings came out of this pass:
+
+- **Do not raise the guest memory.** At `--mem 6144` all six plants on
+  `tegu16k`, `p11-16k` and `blazer16k` logged `free_seen=0 burst hit=0`,
+  because a larger guest removes the memory pressure that pushes the freed
+  order-0 page out of the buddy allocator. At the default 3072 MB `tegu16k`
+  and `p11-16k` pass in 20–35 s. Only `blazer16k` is genuinely tight, and its
+  `invoked oom-killer` (`alloc_skb_with_frags` ← `unix_stream_sendmsg`) is a
+  symptom of six failed plants, not the cause.
+- **`ids` can read the trace as text.** `blazer16k` intermittently reports
+  `page_free=1701669690` = `0x656d6b3a` = ASCII `":kme"`, i.e. a fragment of an
+  event name rather than an event id. The discover loop only accepts ids
+  1..1024, so `mass.py` now fails such a line instead of passing it, and prints
+  the decoded text to make the cause obvious. That bad id leaves the page-free
+  event wrong and blinds `scan_reclaim`, which is what causes the six misses.
 
 ### What has been verified without a device
 
@@ -2108,6 +2181,14 @@ sha256 `184a9ba1dd675a46…`).
   16K, `task_struct` 0x12c0), F7 target, F8 ids (a=263 f=261), F9 probe
   (4096/4096), F10 leak (made=512 votes=512), F11 verify
   (`child report uid=0 euid=0 setuid(0)=0 resuid=0/0/0`).
+
+  **Re-run 2026-11-28 with the uid-2000 harness and the canonical binary**
+  (`logs/recheck-6172.json`): both page sizes pass every gate,
+  `F11_verify=PASS(resuid=0/0/2000)`, `slabinfo` confirming order 1 / 0 and
+  `task_struct 0x12c0`. The 11-16 transcript above is a **root** run and
+  predates the uid-2000 rule (harness drop 2026-11-21 23:37), so the
+  `resuid=0/0/0` in it proved nothing; this later run is the valid F11
+  evidence for both confs.
 - **F12-F13** need a device, as always. The `tested` hardware rows in
   `docs/supported-devices.md` still refer to the 6.1.162 build.
 
