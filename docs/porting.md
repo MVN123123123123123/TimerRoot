@@ -309,6 +309,55 @@ Log the address plus a disassembly snippet, the 6/6 symbols and the LSM order.
 The helper scripts (`derive.py`, `sitecheck.py`, `blobsim2.py`, `evidence.py`)
 regenerate those tables straight from `vmlinux` + BTF.
 
+### 2.7 `scripts/derive_conf.py` — the mechanical part
+
+`scripts/derive_conf.py` automates steps 2.1–2.5 and refuses to write a profile
+when a critical constant could not be established. It is a starting point for
+a port, **not** a substitute for the gates: F1 (is the bug present) and F6–F16
+still have to be run and logged.
+
+```sh
+vmlinux-to-elf Image vmlinux.elf
+scripts/derive_conf.py \
+  --vmlinux vmlinux.elf --image Image \
+  --vendor-boot vendor_boot.img \
+  --slab-order 1 \
+  --device "OPPO Reno 16F" \
+  --output conf/<banner>.conf
+```
+
+What it derives, and from where:
+
+| Value | Source |
+|---|---|
+| `release` | the `Linux version` banner inside the Image — the only string `uname -r` will match |
+| `page_size`, `page_shift`, `linear_min`/`linear_max` | `file Image`; the direct-map window is `0xffff...` on 16K/64K and `0xffffff...` on 4K |
+| `ksu_kmi` | inferred from the banner (`-android16-` + `6.12`) |
+| `timer_site` | the `bl kmem_cache_alloc[_noprof]` in `alloc_posix_timer`/`do_timer_create` whose `x0` was built from `posix_timers_cache`, skipping the alloc-tag twin |
+| `copy_process_low21` | the same, for `task_struct_cachep` in `dup_task_struct`/`copy_process` |
+| `timer_alloc`, `timer_node_off`, all `cred_*`, `task_cred_off`, `alloc_req_off` | BTF (`k_itimer`, `cred`, `task_struct`, `trace_event_raw_kmem_cache_alloc`) |
+| `selinux_blob_off` | replaying `lsm_set_blob_size` over `__start_lsm_info`..`__end_lsm_info`, using only LSMs the registry actually contains |
+| `task_alloc_bytes` | BTF `sizeof(task_struct)` + `android_arch_task_struct_size` from `vendor_boot.img` (not rounded — the exploit's scanner matches the exact request) |
+| `pcp_free` | `1` on 5.10/5.15/6.1; let the QEMU run decide on 6.6+ |
+
+Four things it deliberately does **not** guess:
+
+- **`slab_order`/`slab_size`.** SLUB derives the order from the device's
+  possible-CPU count, so it is a hardware fact. The script emits a placeholder
+  (0 on 16K+, else 1) and warns; pass `--slab-order` once `/proc/slabinfo`
+  answers. Pixel 11 on 4K is order 0, not the family default 1.
+- **`task_alloc_bytes`** is not rounded to 64: the scanner compares against the
+  literal `bytes_req`, so the vendor extension has to be added unrounded
+  (`0x1440 + 0x310 = 0x1750`).
+- **F1.** Whether the Image still calls `posix_cpu_timers_exit()` before
+  `exit_itimers()` decides if the port exists at all.
+- **The device run.** Everything up to F6 is static.
+
+If a symbol, a call site or a BTF struct is missing, the script exits non-zero
+without writing the file. That is the correct outcome: a profile with
+`timer_site = 0x0` is not a draft, it is a memory-corruption bug waiting for a
+user (the loader rejects it, but only after the app has shipped it).
+
 ---
 
 ## Step 3 — Write the profile

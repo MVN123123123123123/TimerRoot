@@ -212,6 +212,7 @@ same port — `verify_payloads.py` does exactly that. Only the **full** OTA
 | `unpack_bootimg`, `extract-vmlinux` / LZ4 unwrap | `boot.img` → kernel → raw `Image`/vmlinux |
 | `vmlinux-to-elf` | kallsyms ELF when `nm` on the bare vmlinux comes up short |
 | `derive.py`, `sitecheck.py`, `blobsim2.py`, `evidence.py` | step 2 |
+| `scripts/derive_conf.py` | step 2 end-to-end from `Image` + BTF + `vendor_boot` (in-repo; fails closed) |
 | `validate_conf.py` | step 4 |
 
 Keep `init_boot.img` too on Android 13+; init moved there. For an access audit,
@@ -257,7 +258,9 @@ Gate: vmlinux with symbols, `btf.bin`, slabinfo lines, hashes recorded.
 
 Five numbers per build; use `derive.py` / `sitecheck.py` and verify by
 disassembly, **by surrounding instruction sequence, never by symbol name
-alone**.
+alone**. `scripts/derive_conf.py` does all of step 2 mechanically and refuses
+to write a conf if a symbol, call site or BTF struct is missing — but it is a
+starting point, not the gate (§2.7 of `docs/porting.md`).
 
 ### `timer_site` (F3)
 

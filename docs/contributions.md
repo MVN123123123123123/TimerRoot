@@ -67,6 +67,13 @@ derived from their own factory images without a target-specific port to
 cross-check against. The OPPO, realme and Meizu profiles are imported vendor
 profiles from `rikumi/TimerRoot`. the Samsung profiles are mostly self-ported.
 
+## Tooling and port automation
+
+| Project | Used for |
+|---|---|
+| [huanhoahongso3-collab/TimerRoot](https://github.com/huanhoahongso3-collab/TimerRoot) | Fork that prototyped an automated porting pipeline: a `derive_conf.py` that reads a factory `vmlinux` + BTF to emit a profile, plus a `kernel-port` GitHub Actions workflow that unpacks a `boot.img`, derives the conf, runs `--selfcheck` and opens a PR. The script's approach (symbol + disassembly + BTF derivation, fail if a constant is missing) is the basis of [scripts/derive_conf.py](../scripts/derive_conf.py) |
+| [huanhoahongso3-collab/TimerRoot `scripts/build.ps1`](https://github.com/huanhoahongso3-collab/TimerRoot/blob/main/scripts/build.ps1) | The Gradle-free PowerShell build path documented in [Building](building.md), developed in that fork. |
+
 ## License notes
 
 The app code in this repository is MIT. The exploit keeps its authors' MIT
