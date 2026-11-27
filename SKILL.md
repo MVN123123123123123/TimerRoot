@@ -268,6 +268,17 @@ arm64 build always has it; a 5.10/5.15 arm64 build has it only if the vendor
 opted in. Absent `HAVE_POSIX_CPU_TIMERS_TASK_WORK` in the extracted config is
 the same stop signal as an absent `..._TASK_WORK`.
 
+**Pass the `vendor_boot.img`, never an extracted `-vb/` directory.**
+`android_arch_task_struct_size` sits in the vendor `dtb`/bootconfig trailer
+and only that key tells you the `task_struct` vendor extension (athens `1024`
+→ `0x1840`, haotian `512` → `0x14c0`). `derive_conf.py` used to run
+`unpack_bootimg` on whatever it was given and return `0` when that failed, so
+a directory argument silently produced the same value as a kernel with no
+extension. It now reads the key out of the directory as well and prints
+`[!] android_arch_task_struct_size not in … — pass the vendor_boot.img`
+instead of a silent zero. Treat that warning as a hard stop: re-derive with
+the `.img` before writing the conf.
+
 Also grab, from the running device (these are runtime facts, allowed):
 
 ```sh

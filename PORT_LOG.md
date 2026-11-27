@@ -1604,6 +1604,18 @@ Notable per-kernel findings:
   (`android_arch_task_struct_size=512`) → `0x12c0 + 0x200 = 0x14c0`, the only
   6.6 build in the batch with the vendor extension. `klimt` and `chagall`
   share the 6.6 layout without it.
+- **The vendor extension is silently droppable.** `derive_conf.py` must be
+  given the `vendor_boot.img`; handed the extracted `work/xi2/<dev>-vb/`
+  directory it used to return `0`, which is the same value a kernel without
+  the extension produces. Re-running the derivation against the extracted
+  directories originally reproduced athens/haotian with `task_alloc_bytes
+  0x1440`/`0x12c0` (wrong). The fix reads the key out of the directory's
+  `dtb` too and warns when it cannot; a `[!] … not in …` line is a hard stop,
+  not "no extension". All eleven BTF-bearing confs were re-derived from the
+  factory `vendor_boot.img` and reproduce byte-for-byte (chagall differs only
+  by the implicit `alloc_req_off = 0x10` default, which its conf omits).
+  garnet has no BTF, so `derive_conf.py` refuses to write one by design and
+  that conf stays hand-derived.
 - **goku and aurora** (6.1.157) have identical constants and different
   banners; **zorn** (also 6.1.157) differs in `timer_site`,
   `copy_process_low21` and every data symbol, so the three are three ports.

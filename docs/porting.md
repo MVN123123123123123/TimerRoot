@@ -188,6 +188,19 @@ From the factory image of that exact build:
    image (around 24-25 MB), so a "no IKCFG" result on the compressed file is
    expected — do not conclude the config is absent from the compressed bytes.
 
+   **Pass `derive_conf.py` the `vendor_boot.img`, not an extracted directory.**
+   `android_arch_task_struct_size` (which sets the `task_struct` vendor
+   extension) is only in the vendor image; the key lives in the vendor
+   `dtb`/bootconfig trailer. An extracted `work/xi2/<dev>-vb/` directory made
+   `unpack_bootimg` fail and the old code returned `0` without a word, which
+   is *exactly* the value a kernel with no vendor extension legitimately
+   produces — so athens and haotian quietly lost `0x400`/`0x200` of
+   `task_alloc_bytes` with no error. The script now reads the key out of the
+   directory too, and warns when it cannot find it; a `[!]
+   android_arch_task_struct_size not in …` line means the derivation is
+   incomplete, not that the kernel lacks the extension. Verify
+   `task_alloc_bytes` against the `vendor_boot` cmdline before trusting it.
+
    A kernel with **no BTF at all** still ports, but every geometry constant
    must then come from disassembly and static data. The 5.10.236 `garnet`
    build is the worked example: `cred` `0xa8` with a 4-byte `usage`, no
