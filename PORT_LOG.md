@@ -1608,10 +1608,16 @@ Notable per-kernel findings:
 - **degas and duchamp** (6.1.138) share every constant except
   `timer_site`/`init_posix_timers`; `task_struct_cachep` has the same address
   but the profiling `alloc_tag` call site differs.
-- **vermeer and zircon** (5.15.194) share `task_alloc_bytes`, `cred` and
-  `task_cred_off`, and differ only in `timer_site`/`copy_process_low21` and
-  `init_user_ns` (`0xacde250` vs `0xacde2d0`) — both are the same GKI branch,
-  two vendor defconfigs.
+- **vermeer, zircon and zephyr** (all 5.15.194) share the entire data block —
+  `root_user 0xffffffc00ab32770`, `init_ucounts 0xffffffc00ab33ff0`,
+  `init_groups 0xffffffc00ab33b28`, `selinux_state 0xffffffc00adbad88`,
+  `panic_on_warn 0xffffffc00ab0add0`, plus `task_alloc_bytes 0x1200`,
+  `cred 0xb0`, `task_cred_off 0x798`. vermeer and zircon differ only in
+  `timer_site`/`copy_process_low21` and `init_user_ns` (`0xacde250` vs
+  `0xacde2d0`); zephyr matches vermeer on `init_user_ns`. Same GKI branch,
+  three vendor defconfigs — the data-symbol block agreeing across all three
+  is an independent check that the kallsyms extraction and the `-7`
+  `selinux_state` re-check are correct.
 - **garnet (5.10.236)** has **no BTF**, so no `cred`/`task_struct` layout was
   available: `cred 0xa8` (4-byte `usage`), `cred_req = cred_size = 0xa8`,
   `task_struct 0x1280` and `task_cred_off 0x780` come from
