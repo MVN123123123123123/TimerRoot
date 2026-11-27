@@ -796,6 +796,10 @@ reclaim is not the problem.
     child that starts as root proves nothing.
 12. **Never trust a stale binary** — check `TIMER_PROTOCOL=3` and the built
     asset's hash before blaming a profile for a missing fix.
+13. **Read `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` before deriving anything.** If
+    it is absent, F11 cannot land on that kernel: stop at F10 and mark the
+    release *unsupported by configuration* instead of deriving further or
+    retrying the plant.
 
 ---
 
@@ -806,6 +810,8 @@ reclaim is not the problem.
       `--selfcheck` 0 failures; wrong banner refused.
 - [ ] QEMU F7–F11 green against the factory Image (both page sizes if both
       exist), run as uid 2000, with `resuid=0/0/2000` + `ROOT_SHELL_OK`.
+      A kernel without `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` cannot reach F11:
+      log it as *unsupported by configuration* and stop at F10 instead.
 - [ ] Binary carries `TIMER_PROTOCOL=3` and is started with `--conf … --protocol 3`.
 - [ ] Device: `woke uid=0` + `getenforce=Permissive` + `u:r:ksu:s0`, 10/10
       cold boots, measured rate over 200 runs recorded.
