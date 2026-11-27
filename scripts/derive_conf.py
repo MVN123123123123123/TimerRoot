@@ -520,9 +520,19 @@ def get_vendor_ext(vendor_boot_img):
     in the output directory for the key as text, which misses the bootconfig
     encoding, so it always returned 0 and task_alloc_bytes lost the vendor
     extension (0x1440 instead of 0x1750 on Pixel 11).
+
+    Pass the `vendor_boot.img`, not an extracted directory: an already
+    unpacked directory (work/xi2/<dev>-vb/) makes unpack_bootimg fail, and the
+    function then returns 0 — indistinguishable from a kernel that genuinely
+    has no vendor extension. That silent zero is the trap; the second half of
+    this function recovers the key from an extracted `dtb`/`bootconfig` so the
+    caller still gets the real value, and warns loudly when it cannot.
     """
     if not vendor_boot_img or not os.path.exists(vendor_boot_img):
         return 0
+
+    if os.path.isdir(vendor_boot_img):
+        return _vendor_ext_from_dir(vendor_boot_img)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         out = run(['unpack_bootimg', '--boot_img', vendor_boot_img,
@@ -536,14 +546,60 @@ def get_vendor_ext(vendor_boot_img):
                         haystacks.append(f.read())
                 except OSError:
                     pass
-        for text in haystacks:
-            m = re.search(r'android_arch_task_struct_size=(\d+)', text)
-            if m:
-                val = int(m.group(1))
-                print(f"[+] android_arch_task_struct_size={val}")
-                return val
+        val = _scan_vendor_ext(haystacks)
+        if val is not None:
+            print(f"[+] android_arch_task_struct_size={val}")
+            return val
     print("[!] android_arch_task_struct_size not set (no vendor extension)")
     return 0
+
+
+def _scan_vendor_ext(texts):
+    """First `android_arch_task_struct_size=<n>` found in any of `texts`."""
+    for text in texts:
+        m = re.search(r'android_arch_task_struct_size=(\d+)', text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _vendor_ext_from_dir(path):
+    """
+    Same key, read out of an already-extracted vendor_boot directory.
+
+    `unpack_bootimg` cannot re-read a directory, so an extracted
+    `work/xi2/<dev>-vb/` used to yield a silent 0. The key lives in the `dtb`
+    (bootconfig is appended to it as a trailer), so scan every regular file
+    bytewise instead of as text.
+    """
+    for fname in os.listdir(path):
+        fpath = os.path.join(path, fname)
+        if os.path.isdir(fpath):
+            for sub in os.listdir(fpath):
+                spath = os.path.join(fpath, sub)
+                if os.path.isfile(spath):
+                    val = _vendor_ext_in_file(spath)
+                    if val is not None:
+                        print(f"[+] android_arch_task_struct_size={val}")
+                        return val
+            continue
+        val = _vendor_ext_in_file(fpath)
+        if val is not None:
+            print(f"[+] android_arch_task_struct_size={val}")
+            return val
+    print(f"[!] android_arch_task_struct_size not in {path} — "
+          f"pass the vendor_boot.img, not an extracted directory")
+    return 0
+
+
+def _vendor_ext_in_file(path):
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return None
+    m = re.search(rb'android_arch_task_struct_size=(\d+)', data)
+    return int(m.group(1)) if m else None
 
 
 # ---------------------------------------------------------------------------
