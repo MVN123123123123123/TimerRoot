@@ -1574,6 +1574,7 @@ run.
 | 6.6.118-…-abogki519650608-4k | dada | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-ab16143355-4k | dada (OS4) | pass | pass | pass | pass | pass | pass |
 | 6.6.118-…-ab15511674-4k | kunzite | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-gc4127a25dcf3-ab15863337-4k | OnePlus 13 (CPH2653) | pass | pass | pass | pass | pass | pass |
 | 6.6.127-…-ab16252310-4k | frankel (Pixel 10) | pass | pass | pass | pass | pass | pass |
 | samsung-a15xzh-5.15.189 | a15xzh (Galaxy A15 5G) | pass | pass | pass | pass | pass | pass |
 | samsung-s26fe-6.6.127 | s26fe (Galaxy S26 FE) | pass | pass | pass | pass | pass | pass |
@@ -1612,6 +1613,11 @@ Five confs omit `page_size`/`slab_order`/`slab_size` and rely on the
 documented `conf_defaults()` values; the harness applies the same defaults,
 so they are complete profiles, not drafts. The four OPPO/realme confs above
 are the only ones still without an image.
+
+The OnePlus 13 profile was added after that sweep and passed every gate in
+its own run (`logs/mass-oneplus13.json`). It is also the first profile whose
+slab geometry was re-checked on a boot **without** `slub_min_order` (order
+still 1 at `smp=4` and `smp=8`) and with a full no-hint F9/F11 replay.
 
 A caveat on the F11 rate: the harness runs at `-j 2` on the 12-core build
 host. Oversubscribing the vCPUs makes the spray burst miss its 15 s window
@@ -2125,3 +2131,159 @@ write, and a slabinfo-confirmed *geometry* does not confirm the *pairing*.
 QEMU 6.6.118 gates re-run after the change: `slabinfo`, `F7_target`,
 `F8_ids`, `F9_probe`, `F10_leak` and `F11_verify`
 (`resuid=0/0/2000`, `ROOT_SHELL_OK`) all pass on the factory Image.
+
+## OnePlus 13 (CPH2653), OxygenOS/ColorOS 17.0.0.102 (EX01) — `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k`
+
+Factory artifacts supplied in `timerroot-port/oneplus/Oneplus13/CPH2653_17.0.0.102(EX01)/`
+(`boot.img`, `init_boot.img`, `vendor_boot.img`; 4K pages, no
+`android_arch_task_struct_size=` on the vendor command line or in
+`vendor_boot`'s bootconfig/`dtb`). Work tree:
+`timerroot-port/work/oneplus13/` (`boot/kernel`, `vmlinux`, `btf.bin`,
+`vb/`); the `mass.py` workspace entry is `work/xi/oneplus13-boot/`.
+
+`mass.py` actually resolves this conf to the **pre-existing** `work/xi/dg4-boot/`
+entry (an OTA payload unpacked on 20 Nov, before this port) whose `kernel` is
+byte-identical to the supplied `boot.img`'s Image
+(`3ccbdb1b…607bad24`, verified with `sha256sum` on both paths). The
+`oneplus13-boot/` symlink dir exists so the validator can find
+`vmlinux`/`btf.bin`/`pagesize`; the QEMU runs boot `dg4-boot/kernel`. The
+two `boot.img`s are not identical as files (1 908 differing bytes, AVB/
+signature area) but their kernels are.
+
+- boot.img sha256 `b83602958c464a6a344589cd41b1fceec49f8e1d2513e215afcd003f93493bd4`
+- Image sha256 `3ccbdb1b4bd1c8610b4d6fd987ea9247ca95b43c0ddd21d3e51de771607bad24`
+  (36 801 024 bytes, `ARM\x64` at +56, BTF blob at file offset `0x1717d64`,
+  6 118 877 bytes, sha256 `369f09626d9e546d6d140abc388f1cd6f7a022d8d26798d73e7a291d43bfb2c2`)
+- vmlinux (reconstructed, 110 141 symbols) sha256 `2e22f82c71e6d84100e6499b2953ed5f9581c5ac217f41cc11c7e0bb70ca084b`
+- vendor_boot.img sha256 `ba81b50a633cfc4b7a720110d32e5db8735d5b48fefbaddda2790aee67d86b8b`;
+  `init_boot.img` sha256 `10241baad4a0d535d13ec7e9e81601a32a1e49a4fb9b15b2f3fb80e257361f8f`
+
+This is a **new kernel binary**, not a sibling of any Xiaomi 6.6.118 payload,
+even though every derived constant happens to coincide with the kunzite/mist
+pair (only the release string differs in the conf). The image is the same
+36 801 024-byte size as kunzite/mist but 8 737 of its 8 984 4K pages differ,
+and its banner `-gc4127a25dcf3-ab15863337` matches no existing profile. Every
+constant below was nevertheless derived independently from this `Image`
+(disassembly + BTF + embedded `ikconfig`), not copied from the Xiaomi confs.
+
+- **F1** VULNERABLE, same ordering as the other 6.6 builds:
+  `exec_mmap` (`0xffffffc0803d51cc`) -> `exec_task_namespaces`
+  (`0xffffffc0803d51fc`) -> **`posix_cpu_timers_exit`**
+  (`0xffffffc0803d5214`) -> `exit_itimers` (`0xffffffc0803d5224`).
+  Embedded `ikconfig` confirms `CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y`,
+  `CONFIG_ARM64_4K_PAGES=y` (16K not set), `CONFIG_SLUB=y`.
+- **F2** `init_posix_timers` (`0xffffffc081d18c20`) creates
+  `posix_timers_cache` with `mov w1, #0x108` and flags `0x4040000`
+  (`SLAB_PANIC|SLAB_ACCOUNT`), storing the cache at
+  `0xffffffc08234c760`. `do_timer_create` (`0xffffffc080195ca0`) loads it
+  with `adrp x20, 0xffffffc08234c000` + `ldr x0, [x20, #0x760]` and calls
+  `bl kmem_cache_alloc` at `0xffffffc080195d44` ->
+  **`timer_site = 0xffffffc080195d48`** (`low21 0x195d48`).
+  (`mov w1, #0xdc0` there is `GFP_KERNEL|__GFP_ZERO`, not a size — the size
+  comes from the cache). `copy_process` (`0xffffffc0800ab7fc`) allocates
+  `task_struct_cachep` (`0xffffffc082325990`) through
+  `kmem_cache_alloc_node` at `0xffffffc0800ab938` (`mov w1, #0xcc0` is
+  `GFP_KERNEL`) ->
+  **`copy_process_low21 = 0xab93c`** (identical to the four Xiaomi 6.6.118
+  builds, as expected — that call site does not move with the vendor
+  defconfig here). `dup_task_struct` is inlined.
+- **F3** BTF layout (same as the 6.6 family): `cred` `0xb8` with
+  `usage 0x0` (8 bytes), `uid 0x8`, `gid 0xc`, `suid 0x10`, `sgid 0x14`,
+  `euid 0x18`, `egid 0x1c`, `fsuid 0x20`, `fsgid 0x24`, `securebits 0x28`,
+  `cap_inheritable 0x30`, `cap_permitted 0x38`, `cap_effective 0x40`,
+  `cap_bset 0x48`, `cap_ambient 0x50`, `security 0x80`, `user 0x88`,
+  `user_ns 0x90`, `ucounts 0x98`, `group_info 0xa0`;
+  `task_struct` `0x12c0` with `real_cred 0x818`, `cred 0x820`;
+  `k_itimer` `0x108` with `it 0x78` (`rcu 0xf8`).
+- **F4** `cred_init` (`0xffffffc081d12358`) `mov w1, #0xb8` with flags
+  `0x2000` (`SLAB_HWCACHE_ALIGN`) plus `movk w3, #0x404, lsl #16`
+  (`SLAB_PANIC|SLAB_ACCOUNT`) -> `0x4042000` -> `cred_req 0xb8`,
+  `cred_alloc 0xc0`.
+  `task_struct_vendor_size_setup` (`0xffffffc081d0041c`) is present and adds
+  the parsed value to `mov w9, #0x12c0`, capped at `0x400`; this image's
+  vendor_boot bootconfig and `dtb` carry **no**
+  `android_arch_task_struct_size=` parameter, so `task_alloc_bytes = 0x12c0`
+  (confirmed at runtime: `task_struct` slabinfo object is 4800 = `0x12c0`).
+  `alloc_req_off = 0x10` (`trace_event_raw_kmem_cache_alloc`:
+  `bytes_req` at bit 192, `call_site` at bit 64) — 6.6, no `name` field.
+  `timer_node_off = 0x78`.
+- **F5** `selinux_state 0xffffffc08236a2e0` (preceded immediately by
+  `avc_latest_notif_update.notif_lock` at `0xffffffc08236a2d8`, and BTF puts
+  `enforcing` at bit 0, so the `-7` store lands on `enforcing`);
+  `panic_on_warn 0xffffffc08211ae0c`, `root_user 0xffffffc08213f1e0`,
+  `init_user_ns 0xffffffc08213ef50`, `init_ucounts 0xffffffc082140cb0`,
+  `init_groups 0xffffffc082140740`. All 6/6 match the vmlinux
+  (`validate_conf.py`).
+- **F6** `__start_lsm_info` registers `capability` (order -1),
+  `selinux` (order 0, `selinux_blob_sizes.lbs_cred = 24`),
+  `bpf` (order 0, `lbs_cred = 0`), `integrity` (order 1). `CONFIG_LSM`
+  names `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,bpf`
+  but the embedded config sets `# CONFIG_SECURITY_LANDLOCK is not set`,
+  `# CONFIG_SECURITY_YAMA is not set`, `# CONFIG_SECURITY_LOCKDOWN_LSM is
+  not set`, `# CONFIG_SECURITY_SAFESETID is not set`,
+  `# CONFIG_SECURITY_SMACK is not set`, `# CONFIG_SECURITY_TOMOYO is not set`
+  and `# CONFIG_SECURITY_APPARMOR is not set`, so **selinux is the first
+  cred-blob contributor** -> `selinux_blob_off = 0x0`.
+  `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` passes
+  `validate_conf.py` with 0 errors (`do_timer_create` bl ->
+  `0xffffffc080195d48`, `copy_process` low21 `0xab93c`, 6/6 symbols,
+  `alloc_req_off 0x10`). The worst-case node spills into the designed retry
+  path (`slab 0x2000 obj 0x108: worst node=0x1f68 cred_end=0x2038`), the
+  same class as the other 6.6 profiles. `--selfcheck` against the real
+  factory Image reports `ok (0 failures)` for all ten invariants plus the
+  informational spill line (`logs/oneplus13-selfcheck-20261127.log`), and the
+  conf gate refuses a foreign banner before any kernel access: booting the
+  kunzite/mist Image and handing it this conf prints
+  `[-] conf release mismatch: conf=6.6.118-…-gc4127a25dcf3-ab15863337-4k
+  running=6.6.118-…-g666ad52b8230-ab15657065-4k`, exit 1
+  (`logs/oneplus13-wrongbanner-20261127.log`).
+- **F7-F11 / F14 (QEMU)** booted the factory Image in `qemu-system-aarch64
+  -M virt` at 4K pages with `slub_min_order=1`, driving the shipped NDK r29
+  aarch64 `timer` binary through `mass.py` as uid 2000
+  (`runhigh: uid=2000 euid=2000 gid=2000`). **All gates PASS**
+  (`logs/mass-oneplus13.json`):
+  - `slabinfo`: `posix_timers_cache` obj `0x108` order 1 (31 objects,
+    pagesperslab 2), `task_struct` obj `0x12c0` — the profile's
+    `timer_alloc` / `slab_order` / `task_alloc_bytes` are the kernel's own.
+    Booted a second time without `slub_min_order` and at `smp=8`: the order
+    still came out 1, so the geometry is not a harness artifact. A full
+    no-hint pass (no `slub_min_order`, no `android_arch_task_struct_size`)
+    also reproduces `F9_probe=PASS(recs=4096 kept=4096)` and `F11=PASS`
+    (`logs/oneplus13-nohint-{probe,verify}-20261127.log`).
+  - F7 `target` mode reports `kernel=6.6.118-…-gc4127a25dcf3-ab15863337-4k`,
+    `pagesize=4096`, `timer_site=0xffffffc080195d48`, `protocol=3`; exit 0
+    (`logs/oneplus13-f7-target-20261127.log`). The `target=lynx` line in that
+    output is a hard-coded legacy marker the binary prints for every profile,
+    so the gate was tightened to check `kernel=` / `pagesize=` /
+    `timer_site=` instead of it.
+  - F8 `page_alloc=275 page_free=273 pairs=1029`.
+  - F9 `recs=4096 kept=4096`, `pair agree=1`.
+  - F10 `made=512 votes=512` (`[base] … order=1 size=0x2000`).
+  - F11 `child report uid=0 euid=2000 setuid(0)=0 errno=0 resuid=0/0/2000`
+    + `ROOT_SHELL_OK`, `cred writes landed`. `mass.py` runs F11 twice; both
+    gate runs landed the plant on the **first** attempt (`plant attempt 1/6`,
+    `logs/…f11-1.log` and `…f11-2.log`). A separate manual verify boot took
+    a retry (`[!] plant 1 left child uid=2000; retrying` -> `attempt 2/6`) and
+    still reached `resuid=0/0/2000` + `ROOT_SHELL_OK`
+    (`logs/oneplus13-f11-verify-20261127.log`); the no-hint boot landed on
+    attempt 1 again (`logs/oneplus13-nohint-verify-20261127.log`).
+    Transcripts: `logs/mass-oneplus13.json`, plus the four logs above.
+
+  Note on the harness: `runhigh` in the port tree still had only the
+  `RLIMIT_NOFILE` raise (no uid drop), and `gate_verify()` still required
+  `euid=0` on the report line, which the uid-only plant never prints. Both
+  were corrected in `work/qemu/runhigh.c` and `work/qemu/mass.py` for this
+  port: `runhigh` now `setresgid`/`setresuid`s to 2000 after raising the fd
+  limit (and `init` makes tracefs world-writable so uid 2000 can drive it),
+  and `gate_verify()` accepts the `uid=0 euid=2000` wake line, rejects a
+  `runhigh: uid=0` root harness outright, and requires `resuid=0/0/…` after
+  the child's own `setuid(0)`. `gate_target()` likewise stopped gating on the
+  hard-coded `target=lynx` marker and now compares `kernel=`, `pagesize=`
+  and `timer_site=` against the conf, so one profile's boot can no longer
+  satisfy another profile's F7.
+
+**Runtime gates still pending**: **F12** (`timer permissive`),
+**F13** (`timer fake` + KernelSU) and **F15** need a physical CPH2653.
+The **F16** row is in `docs/supported-devices.md` as `verified in QEMU`.
+Port status: static re-derivation (F1-F6) and QEMU runtime (F7-F11, F14)
+complete for this build.

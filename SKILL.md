@@ -227,6 +227,18 @@ objcopy --dump-section .BTF=btf.bin vmlinux
 sha256sum boot.img vmlinux btf.bin
 ```
 
+`vmlinux-to-elf` output carries no section headers for `.BTF`, so `objcopy
+--dump-section .BTF=…` fails with `Unable to recognise the architecture of the
+input file`. The BTF is still in the raw `Image`: scan for the header magic
+`9f eb 01 00 18 00 00 00` (offset must be 4-byte aligned), read
+`hdr_len|type_off|type_len|str_off|str_len` from the `<HBBIIIII` struct there,
+and dump `hdr_len + type_len + str_len` bytes. `bpftool btf dump file btf.bin
+format raw` then works. The Image also embeds its own config (`IKCFG_ST`
+followed by gzip); decompress it — `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`,
+`CONFIG_ARM64_4K_PAGES`, the real `CONFIG_LSM` and each `# CONFIG_SECURITY_* is
+not set` line are all there and settle questions that the `CONFIG_LSM` string
+alone cannot.
+
 Also grab, from the running device (these are runtime facts, allowed):
 
 ```sh
@@ -308,6 +320,17 @@ for each lsm in registration order:
 plus the built-in `CONFIG_LSM` string and each LSM's `lbs_cred`. Landlock's
 cred blob (8 bytes on 6.12, 11 → 16 on 6.18) is the usual surprise; deriving
 from the `landlock,lockdown,…` string alone corrupts the child's SID.
+
+**The `CONFIG_LSM` string is not the registration order.** It names every LSM
+the kernel *supports*, not the ones compiled in; an LSM that is absent from
+`__start_lsm_info`..`__end_lsm_info` contributes nothing no matter what the
+string says, because `CONFIG_SECURITY_<X>` is off. Settle it from the Image's
+embedded config (`IKCFG_ST`, see §4): grep `# CONFIG_SECURITY_LANDLOCK is not
+set`, `…_YAMA`, `…_LOCKDOWN_LSM`, `…_SAFESETID`, `…_SMACK`, `…_TOMOYO`,
+`…_APPARMOR`. OPPO/OnePlus 6.6.118 (CPH2653) is exactly this trap — the string
+lists all ten LSMs, but only `capability, selinux, bpf, integrity` are in the
+info section, so SELinux is the first cred-blob contributor and the offset is
+`0x0`, not `0x8`.
 
 ### `task_alloc_bytes` (F4)
 
@@ -419,7 +442,12 @@ Boot parameters are derived, not guessed:
 
 Gates (each prints its evidence in the log):
 
-- **F7** `timer target` → `target=lynx`, correct `kernel=`/`profile=`/`timer_site=`, exit 0.
+- **F7** `timer target` → correct `kernel=`/`pagesize=`/`profile=`/`timer_site=`,
+  exit 0. `target=lynx` is a fixed legacy marker printed for **every** profile
+  (the app keys its play-store check off it), so it is not evidence: a gate
+  that only looks for `target=lynx` and a `timer_site=` value passes even
+  when the wrong Image booted. Compare `kernel=` and `pagesize=` against the
+  conf as well — `mass.py`'s `gate_target()` now does.
 - **F8** `timer ids` → page event ids, no `dmesg` noise; safe without reboot.
 - **F9** `timer probe` → `[probe] pair pfn` agrees with `base`, `mod264`
   dominance consistent with `timer_alloc`, no `victim index missing`; safe to
@@ -432,6 +460,15 @@ Gates (each prints its evidence in the log):
   `0/0/2000` is a pass and `0/0/0` is the signature of a root harness. The
   gate checks real uid 0, post-setuid effective uid 0 and the root shell;
   old transcripts showing `0/0/0` are not evidence for the current binary.
+
+  **Verify the drop actually happened before you read the report line.** The
+  line is `child report uid=0 euid=2000 …` on a real uid-2000 run — the plant
+  writes `uid`, not `euid` — so a `gate_verify()` that pattern-matches
+  `euid=0` (or `resuid=0/0/0`) reports `FAIL(no-report)` for a run in which
+  the exploit worked. Grep the transcript for `runhigh: uid=2000 euid=2000
+  gid=2000` first; if it says `uid=0`, the drop is missing (an older `runhigh`
+  in the port tree only raised `RLIMIT_NOFILE`) and the whole gate is void.
+  Accept `uid=0 euid=0` as a wake value only for old root-harness transcripts.
 
 Known harness artefacts (not profile faults): run `mass.py` at `-j 2` on a
 12-core host — oversubscription makes bursts miss their 15 s window
@@ -625,6 +662,9 @@ Grep the log; each line maps to one cause.
 | `slabinfo unreadable; address periodicity says order=…` | shell lacks DAC permission/supplementary `log`, or SELinux denies `proc_slabinfo` (the kernel normally creates the file `0400`) | the order was derived from timer addresses; audit the complete access chain and confirm the derived order matches the conf |
 | `OLD_APP_DETECTED` / `TIMER_PROTOCOL=3` | app/binary protocol mismatch, or binary started without `--conf` | update app / refresh binary; pass `--conf … --protocol 3` |
 | `resuid=0/0/0` in QEMU | harness ran as root, so F11 proved nothing | drop to uid 2000 with `runhigh` and re-run |
+| `FAIL(no-report)` while the transcript shows `cred writes landed` + `ROOT_SHELL_OK` | the gate still wants `euid=0`, but a uid-only plant wakes with `euid=2000` | fix `gate_verify()` to accept `uid=0 euid=(0|2000)` and require `resuid=0/0/…` |
+| F7 passes for a profile whose Image is not the one booted | the gate only checked `target=lynx`, a constant the binary prints for every profile | also compare `kernel=`/`pagesize=` against the conf (current `gate_target()`) |
+| `runhigh: uid=0 …` in a transcript claimed as F11 evidence | the port tree's `runhigh` only raised `rlimit`, it never dropped privileges | rebuild `runhigh` so it `setresgid`/`setresuid`s to 2000; the gate now fails such a run outright |
 | `no KASLR slide` on `fake` | slide missing before the first endgame write | `calibrate_base()` must store `g_slide` from `site0`; re-run probe |
 | panic on first touch | any wrong constant | the log names the stage |
 

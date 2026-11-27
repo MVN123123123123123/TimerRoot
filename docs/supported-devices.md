@@ -252,8 +252,19 @@ Profiles:
 
 ## OPPO
 
-Imported vendor profiles. There is no factory image for these in the port
-workspace, so they could not be booted in QEMU; see the notes.
+### OnePlus 13 — 6.6.118 (4K)
+
+Full port from the factory `boot.img` (there is a factory image for this one in
+the port workspace, unlike the imported profiles below).
+
+| Device | Model | Factory build | Android build ID | Security patch | Kernel | Profile | Status |
+|---|---|---|---|---|---|---|---|
+| OnePlus 13 | CPH2653 | `17.0.0.102(EX01)` | — | — | `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k` | `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` | verified in QEMU |
+
+### Imported OPPO vendor profiles
+
+No factory image for these in the port workspace, so they could not be booted
+in QEMU; see the notes.
 
 | Device | Model | Android build ID | Security patch | Kernel | Profile | Status |
 |---|---|---|---|---|---|---|
@@ -455,12 +466,20 @@ not publish the value for that build; read the real value on a device with
 
 ### OPPO, realme and Meizu
 
-- The three OPPO profiles and the realme profile are imported vendor profiles
-  from `rikumi/TimerRoot`. No factory image for them is in the port workspace,
-  so F7-F11 could not be run: they pass the parser, release/page-size matching
-  and the F6 `selfcheck` invariants, but they have no QEMU evidence. One was
-  derived from a device dump (`boot_a` from the running realme RMX6699), so
-  there is no factory image to boot even in principle.
+- The OnePlus 13 (`CPH2653`, OxygenOS/ColorOS `17.0.0.102 (EX01)`) is a
+  **full port** from its factory `boot.img`/`vendor_boot.img`:
+  `timer_site 0xffffffc080195d48`, `copy_process_low21 0xab93c`,
+  `task_alloc_bytes 0x12c0` (the image sets no
+  `android_arch_task_struct_size=`), `selinux_blob_off 0x0`. It passes
+  `validate_conf.py` with 0 errors and all of F7-F11 in QEMU as uid 2000
+  (`resuid=0/0/2000`, `ROOT_SHELL_OK`); see `PORT_LOG.md`. F12-F16 still
+  need the device.
+- The three other OPPO profiles and the realme profile are imported vendor
+  profiles from `rikumi/TimerRoot`. No factory image for them is in the port
+  workspace, so F7-F11 could not be run: they pass the parser, release/page-size
+  matching and the F6 `selfcheck` invariants, but they have no QEMU evidence.
+  One was derived from a device dump (`boot_a` from the running realme RMX6699),
+  so there is no factory image to boot even in principle.
 - The two Meizu profiles live under `conf/dirty/` because
   `...-maybe-dirty` is not unique to one vendor build. They also match
   `device_model` (`MEIZU 21 Pro` / `MEIZU 22`), `android_release` (`16`) and

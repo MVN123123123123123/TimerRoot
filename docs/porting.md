@@ -149,6 +149,20 @@ From the factory image of that exact build:
    sha256sum boot.img vmlinux btf.bin
    ```
 
+   `objcopy --dump-section` only works when the ELF actually has section
+   headers. A `vmlinux-to-elf` reconstruction has just `.kernel`/`.bss`/
+   `.symtab`, so it fails with `Unable to recognise the architecture of the
+   input file`. The BTF section is still in the raw `Image`: find the header
+   magic `9f eb 01 00 18 00 00 00` at a 4-byte-aligned offset, read
+   `hdr_len`/`type_len`/`str_len` from that `<HBBIIIII` struct, and write out
+   the next `hdr_len + type_len + str_len` bytes as `btf.bin`.
+
+   The `Image` also embeds its own kernel config: search for `IKCFG_ST`, take
+   the gzip stream up to `IKCFG_ED`, and decompress. That file answers the
+   questions kallsyms cannot: `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`,
+   `CONFIG_ARM64_4K_PAGES` vs 16K, the real `CONFIG_LSM`, and which
+   `CONFIG_SECURITY_*` options are actually enabled.
+
 4. Record a few **runtime facts** from the device (these are allowed because
    they are observations, not constants to derive from):
 
@@ -260,7 +274,12 @@ for each LSM in registration order:
 Landlock is the usual surprise: on some 6.12 builds it registers an 8-byte cred
 blob and on 6.18 an 11-byte one (rounded to 16), pushing SELinux to `0x8` or
 `0x10`. Deriving this from the `CONFIG_LSM` string alone gets the wrong answer —
-reconstruct the order from the kernel's LSM info section. Getting it wrong
+that string lists every LSM the kernel *supports*, including ones whose
+`CONFIG_SECURITY_<X>` is off and which therefore appear nowhere in
+`__start_lsm_info`. Reconstruct the order from the kernel's LSM info section,
+and cross-check against the Image's embedded config (`IKCFG_ST`): a
+`# CONFIG_SECURITY_LANDLOCK is not set` means landlock's blob does not exist
+even though `landlock` is the first name in `CONFIG_LSM`. Getting this wrong
 corrupts the child process's SELinux SID.
 
 ### 2.6 Family shortcuts
@@ -373,7 +392,19 @@ Boot the **unmodified factory Image** at the same page size. The harness is
 `initramfs/`, `mkinitramfs.sh`, `mass.py`, `runhigh` and `logs/`. `runhigh`
 raises the file-descriptor limit and then drops to **uid 2000** before
 launching the exploit. That is not cosmetic: in a root-run QEMU the child is
-already uid 0, so F11 passes without the exploit having worked.
+already uid 0, so F11 passes without the exploit having worked. It also has to
+`chmod -R a+rwX /sys/kernel/tracing` in `init` (or set the tracefs mounts up
+as uid 2000), because the exploit writes tracefs control files and a plain
+initramfs leaves them root-only. Confirm the drop from the transcript line
+`runhigh: uid=2000 euid=2000 gid=2000`; a `uid=0` there means the helper is an
+old build that only raised the fd limit.
+
+When the profile's slab geometry should be proven rather than pinned, boot
+once **without** `slub_min_order` and read the `posix_timers_cache` line from
+`/proc/slabinfo`: if `pagesperslab` still gives the profile's order, the
+geometry is the kernel's own choice and not a harness hint. The same boot
+can omit `android_arch_task_struct_size` to confirm the profile's
+`task_alloc_bytes` needs no vendor extension.
 
 Boot parameters are derived, not guessed:
 
@@ -441,11 +472,11 @@ Run the gates in order and keep the log:
 
 | Gate | Command | What you want to see |
 |---|---|---|
-| F7 | `timer target` | the correct profile is selected |
+| F7 | `timer target` | correct `kernel=`, `pagesize=`, `profile=` and `timer_site=`, exit 0. Do not gate on `target=lynx`: the binary prints that constant for every profile, so it proves nothing about which Image booted |
 | F8 | `timer ids` | trace event ids, no `dmesg` noise; safe to repeat |
 | F9 | `timer probe` | page-base votes agree, no `victim index missing`; safe to repeat |
 | F10 | `timer leak` | credential leak on 8/10 or better |
-| F11 | `timer` / `timer shell` | `child report uid=0`, `setuid(0)=0`, `resuid=0/0/2000`, `ROOT_SHELL_OK` — a shell-uid run keeps the saved uid at 2000 |
+| F11 | `timer` / `timer shell` | `child report uid=0 euid=2000`, `setuid(0)=0`, `resuid=0/0/2000`, `ROOT_SHELL_OK` — a shell-uid run keeps the saved uid at 2000, and the plant only writes `uid`, so `euid` is still 2000 when the child wakes |
 | F14 | `mass.py` | profiles with a workspace factory Image pass F7–F11; per-profile results and the two provenance/environment exceptions in `logs/mass-*.json` / `PORT_LOG.md` |
 
 Only F11 arms the spray. Reaping the zombie alone does not prove the payload
