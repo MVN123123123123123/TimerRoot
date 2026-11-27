@@ -1769,8 +1769,12 @@ F12 (`permissive`) and F13 (`fake`) stay **pending** for all twelve: they need
 a device with SELinux policy and KernelSU respectively. Note that
 `permissive` does not prove the write primitive in QEMU either — on the
 blocked profiles it logs `hit=1`, `permissive done`, `EXIT status=0` while
-`sysctl_perf_event_paranoid` stays `2` (selinuxfs is not mounted in the stock
-initramfs, so the only discriminating readback is the perf-paranoid flip).
+the target word is unchanged. The stock binary prints no readback (and
+selinuxfs is not mounted in the initramfs, so `getenforce` proves nothing);
+the discriminating check is `sysctl_perf_event_paranoid`
+(`0xffffffc00ab0b4c0` on the 5.15 build), read by a probe `init` before and
+after the run. It read `2` both times (`/tmp/opencode/x/probe1.log`), i.e. the
+`selinux_state - 7` store never landed.
 F15 hardware has run only on the OnePlus 13. Until a device run exists, the
 `docs/supported-devices.md` rows stay `verified in QEMU` for the nine
 portable kernels and `unsupported by configuration` for the three blocked
@@ -1788,7 +1792,7 @@ ones in this batch (plus `zephyr` from the earlier port).
 | F3 `timer_site` / `copy_process` | pass | call site resolved by dataflow, disassembly logged |
 | F4 cred / task geometry | pass | BTF + `cred_init` / `task_vendor_size_setup` disassembly |
 | F5 symbols | pass | kallsyms, `-7` re-checked against the preceding symbol |
-| F6 build the profile | pass | `validate_conf.py` 0 errors; `--selfcheck` 0 failures (host build) |
+| F6 build the profile | pass | `validate_conf.py` 0 errors on all 48 profiles (41 generic + 7 Samsung); `--selfcheck` 0 failures, run in QEMU against each factory `Image` so it sees that kernel's real slab geometry |
 | F7 `timer target` | pass (QEMU) | every generic profile with a workspace `Image`, plus the s23fe, s24fe, s25edge and s23 shim runs, prints its own `timer_site`, exit 0 |
 | F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
