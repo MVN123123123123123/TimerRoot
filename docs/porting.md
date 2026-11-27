@@ -524,7 +524,8 @@ run fails is expected and says nothing about the profile or the binary.
 `p7a/timer_p7a` as `initramfs/timer` by name and prints its sha256, so a
 hand-copied experiment left in `initramfs/` can never silently become the
 thing every gate is measured against. The current canonical blob is
-`b05a46ff9af187eedf5daa81cda028ce9d8f65dfd135d0a85c934b19d94f2616`; a
+`cdd1e51e46582173fbaf09dff26602310e0da978ff13cd7aa7e8571918798da6` (the
+pre-fix blob, which every sweep before 28 Nov 2026 used, is `b05a46ff…`); a
 transcript recorded before the initramfs gained that hash may have run a
 different `timer`. `TIMER_BIN=<path>` overrides it for a deliberate
 instrumented build — the hash still prints, so such a transcript cannot be
@@ -562,7 +563,7 @@ Boot parameters are derived, not guessed:
   `alloc_skb_with_frags` ← `unix_stream_sendmsg`), treat the OOM as a
   **symptom, not the cause**. The guest only exhausts memory because every
   plant missed and retried six times; the miss comes from a bad `[ids]` line
-  (see the `FAIL(ids=… text=…)` row in `SKILL.md`), which leaves a garbage
+  (see the `FAIL(ids=… uninit=…)` row in `SKILL.md`), which leaves a garbage
   `page_free` id and makes `scan_reclaim` blind. Fix the `ids` reading —
   re-run with a longer settle before `ids` — rather than giving the guest
   more memory, which suppresses the reclaim the exploit needs.
@@ -665,12 +666,15 @@ QEMU pass.
 **Do not retry over a bad `[ids]` line.** If F8 reports an event id outside
 1..1024 — most often `page_free=1701669690` — the discover loop cannot have
 produced it: it stores `u32(...) & 0xffff` and skips anything above 1024, so a
-value with its high 16 bits set is the uninitialised `pairs[np].free_type` of a
-pfn that got an alloc record but no free record inside the capture window.
-`scan_reclaim()` then watches an event that never fires, so every plant misses
-for a reason that has nothing to do with the profile. Stop, re-run the whole
-profile with a longer settle before `ids`, and record the miss; retrying F11 or
-adding guest memory only buries it.
+value with its high 16 bits set is uninitialised memory, historically
+`pairs[np].free_type` for a pfn that got an alloc record but no free record
+inside the capture window. `scan_reclaim()` then watches an event that never
+fires, so every plant misses for a reason that has nothing to do with the
+profile. Current builds zero `free_type` at pair creation, which makes such a
+pfn ineligible instead of selecting it; on those, seeing the value means the
+capture window is still too short. Stop, re-run the whole profile with a longer
+settle before `ids`, and record the miss; retrying F11 or adding guest memory
+only buries it.
 
 **`hit=1` proves the reclaim, never the write.** `scan_reclaim()` sets the hit
 when *any* spray thread's `page_alloc` took the victim pfn after a `page_free`.

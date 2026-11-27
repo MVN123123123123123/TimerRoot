@@ -568,9 +568,12 @@ and skips anything `> 1024`, so a value with its high 16 bits set *cannot* have
 come from the trace: it is the uninitialised `pairs[np].free_type` of a pfn that
 got an alloc record but no matching free record inside the capture window.
 `scan_reclaim()` then watches an event that never fires and all six plants miss
-for a reason the profile does not control. Re-run the profile from the start
-and record the miss; the fix is a longer settle before `ids` (so the free
-lands in the window), never more guest memory.
+for a reason the profile does not control. The canonical binary now zeroes
+`free_type` when a pair is created, so an unmatched pfn is simply ineligible
+instead of being selected with garbage; on any pre-fix build (`b05a46ff…`)
+a repeat means the capture window is too short. Either way, re-run the profile
+from the start and record the miss — lengthen the settle before `ids` so the
+free lands in the window, and never add guest memory.
 
 `calibrate_base()` runs on every mode before the gates: it votes the linear
 base for slab orders 0–3 and can override the conf geometry (see §2). Record
@@ -738,7 +741,7 @@ Grep the log; each line maps to one cause.
 | `pair missing` | slab↔page ordering broken | check `slab_order`; try `pcp_free` |
 | `fake cred spills` | node offset or cred size wrong | re-derive `timer_node_off` / `cred_size` |
 | `burst missed` | spray too slow, device loaded | more `SPRAY_POST`, settle longer |
-| `[ids] page_alloc=… page_free=<huge>` (`FAIL(ids=… uninit=0x656d6b3a)`) | `pairs[np].free_type` is never initialised; a pfn whose free record fell outside the capture window keeps stack garbage there, and the selection loop accepts it because it only tests `!= alloc_type`. The stored id is masked to 16 bits, so any value with high bits set (e.g. `0x656d6b3a`, whose low half happens to read as `":kme"`) is proof it was never parsed. Seen intermittently at 16K pages | not a profile defect — re-run the profile with a longer settle before `ids` so the free lands in the window. Do **not** raise the guest memory (that starves the reclaim these profiles need). `mass.py` rejects the value because the discover loop only accepts ids 1..1024 |
+| `[ids] page_alloc=… page_free=<huge>` (`FAIL(ids=… uninit=0x656d6b3a)`) | on pre-fix builds: `pairs[np].free_type` was never initialised, so a pfn whose free record fell outside the capture window kept stack garbage, and the selection loop accepted it because it only tests `!= alloc_type`. The stored id is masked to 16 bits, so any value with high bits set (e.g. `0x656d6b3a`, whose low half happens to read as `":kme"`) is proof it was never parsed. Fixed in `cdd1e51e…` (`free_type = 0` at pair creation); seen intermittently at 16K pages before that | not a profile defect — re-run the profile with a longer settle before `ids` so the free lands in the window. Do **not** raise the guest memory (that starves the reclaim these profiles need). `mass.py` rejects the value because the discover loop only accepts ids 1..1024 |
 | `no zombie` | killer race lost | check the `CLOCK_THREAD_CPUTIME_ID` path |
 | `cred writes did not land` | wrong `cred_uid_off` | re-derive |
 | `setuid(0) failed` | caps missing → `fake_caps_off` wrong | re-derive |
@@ -804,7 +807,7 @@ Beware the stale-transcript objection: a blocked log taken before the harness
 periodicity says order=…` and the `pcp reclaim go (slab -1 -> -1, 0ms)`
 fallback, because uid 2000 could not read the file. That older signature still
 proved the block, but it invites "the harness was broken". Re-run with the
-current canonical `timer` (sha256 `b05a46ff…`) and the log gains `slab
+current canonical `timer` (sha256 `cdd1e51e…`) and the log gains `slab
 geometry confirmed by slabinfo: order=1 size=0x2000` plus a real
 `slab 8711 -> 4805` delta — and F11 still fails on all six plants. Keep the
 post-fix run (`logs/<release>.f11-1.log`/`.f11-2.log` plus the runner summary

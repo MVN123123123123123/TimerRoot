@@ -1972,7 +1972,7 @@ run.
 | 6.1.138-…-ab14529422 | flourite | pass | pass | pass | pass | pass | pass |
 | 6.1.138-…-ab13911623 | lapis | pass | pass | pass | pass | pass | pass |
 | 6.1.162-…-ab16261587 | tegu (Pixel 8/9) | pass | pass | pass | pass | pass | pass |
-| 6.1.162-…-ab16261587-16k | tegu 16K | pass | pass | pass | pass | pass | pass (retry) |
+| 6.1.162-…-ab16261587-16k | tegu 16K | pass | pass | pass | pass | pass | pass |
 | 6.1.172-…-ab16385437 | Pixel 6a-10a (15 devices) | pass | pass | pass | pass | pass | pass |
 | 6.1.172-…-ab16385437-16k | Pixel 6a-10a 16K | pass | pass | pass | pass | pass | pass |
 | 6.12.30-…-ab13847919-4k | charoite | pass | pass | pass | pass | pass | pass |
@@ -1982,7 +1982,7 @@ run.
 | 6.12.69-…-abogki537510563-4k | brussels | pass | pass | pass | pass | pass | pass |
 | 6.12.69-…-ab16108597-4k | cubs (Pixel 11) | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-ab16388316-4k | blazer (Pixel 10 Pro) | pass | pass | pass | pass | pass | pass |
-| 6.12.81-…-ab16388316-16k | blazer 16K | pass | pass | **pass (intermittent)** | pass | pass | pass (retry) |
+| 6.12.81-…-ab16388316-16k | blazer 16K | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-gf5369e7496cb-4k | cubs/grizzly/kodiak/yogi (Pixel 11) | pass | pass | pass | pass | pass | pass |
 | 6.12.81-…-gf5369e7496cb-16k | Pixel 11 16K | pass | pass | pass | pass | pass | pass |
 | 6.18.21-…-abogki555938958-4k | hongkong/madrid | pass | pass | pass | pass | pass | pass |
@@ -2111,8 +2111,54 @@ Two 16K findings came out of this pass:
   that resemblance is a coincidence, not the mechanism.) The bad id leaves
   `scan_reclaim()` watching an event that never fires, which is what causes
   the six misses and, in turn, the OOM. `mass.py` now fails such a line
-  instead of passing it, and prints the decoded text so the case is
-  recognisable.
+  instead of passing it, and prints the raw value (`FAIL(ids=334/1701669690
+  uninit=0x656d6b3a)`) so the case is recognisable.
+
+### Source fix for the uninitialised `free_type` (2026-11-28)
+
+The defect above is a real bug in the exploit, not just a harness nuisance, so
+it was fixed rather than worked around: `discover_page_types()` now sets
+`pairs[np].free_type = 0` when it creates an entry
+(`p7a/timer_p7a.c`, in the `if (np < 2048)` block). Two consequences of the
+old code made the symptom worse than a bad print:
+
+- the selection loop tests `alloc_type != free_type`, so leftover stack garbage
+  was accepted as a free id and handed to `scan_reclaim()`;
+- the free-record branch is `else if (!pairs[k].free_type)`, so once garbage
+  was there a real free record for that pfn could never overwrite it — the
+  pfn was permanently mis-typed for that boot.
+
+**Rebuild and new canonical hash.** Building the fixed tree with the exact CI
+recipe from the repo root produces
+`cdd1e51e46582173fbaf09dff26602310e0da978ff13cd7aa7e8571918798da6`
+(`p7a/timer_p7a`, installed as `initramfs/timer` by `mkinitramfs.sh`). The
+same recipe on the unmodified source reproduces `b05a46ff…` exactly, which is
+how the flags were validated; see `docs/building.md` for the two flags that
+matter and the trap that the source path as typed is embedded in
+`DW_AT_name`, so a build from `/tmp` cannot match even with identical flags.
+
+**The three 16K profiles were re-run with it and all six gates passed on the
+first attempt:**
+
+| profile | F8 `ids` | F11 |
+|---|---|---|
+| tegu 16K | `a=263 f=261 n=1025` | `PASS(resuid=0/0/2000)` |
+| Pixel 11 16K | `a=334 f=332 n=1025` | `PASS(resuid=0/0/2000)` |
+| blazer 16K | `a=334 f=332 n=1027` | `PASS(resuid=0/0/2000)` |
+
+`blazer16k` in particular needed no retry and reported a normal pair, where
+before it failed F8 on three of four recorded runs. Fresh transcripts are
+`logs/<release>.f11-pass.log` (28 Nov 05:48, ten minutes after the rebuild),
+each showing `runhigh: uid=2000` and `child report … resuid=0/0/2000`.
+
+The other 47 profiles were **not** re-run. The fix only changes what an unset
+`free_type` holds, and a run that printed a valid pair almost certainly took
+the real-free-record path (the test is `!pairs[k].free_type`, so the field was
+zero when the record arrived) — though in principle stack garbage that happened
+to land in 1..1024 would have passed the gate unnoticed, which is exactly the
+kind of silent mis-read the fix removes. Either way the evidence is still tied
+to `b05a46ff…`: re-run a profile before citing it against a release built from
+`cdd1e51e…`. The F14 table's cells were recorded under the older hash.
 
 ### What has been verified without a device
 

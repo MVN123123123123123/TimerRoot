@@ -42,6 +42,33 @@ stat -c %s timer                        # must be > 100000 bytes
 Then place it at `app/src/main/assets/timer` (the workflow copies it there) or
 install it on a device yourself.
 
+### Reproduce the released binary byte for byte
+
+The release asset is reproducible, but only from the repo root with the source
+named the same way. The compiler records both the working directory and the
+source path as typed, so building `p7a/timer_p7a.c` from anywhere else — or a
+copy such as `/tmp/timer.c` — yields a different binary even with identical
+flags:
+
+```bash
+cd /path/to/TimerRoot          # the source path must be relative, as in CI
+NDK=/opt/android-sdk/ndk/29.0.14206865
+CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+"$CC" -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -g -static -pthread \
+  -fdebug-compilation-dir=/home/runner/work/TimerRoot/TimerRoot \
+  -fdebug-prefix-map=$NDK=/usr/local/lib/android/sdk/ndk/29.0.14206865 \
+  -o timer p7a/timer_p7a.c
+sha256sum timer
+```
+
+`-fdebug-compilation-dir` sets `DW_AT_comp_dir` and `-fdebug-prefix-map` rewrites
+the toolchain paths recorded in `.comment`; neither can rewrite `DW_AT_name`.
+Check any build with `readelf --debug-dump=info timer | grep -m1 DW_AT_name`
+(it must say `p7a/timer_p7a.c`) and `readelf -p .comment` (clang and LLD 21.0.0
+from NDK 29.0.14206865). A source tree that differs at all, including a
+one-line fix, obviously produces a different hash — that is the point of
+recording the hash next to every transcript.
+
 ### Install at runtime
 
 At runtime the app can also fetch the latest release asset with **Settings ->
