@@ -180,6 +180,14 @@ From the factory image of that exact build:
    as *unsupported by configuration*; do not retry the plant or bisect.
    Details and the diagnostic signature are in `SKILL.md` §11.
 
+   When you re-verify such a kernel, re-run it with the current canonical
+   `timer` and the slabinfo-readable harness rather than citing an older
+   transcript. A pre-fix log shows `slabinfo unreadable` and the
+   `slab -1 -> -1` reclaim fallback, which weakens the evidence even though
+   the conclusion is a build fact. With the fix the log reads
+   `slab geometry confirmed by slabinfo` and a real `slab N -> M` delta, and
+   F11 still fails on all six plants — record that run.
+
    Some `boot.img`s store an **LZ4-legacy compressed** `kernel` instead of a
    raw `Image` (`chagall`, `klimt`, `duchamp`, `degas`, `zircon` in the
    November-2026 Xiaomi batch). `file` says `LZ4 compressed data, legacy`;

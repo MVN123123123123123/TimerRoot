@@ -785,6 +785,16 @@ stays unfilled and the device row reads *unsupported by configuration*. Do not
 bisect the binary, re-derive constants, or retry the plant for these: the
 reclaim is not the problem.
 
+Beware the stale-transcript objection: a blocked log taken before the harness
+`chmod 0444 /proc/slabinfo` step shows `slabinfo unreadable; address
+periodicity says order=…` and the `pcp reclaim go (slab -1 -> -1, 0ms)`
+fallback, because uid 2000 could not read the file. That older signature still
+proved the block, but it invites "the harness was broken". Re-run with the
+current canonical `timer` (sha256 `b05a46ff…`) and the log gains `slab
+geometry confirmed by slabinfo: order=1 size=0x2000` plus a real
+`slab 8711 -> 4805` delta — and F11 still fails on all six plants. Keep the
+post-fix transcript (`logs/recheck-*.json`) as the evidence of record.
+
 ---
 
 ## 12. Hard rules

@@ -1547,8 +1547,8 @@ has to opt in, and none of the 5.x kernels in this batch did.
 
 The failing signature is identical on all three blocked profiles (and on
 `zephyr`, the 5.15 release from the earlier Redmi Note 17 port) and is *not*
-a derivation bug: F7–F10 all pass, then every one of the six plants logs
-`pcp reclaim go` (or the `slab -1 -> -1` fallback), `free at …ms send ok=…`,
+a derivation bug: F7–F10 all pass, then every one of the six plants logs a
+real `pcp reclaim go (slab N -> M, ~21ms)`, `free at …ms send ok=…`,
 `free_seen=1 burst hit=1`, `reaping T=…`, a clean `write mode=zero
 target=<cred>+0x4`, and `[!] plant N left child uid=2000`. `hit=1` there
 proves the page was reclaimed by a spray thread — never that `rb_erase` ran
@@ -1736,6 +1736,15 @@ attempts. Two shapes are expected in the transcripts and neither is a fault:
 garnet, vermeer and zircon log the 5.15/5.10 signature from the config gate
 above on all six plants and are marked **blocked** rather than failed. Their
 transcripts stay in `work/qemu/logs/<release>.f11-1.log` and `.f11-2.log`.
+
+All four blocked profiles (the three above plus `zephyr`) were re-run against
+the current canonical harness after the `slabinfo` `chmod 0444` fix, so the
+transcripts are not stale: slab geometry is now *read*, not inferred. Each
+reports `slab geometry confirmed by slabinfo: order=1 size=0x2000`, a real
+`pcp reclaim go (slab 8711 -> 4805, ~21ms)` delta, `free_seen=1 burst hit=1`,
+`write mode=zero`, and then `left child uid=2000` on all six plants — the
+same F7–F10 pass / F11 fail split as before. A re-run cannot change the
+outcome because the option is a build fact, so no further retries.
 
 ### Devices per profile
 
