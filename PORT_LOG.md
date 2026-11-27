@@ -20,10 +20,13 @@ Two things were run before the QEMU pass, and neither replaced a device run:
   **not** the aarch64 binary, and it does not touch a real kernel.
 
 The shipped aarch64 binary was then run against the factory kernels in
-`qemu-system-aarch64`: 18 of the 22 profiles pass F7–F11 there, including
-every profile added for the Redmi Note 15/17 ports. Section
-[F14](#f14--qemu-mass-run) has the per-profile table and the procedure.
-F12 and F13 need a device.
+`qemu-system-aarch64`: 18 of the 22 generic profiles pass F7–F11 there,
+including every profile added for the Redmi Note 15/17 ports. The November
+2026 Xiaomi batch adds 12 more profiles on top: 9 pass F7–F11 and 3 are
+blocked by a missing `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` (see
+[the batch section](#xiaomi-2026-batch--12-factory-kernels-18-devices-nov-2026)).
+Section [F14](#f14--qemu-mass-run) has the per-profile table and the
+procedure. F12 and F13 need a device.
 
 The Samsung pass additionally exercised the `--samsung fake` chain end to end
 in QEMU, which is where [the `g_slide` regression](#samsung--g_slide-fix) was
@@ -655,9 +658,11 @@ image has no vendor-size setup and keeps `0x1200`.
 
 ### zephyr — `5.15.194-android13-8-00015-gf5526d1116e5-ab15004895`
 
-- **F1** `zephyr` (Redmi Note 17 4G) `OS3.0.311.0.WBUMIXM`. 4K pages. This is
-  the only 5.15 profile in the repository; the release string has no `-4k`
-  suffix.
+- **F1** `zephyr` (Redmi Note 17 4G) `OS3.0.311.0.WBUMIXM`. 4K pages. At
+  the time of this port it was the only 5.15 profile in the repository; the
+  November-2026 batch added two more 5.15.194 payloads (vermeer, zircon),
+  both blocked by the same missing config key. The release string has no
+  `-4k` suffix.
 - **F2** kernel `sha256 7ca3f0c9b3130813fa4d24c9017936acf25dca2c54f7eb7fa716894470aeaa51`;
   159 568 symbols; BTF present. Text/data use the `0xffffffc008…` `__pi_` base.
 - **F3** `init_posix_timers` is emitted as
@@ -687,6 +692,24 @@ image has no vendor-size setup and keeps `0x1200`.
 - **F6** 0 errors, `--selfcheck` 0 failures. BTF names the trace event
   `trace_event_raw_kmem_alloc` (not `…_kmem_cache_alloc`); `bytes_req -
   call_site` is still `0x10`, the default.
+- **F7–F10** all pass against the factory Image under uid 2000, with the
+  shipped binary (`b05a46ff…`): `ids 262/260/1029`, `probe recs=4096
+  kept=4096`, `leak made=512 votes=512`.
+- **F11 failed — configuration, not derivation.** The embedded config has
+  `CONFIG_POSIX_TIMERS=y` but **no** `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` and
+  **no** `CONFIG_HAVE_POSIX_CPU_TIMERS_TASK_WORK`. All six plants log
+  `pcp reclaim go (slab 8711 -> 4805, 21-24ms)`, `free at ~1.2s send ok=2765
+  err=0`, `free_seen=1 burst hit=1`, `reaping`, `write mode=zero
+  target=…+0x4`, then `[!] plant N left child uid=2000`. `hit=1` shows the
+  page was reclaimed; it does not show `rb_erase` ran on the payload, and
+  without task-work expiry it never does — the timer is handled inline in
+  tick/IRQ context and `posix_cpu_timers_exit` only runs `cleanup_timers()`.
+  This is the same block as the 5.10/5.15 kernels in the 2026 Xiaomi batch
+  section, and it is the reason the older 5.15 uid-2000 "miss" was
+  misdiagnosed as a plant-timing problem. The profile remains valid for a
+  kernel that has the option (or for a device build that enables it); on
+  this build F11 cannot pass.
+
 
 ### samsung a15xzh — `5.15.189-android13-8-33641424` (Samsung mode)
 
@@ -1469,7 +1492,294 @@ below).
 
 ---
 
+## Xiaomi 2026 batch — 12 factory kernels, 18 devices (Nov 2026)
+
+Eighteen HyperOS factory images from `timerroot-port/xiaomi/` reduced to
+twelve **distinct** kernels out of their `boot.img`/`vendor_boot`/`dtbo`;
+nine of them can be ported and three are blocked by configuration.
+Extraction workspace:
+`timerroot-port/work/xi2/` (`extract.sh` → `*-boot/kernel.raw`,
+`*-vmlinux.elf`, `*-btf.bin`, `*-vb/`, per-device `*.sha256`; `publish.sh`
+mirrors each device into `work/xi/<dev>-boot/` + `<dev>-vb/` so `mass.py`
+and `validate_conf.py` find it). Confs are `conf/<release>.conf`, one per
+banner; a shared banner covers every device that ships that byte-identical
+Image.
+
+Everything below was derived **only** from those factory images. No value
+came from a running device or a QEMU shim.
+
+### The config gate that decides F11
+
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK` was extracted from each Image's embedded
+`IKCFG_ST` gzip blob before any constant was derived. The result splits the
+batch exactly in two — every 6.x build has it `=y`, every 5.10/5.15 build has
+it absent:
+
+| kernel | `..._TASK_WORK` | `HAVE_POSIX_CPU_TIMERS_TASK_WORK` | F11 |
+|---|---|---|---|
+| 6.12.69 `g0a1dc0413ec7` (athens) | `y` | `y` | pass |
+| 6.6.118 `gf72a02f47f4b` (haotian) | `y` | `y` | pass |
+| 6.6.118 `g30c6145e49e0` (klimt) | `y` | `y` | pass |
+| 6.6.118 `gc4127a25dcf3` (chagall) | `y` | `y` | pass |
+| 6.1.157 `g2b8d37d00a12` (aurora) | `y` | `y` | pass |
+| 6.1.157 `g2de7246565ac` (zorn) | `y` | `y` | pass |
+| 6.1.157 `g5655d633b31a` (goku) | `y` | `y` | pass |
+| 6.1.138 `g6ab8c9a86a33` (duchamp) | `y` | `y` | pass |
+| 6.1.138 `g44bda9e8f6e9` (degas) | `y` | `y` | pass |
+| 5.10.236 `gfb24cf99ad97` (garnet) | **absent** | **absent** | blocked |
+| 5.15.194 `gf4321180a397` (vermeer) | **absent** | **absent** | blocked |
+| 5.15.194 `g853eb7b6b965` (zircon) | **absent** | **absent** | blocked |
+
+(`zephyr`'s 5.15.194 `gf5526d1116e5`, from the earlier Redmi Note 17 port, is
+blocked the same way and is counted in the blocked group there.)
+
+Upstream backing, read from the 5.15.194/6.1.157 trees: `run_posix_cpu_timers()`
+either `task_work_add(&tsk->posix_cpu_timers_work, …)` when
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK` is set, or calls
+`handle_posix_cpu_timers()` inline from the tick/IRQ path when it is not.
+`posix_cpu_timers_exit{,_group}()` only run `cleanup_timers()` in either case.
+So the stale node is dequeued on the exit path only with task work; without
+it, expiry already happened in interrupt context and the exit path never
+touches the armed node. `POSIX_CPU_TIMERS_TASK_WORK` is `default y if
+POSIX_TIMERS && HAVE_POSIX_CPU_TIMERS_TASK_WORK`, and `arch/arm64/Kconfig`
+`select`s the latter only from 6.1 onward — a 5.10/5.15 arm64 vendor kernel
+has to opt in, and none of the 5.x kernels in this batch did.
+
+The failing signature is identical on all three blocked profiles (and on
+`zephyr`, the 5.15 release from the earlier Redmi Note 17 port) and is *not*
+a derivation bug: F7–F10 all pass, then every one of the six plants logs
+`pcp reclaim go` (or the `slab -1 -> -1` fallback), `free at …ms send ok=…`,
+`free_seen=1 burst hit=1`, `reaping T=…`, a clean `write mode=zero
+target=<cred>+0x4`, and `[!] plant N left child uid=2000`. `hit=1` there
+proves the page was reclaimed by a spray thread — never that `rb_erase` ran
+on the payload. `fake` mode fails the same way (`mode=fake`,
+`resuid=2000/2000/2000`), so the miss is not specific to the zero-write path.
+
+### F1 — vulnerability
+
+`begin_new_exec` was disassembled on all twelve vmlinux ELFs
+(`work/xi2/f1.py`): every one reports
+`VULNERABLE (posix_cpu_timers_exit before exit_itimers)`. The surrounding
+calls differ by family — athens (6.12) runs `exec_mm_release` before the
+timer call, the 6.6 trio adds `exec_task_namespaces`, the 6.1.138 pair drops
+`dma_buf_begin_new_exec`, the 5.15 pair keeps only
+`unshare_files`/`exec_mmap`, and 5.10 `garnet` only `exec_mmap` — but in all
+twelve `posix_cpu_timers_exit` precedes `exit_itimers` inside the same
+`begin_new_exec`, under the same `sighand->siglock` region. That bracket is
+the bug; the fetcher/porting procedure's F1 gate is met for all twelve.
+
+### F2–F5 — per-kernel derivations
+
+Everything below is `Image`-derived: banner from the boot image header/OTA
+manifest, symbols from the vmlinux, geometry from BTF where the build has it
+and from disassembly/static data where it does not. All values are reproduced
+by `scripts/derive_conf.py` and re-checked by
+`timerroot-port/work/xi/validate_conf.py`.
+
+| release | symbols | pages | `timer_site` | `copy_process_low21` | `task_alloc_bytes` | `cred` | `task_cred_off` |
+|---|---|---|---|---|---|---|---|
+| 6.12.69 `g0a1dc0413ec7-4k` | 132 174 | 4K | `0xffffffc08035477c` | `0xf42d8` | `0x1840` | `0xb8` | `0x900` |
+| 6.6.118 `gf72a02f47f4b-4k` | 110 326 | 4K | `0xffffffc080195d9c` | `0xab93c` | `0x14c0` | `0xb8` | `0x820` |
+| 6.6.118 `g30c6145e49e0-4k` | 110 065 | 4K | `0xffffffc080195d48` | `0xab93c` | `0x12c0` | `0xb8` | `0x820` |
+| 6.6.118 `gc4127a25dcf3-4k` | 110 141 | 4K | `0xffffffc080195d48` | `0xab93c` | `0x12c0` | `0xb8` | `0x820` |
+| 6.1.157 `g2b8d37d00a12` | 104 467 | 4K | `0xffffffc0081b16dc` | `0xb7f40` | `0x12c0` | `0xb0` | `0x838` |
+| 6.1.157 `g2de7246565ac` | 104 500 | 4K | `0xffffffc0081b11b8` | `0xb79e4` | `0x12c0` | `0xb0` | `0x838` |
+| 6.1.157 `g5655d633b31a` | 104 467 | 4K | `0xffffffc0081b16dc` | `0xb7f40` | `0x12c0` | `0xb0` | `0x838` |
+| 6.1.138 `g44bda9e8f6e9` | 101 689 | 4K | `0xffffffc008191af8` | `0xab680` | `0x12c0` | `0xb0` | `0x838` |
+| 6.1.138 `g6ab8c9a86a33` | 101 743 | 4K | `0xffffffc00819208c` | `0xab680` | `0x12c0` | `0xb0` | `0x838` |
+| 5.15.194 `gf4321180a397` | 159 573 | 4K | `0xffffffc00827ed08` | `0x132d40` | `0x1200` | `0xb0` | `0x798` |
+| 5.15.194 `g853eb7b6b965` | 159 577 | 4K | `0xffffffc00827e288` | `0x1322c8` | `0x1200` | `0xb0` | `0x798` |
+| 5.10.236 `gfb24cf99ad97` | 142 760 | 4K | `0xffffffc00827bd00` | `0x126748` | `0x1280` | `0xa8` | `0x780` |
+
+Notable per-kernel findings:
+
+- **athens (6.12.69)** is the only kernel in the batch with `timer_alloc
+  0x100` and `cred 0xb8`; its `vendor_boot` command line carries
+  `android_arch_task_struct_size=1024`, so `task_struct_vendor_size_setup()`
+  turns BTF's `0x1440` into `0x1840`. `selinux_blob_off = 0x8` (landlock
+  registers a cred blob before SELinux on this build).
+- **haotian (6.6.118)** has the same `vendor_boot` key
+  (`android_arch_task_struct_size=512`) → `0x12c0 + 0x200 = 0x14c0`, the only
+  6.6 build in the batch with the vendor extension. `klimt` and `chagall`
+  share the 6.6 layout without it.
+- **goku and aurora** (6.1.157) have identical constants and different
+  banners; **zorn** (also 6.1.157) differs in `timer_site`,
+  `copy_process_low21` and every data symbol, so the three are three ports.
+- **degas and duchamp** (6.1.138) share every constant except
+  `timer_site`/`init_posix_timers`; `task_struct_cachep` has the same address
+  but the profiling `alloc_tag` call site differs.
+- **vermeer and zircon** (5.15.194) share `task_alloc_bytes`, `cred` and
+  `task_cred_off`, and differ only in `timer_site`/`copy_process_low21` and
+  `init_user_ns` (`0xacde250` vs `0xacde2d0`) — both are the same GKI branch,
+  two vendor defconfigs.
+- **garnet (5.10.236)** has **no BTF**, so no `cred`/`task_struct` layout was
+  available: `cred 0xa8` (4-byte `usage`), `cred_req = cred_size = 0xa8`,
+  `task_struct 0x1280` and `task_cred_off 0x780` come from
+  `cred_init`/`fork_init`/`dup_task_struct`/`prepare_creds`/`getuid`
+  disassembly. 5.10 has no `cred->ucounts`, so `cred_ucounts_off` is pinned
+  onto the `groups` slot (`0x90`) and `init_ucounts` points at
+  `ucounts_hashtable` (`0xffffffc00a990ff8`), which is only ever written,
+  never dereferenced — the same trick as the S23 FE 5.10 port.
+  `cred_group_off = 0x90` for the same reason. Only SELinux registers a cred
+  blob here (`selinux_blob_sizes` `[0x18,0x10,0x28,0x8,0x4]`,
+  `selinux_blob_sizes 0xffffffc00a2f6080`), hence `selinux_blob_off 0x0`.
+- **LZ4-legacy `kernel`** in `boot.img` for chagall, klimt, duchamp, degas and
+  zircon. `extract.sh` unwraps to `kernel.raw` first; the `IKCFG_ST` blob only
+  exists in the decompressed image (a "no IKCFG" on the compressed file is
+  expected). The plain-`kernel` variants (athens, aurora, goku, garnet,
+  haotian, vermeer, zorn) carry the blob directly.
+- **Banner derivation trap:** several BTF string tables only contain the
+  literal `Linux version %s (%s)`. `derive_conf.py` now rejects that string
+  instead of writing it as a release; the real banner comes from the boot
+  image/OTA and is cross-checked against `/proc/version` in the QEMU run.
+
+### F6 — static validation
+
+`validate_conf.py` on all twelve confs: **0 error(s)** each. That re-derives
+`timer_site`, `copy_process_low21`, the six F5 symbols, the BTF object sizes
+where BTF exists and the `alloc_req_off` (`0x10`, the default) from each
+`work/xi/<dev>-boot/` vmlinux + BTF, and diffs them against the conf. The
+5.10 garnet conf has no BTF to check, so it is validated against symbols
+only (5 of the 6; `init_ucounts` does not exist and is intentionally mapped
+to `ucounts_hashtable`). The runtime `selfcheck` mode was also run in QEMU
+against each factory Image (`qmode=selfcheck`): all twelve report
+`[selfcheck] ok (0 failures)`. The F6 spill rule reports
+`info last object node=… cred_end=… slab=0x2000 (spills -> run_plant
+retries)` on every one, because the fake cred on the last object runs past
+the slab end; that is informational and the plant retries that object, which
+is why each pass log reaps a victim in the first half of the slab.
+Slot table: `copy_process_linux21` and `timer_site` match every vmlinux;
+`alloc_req_off 0x10` matches BTF on the nine BTF builds.
+
+Three `derive_conf.py` fixes came out of this batch (shipped with the same
+commit as the confs):
+
+- `get_banner()` rejects the literal `Linux version %s (%s)` instead of
+  producing a bogus release string.
+- `find_cache_alloc_site()` collects **all** `bl` candidates and drops the
+  `alloc_tag` (profiling) twin only when a second candidate exists. Before,
+  a build whose only plausible site was the profiling one lost its site.
+- the 5.15 cache-create emitted as
+  `__initstub__kmod_posix_timers__…_init_posix_timers.cfi` (zephyr) is now
+  recognised by suffix, not by the bare symbol name.
+
+### F7–F11 — QEMU (factory Image, uid 2000)
+
+All twelve profiles were booted in `qemu-system-aarch64 -M virt -cpu max`
+at 4K pages and driven through the **shipped** aarch64 binary
+(`initramfs/timer` = `p7a/timer_p7a`, sha256
+`b05a46ff9af187eedf5daa81cda028ce9d8f65dfd135d0a85c934b19d94f2616`), started
+by `runhigh` which drops to uid/gid 2000. The initramfs also
+`chmod`s `/proc/slabinfo` to `0444` before dumping it, matching the field
+state where Android opens it `0440 root:log` for the shell — without that the
+uid-2000 `pcp_free` gate cannot read the object count and falls back to
+guessing.
+
+Canonical-binary evidence, one transcript per passing profile in
+`work/qemu/logs/<release>.f11-pass.log` (all recorded in the same sweep so
+they share one binary and one initramfs):
+
+| profile | F7 | F8 | F9 | F10 | F11 | plant line |
+|---|---|---|---|---|---|---|
+| `6.12.69-…g0a1dc0413ec7-4k` (athens) | pass | pass 334/332/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 617ms ok=4240 err=0`, hit 19ms |
+| `6.6.118-…gf72a02f47f4b-4k` (haotian) | pass | pass 275/273/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1824ms ok=93714 err=48608`, hit 1312ms |
+| `6.6.118-…g30c6145e49e0-4k` (klimt) | pass | pass 275/273/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1683ms ok=106496 err=55552`, hit 1771ms |
+| `6.6.118-…gc4127a25dcf3-4k` (chagall) | pass | pass 275/273/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1743ms ok=93549 err=48608`, hit 1202ms |
+| `6.1.157-…g2b8d37d00a12` (aurora) | pass | pass 263/261/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1362ms ok=2811 err=0`, hit 9ms |
+| `6.1.157-…g2de7246565ac` (zorn) | pass | pass 263/261/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1252ms ok=10032 err=0`, hit 53ms |
+| `6.1.157-…g5655d633b31a` (goku) | pass | pass 263/261/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1350ms ok=10619 err=0`, hit 56ms |
+| `6.1.138-…g44bda9e8f6e9` (degas) | pass | pass 263/261/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` (attempt 2) | `free at 1320ms ok=2474 err=0`, hit 8ms |
+| `6.1.138-…g6ab8c9a86a33` (duchamp) | pass | pass 263/261/1029 | pass | pass 512/512 | **PASS** `resuid=0/0/2000` | `free at 1320ms ok=2742 err=0`, hit 10ms |
+| `5.10.236-…gfb24cf99ad97` (garnet) | pass | pass 258/261/1029 | pass | pass 512/512 | **blocked** | 6/6 `left child uid=2000` |
+| `5.15.194-…gf4321180a397` (vermeer) | pass | pass 262/260/1029 | pass | pass 512/512 | **blocked** | 6/6 `left child uid=2000` |
+| `5.15.194-…g853eb7b6b965` (zircon) | pass | pass 262/260/1029 | pass | pass 512/512 | **blocked** | 6/6 `left child uid=2000` |
+
+Eight of the nine passes land on the first attempt (`plant attempt 1/6`,
+`plant 1 reaped`, `child report uid=0 euid=2000 setuid(0)=0 errno=0
+resuid=0/0/2000`). `degas` needed one retry: attempt 1 logged the full
+`pcp reclaim go (slab 8711 -> 4743, 22ms)` → `free at 1320ms` → `burst hit=1`
+→ `write mode=zero` sequence and still left the child at uid 2000, then
+attempt 2 re-ran the plant with a fresh pool and landed. That is the
+documented recoverable miss (the recycle can land after the stale `rb_erase`
+has passed), so the gate passed on the retry and the log keeps both
+attempts. Two shapes are expected in the transcripts and neither is a fault:
+
+- the 6.1/6.12 kernels spend a few thousand sends with `err=0` (the burst is
+  cut short by the slabinfo signal, not by queue exhaustion), while the 6.6
+  kernels push ~100k sends and take `EAGAIN` on half of them because the
+  212 992-byte `wmem_max` clamps the 16 MB `SO_SNDBUF`. Both land.
+- haotian and chagall report `hit` after 1.2–1.8 s rather than tens of ms,
+  because the 6.6 `copy_process` path frees the page much later relative to
+  `pcp reclaim go`.
+
+garnet, vermeer and zircon log the 5.15/5.10 signature from the config gate
+above on all six plants and are marked **blocked** rather than failed. Their
+transcripts stay in `work/qemu/logs/<release>.f11-1.log` and `.f11-2.log`.
+
+### Devices per profile
+
+One conf serves every device whose factory `Image` is byte-identical
+(`verify_payloads.py` re-checks the decompressed hash):
+
+| conf | devices |
+|---|---|
+| `6.12.69-…g0a1dc0413ec7-ab16271006-4k` | athens (K100 Pro / F9 Pro), songyuan (K100 Pro Max / F9 Ultra), warhol (17T Pro) |
+| `6.6.118-…gf72a02f47f4b-abogki551678766-4k` | haotian (15 Pro), miro (K80 Pro), xuanyuan (15 Ultra) |
+| `6.6.118-…g30c6145e49e0-ab15416827-4k` | klimt (15T Pro) |
+| `6.6.118-…gc4127a25dcf3-ab15863337-4k` | chagall (17T), klee (Turbo 5 / X8 Pro) — also OnePlus 13 (see below) |
+| `6.1.157-…g2b8d37d00a12-mi` | aurora (14 Ultra) |
+| `6.1.157-…g2de7246565ac-mi` | zorn (K80 / F7 Pro) |
+| `6.1.157-…g5655d633b31a-mi` | goku (MIX Fold 4) |
+| `6.1.138-…g6ab8c9a86a33-ab14396278` | duchamp (K70E / X6 Pro), rothko (14T Pro / K70 Ultra) |
+| `6.1.138-…g44bda9e8f6e9-ab13792638` | degas (14T) |
+| `5.10.236-…gfb24cf99ad97` | garnet (Note 13 Pro 5G / X6 5G) — blocked |
+| `5.15.194-…gf4321180a397` | vermeer (K70 / F6 Pro) — blocked |
+| `5.15.194-…g853eb7b6b965` | zircon (Note 13 Pro+ 5G) — blocked |
+
+`chagall`'s `boot.img` holds an `Image` byte-identical to the OnePlus 13
+`CPH2653_17.0.0.102(EX01)` one (`3ccbdb1b…607bad24`), so `chagall` and `klee`
+ride the existing OnePlus 13 profile, and `mass.py` boots either
+`work/xi/chagall-boot/kernel.raw` or the pre-existing `dg4-boot/kernel` to the
+same result. That profile's canonical-binary run is the chagall row above.
+
+### Harness changes that this batch needed
+
+Both live in the gitignored port tree (`timerroot-port/work/qemu/`):
+
+- `base/init` runs `chmod 0444 /proc/slabinfo` before the slabinfo dump (see
+  F7–F11 above; the `pcp_free` profiles read the object count as the free
+  signal and uid 2000 cannot open a `0400` file).
+- `mkinitramfs.sh` installs `p7a/timer_p7a` into the initramfs by name on
+  every build (`TIMER_BIN` overrides for an instrumented build) and prints its
+  sha256, so a hand-copied experiment can no longer become the measured
+  binary. `INIT_OVERRIDE` swaps `init` for a probe.
+
+The documented "raise `net.core.{wmem,rmem}_max` to 1 MB" is **not** in
+`base/init` and is not needed by the current binary: the phase-2 burst waits
+for `mm_page_free` before spending its send budget, so the default queues
+suffice (all nine passes above ran without the sysctl). The sysctl remains the
+thing to try only if a transcript shows `send ok` stalling immediately with
+`err` in the millions — the old flat-out-burst signature. 16 MB sysctls also
+fail from RAM exhaustion in an 8 GB guest, so 1 MB is the ceiling if it is
+ever needed.
+
+### F12–F16
+
+F12 (`permissive`) and F13 (`fake`) stay **pending** for all twelve: they need
+a device with SELinux policy and KernelSU respectively. Note that
+`permissive` does not prove the write primitive in QEMU either — on the
+blocked profiles it logs `hit=1`, `permissive done`, `EXIT status=0` while
+`sysctl_perf_event_paranoid` stays `2` (selinuxfs is not mounted in the stock
+initramfs, so the only discriminating readback is the perf-paranoid flip).
+F15 hardware has run only on the OnePlus 13. Until a device run exists, the
+`docs/supported-devices.md` rows stay `verified in QEMU` for the nine
+portable kernels and `unsupported by configuration` for the three blocked
+ones in this batch (plus `zephyr` from the earlier port).
+
+---
+
 ## Gate status
+
 
 | gate | status | note |
 |---|---|---|
@@ -1483,7 +1793,7 @@ below).
 | F8 `timer ids` | pass (QEMU) | page event ids resolved in every profile |
 | F9 `timer probe` | pass (QEMU) | base vote + `pair pfn` agreement on every profile |
 | F10 `timer leak` | pass (QEMU) | 512/512 base votes, cred leaked on the first attempt |
-| F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/0`, `ROOT_SHELL_OK` |
+| F11 verify | pass (QEMU) | zero-write child reaches `resuid=0/0/2000`; nine of the twelve 2026-batch kernels pass, the other three (no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`) are blocked, see the batch section above, as is zephyr |
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
 | F14 QEMU | pass | every generic profile with a workspace `Image` passes every gate (table below); s23fe, s24fe, s25edge and s23 pass in their own shim runs; s26u is the only provenance exception, not a binary result |
@@ -1507,9 +1817,13 @@ to boot. `logs/mass-final.json` holds the per-profile detail.
 Re-run after the spray-write fix and pool recycle (`logs/mass-recl.json`,
 27 profiles: the 22 above plus `samsung-s26fe`, `samsung-s26u` and the two
 `maybe-dirty` confs): **19 of the 21 profiles with a workspace Image passed
-every gate**, including the first full-suite run of `samsung-s26fe`. The two
-exceptions are provenance/environment limits, not binary behaviour, and both
-reproduce deterministically:
+every gate**, including the first full-suite run of `samsung-s26fe`. The
+November 2026 Xiaomi batch was then run as one canonical-binary sweep (all 12
+of its profiles with the same `initramfs.cpio.gz`, sha256 `ab49ec54…`, and
+the same `timer`, sha256 `b05a46ff…`): 9 passed every gate and 3 are blocked
+by `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`, so they pass F7–F10 and stop at F11.
+The two exceptions below are provenance/environment limits, not binary
+behaviour, and both reproduce deterministically:
 
 - `samsung-s26u` — the profile's constants come from the SamTimer reference
   6.1.162 build, whose factory `boot.img` is not in the workspace. Its
@@ -1552,7 +1866,18 @@ run.
 
 | profile | device | slabinfo | F7 | F8 | F9 | F10 | F11 |
 |---|---|---|---|---|---|---|---|
-| 5.15.194-…-ab15004895 | zephyr | pass | pass | pass | pass | pass | pass |
+| 5.10.236-…-ab14313284 | garnet (Note 13 Pro 5G / X6 5G) | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
+| 5.15.194-…-ab15212794 | vermeer (K70 / F6 Pro) | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
+| 5.15.194-…-ab15936612 | zircon (Note 13 Pro+ 5G) | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
+| 5.15.194-…-ab15004895 | zephyr | pass | pass | pass | pass | pass | **blocked: no `POSIX_CPU_TIMERS_TASK_WORK`** |
+| 6.1.138-…-ab13792638 | degas (Xiaomi 14T) | pass | pass | pass | pass | pass | pass |
+| 6.1.138-…-ab14396278 | duchamp (K70E / X6 Pro), rothko | pass | pass | pass | pass | pass | pass |
+| 6.1.157-…-g2b8d37d00a12-mi | aurora (Xiaomi 14 Ultra) | pass | pass | pass | pass | pass | pass |
+| 6.1.157-…-g2de7246565ac-mi | zorn (K80 / F7 Pro) | pass | pass | pass | pass | pass | pass |
+| 6.1.157-…-g5655d633b31a-mi | goku (MIX Fold 4) | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-abogki551678766-4k | haotian (15 Pro), miro, xuanyuan | pass | pass | pass | pass | pass | pass |
+| 6.6.118-…-ab15416827-4k | klimt (15T Pro) | pass | pass | pass | pass | pass | pass |
+| 6.12.69-…-ab16271006-4k | athens (K100 Pro / F9 Pro), songyuan, warhol | pass | pass | pass | pass | pass | pass |
 | 6.1.138-…-ab14529422 | flourite | pass | pass | pass | pass | pass | pass |
 | 6.1.138-…-ab13911623 | lapis | pass | pass | pass | pass | pass | pass |
 | 6.1.162-…-ab16261587 | tegu (Pixel 8/9) | pass | pass | pass | pass | pass | pass |
@@ -1587,6 +1912,17 @@ run.
 (the two `n/a` rows for s26u are the provenance mismatch above; the
 `maybe-dirty` confs report `kernel not in workspace` like the four OPPO/realme
 imports.)
+
+The four **blocked** cells (garnet, vermeer, zircon, zephyr) are the
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK` group from the batch section above: the
+key is absent from the extracted `IKCFG_ST` config, so the fired timer is
+expired inline in tick/IRQ context and the exit path never dequeues the stale
+node. Every plant reports `burst hit=1` (the page was reclaimed) followed by
+`left child uid=2000` — the write never lands. zephyr is in the same group;
+its old `pass` cell came from a 2026-11-07 **root** run, which predates the
+uid-2000 rule and was never valid evidence. None of the four is a regression
+and none is fixable from the conf; they stay unfilled and the device rows read
+*unsupported by configuration*.
 
 `samsung-s24fe` was ported after that sweep. It has its own factory `Image`
 and passed every gate in a separate shim run (`logs/mass-s24fe.json`), which
