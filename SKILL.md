@@ -525,6 +525,9 @@ Gates (each prints its evidence in the log):
   gid=2000` first; if it says `uid=0`, the drop is missing (an older `runhigh`
   in the port tree only raised `RLIMIT_NOFILE`) and the whole gate is void.
   Accept `uid=0 euid=0` as a wake value only for old root-harness transcripts.
+  `mass.py` now refuses such a run outright (`FAIL(root-harness)`) and always
+  writes the passing transcript to `logs/<release>.f11-pass.log`, because a
+  bare JSON `PASS` cell cannot be audited for any of this.
 
   **`hit=1` proves the reclaim, not the write.** `scan_reclaim()` sets `hit`
   when a spray thread's `page_alloc` took the victim pfn after a `page_free`.
@@ -558,6 +561,12 @@ zombie reaped — the free can land after the phase-1 burst, i.e. after the
 stale `rb_erase` has already passed, and the page gets recycled without the
 payload write landing. `plant n left child uid=…; retrying` is expected; six
 failures are not.
+
+Stop before retrying if F8 printed an event id outside 1..1024 — classically
+`page_free=1701669690`, which is the ASCII fragment `":kme"`, not an id. The
+trace was read as text, `scan_reclaim()` then watches an event that never
+fires, and all six plants miss for a reason the profile does not control.
+Re-run the profile from the start and record the miss.
 
 `calibrate_base()` runs on every mode before the gates: it votes the linear
 base for slab orders 0–3 and can override the conf geometry (see §2). Record
@@ -725,6 +734,7 @@ Grep the log; each line maps to one cause.
 | `pair missing` | slab↔page ordering broken | check `slab_order`; try `pcp_free` |
 | `fake cred spills` | node offset or cred size wrong | re-derive `timer_node_off` / `cred_size` |
 | `burst missed` | spray too slow, device loaded | more `SPRAY_POST`, settle longer |
+| `[ids] page_alloc=… page_free=<huge>` (`FAIL(ids=… text=':kme')`) | the trace buffer was read as text, not binary records, so the "id" is ASCII from an event name (e.g. `0x656d6b3a` = `":kme"`). Seen intermittently at 16K pages | not a profile defect — re-run the profile. Do **not** raise the guest memory (that starves the reclaim these profiles need); if it repeats, lengthen the settle before `ids`. `mass.py` rejects the value because the discover loop only accepts ids 1..1024 |
 | `no zombie` | killer race lost | check the `CLOCK_THREAD_CPUTIME_ID` path |
 | `cred writes did not land` | wrong `cred_uid_off` | re-derive |
 | `setuid(0) failed` | caps missing → `fake_caps_off` wrong | re-derive |
