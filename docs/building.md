@@ -108,8 +108,8 @@ The script:
   `conf/**` as `assets/conf/**` with `aapt2`;
 - zipaligns and signs with a generated debug keystore.
 
-Parameters: `-Sdk`, `-ShizukuApi`, `-Out`, `-VersionCode` (default 40) and
-`-VersionName` (default `0.40`). Output is `build/TimerRoot.apk`.
+Parameters: `-Sdk`, `-ShizukuApi`, `-Out`, `-VersionCode` (default 41) and
+`-VersionName` (default `0.41`). Output is `build/TimerRoot.apk`.
 
 
 ## CI release workflow
