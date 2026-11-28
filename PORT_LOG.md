@@ -2687,6 +2687,28 @@ QEMU 6.6.118 gates re-run after the change: `slabinfo`, `F7_target`,
 `F8_ids`, `F9_probe`, `F10_leak` and `F11_verify`
 (`resuid=0/0/2000`, `ROOT_SHELL_OK`) all pass on the factory Image.
 
+## Redmi Turbo 4 Pro / POCO F7 (`onyx`) — two builds, no new conf
+
+This is a device-identity check, not a new port. Both factory builds ship a
+decompressed `Image` that is byte-identical to one already profiled above;
+no constants were derived from an onyx device and no gate was re-run there.
+The F1–F11 results belong to the payloads named here, which the QEMU runs
+booted as byte-identical Images.
+
+| build | Image SHA-256 | identical payload | conf | vendor task size |
+|---|---|---|---|---|
+| `OS3.0.303.0.WOLMIXM` | `81181e8321e655acbce601faff94ab1610f9b825869a56a1c0e5bfcf9db1126c` | `kunzite` | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | absent → `task_alloc_bytes 0x12c0` |
+| `OS4.0.4.0.XOLCNXM` | `1073400e04a4cf94871b40a230b42af0078ff3f07aa6a52bff0469f0c127195b` | `dada` OS4 | `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf` | `512` → `task_alloc_bytes 0x14c0` |
+
+Both are `6.6.118-…-4k`. The vendor-size check is the point of this entry:
+the two onyx builds share a kernel series but not the
+`android_arch_task_struct_size=` parameter, so a match by banner alone would
+pick a conf with the wrong `task_alloc_bytes`. Neither conf pins
+`device_model`; both select on release only. The `kunzite` payload's evidence
+is in [the 6.6.118 section](#66118--xiaomi-15-redmi-note-15--17) and the
+`dada` OS4 payload's in [its section](#xiaomi-15-dada--24129pn74c-hyperos-40-global--os40011xocmixm-66118-android15-8-g0908354dac1b-ab16143355-4k).
+F12–F16 remain pending for onyx hardware.
+
 ## OnePlus 13 (CPH2653), OxygenOS/ColorOS 17.0.0.102 (EX01) — `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k`
 
 Factory artifacts supplied in `timerroot-port/oneplus/Oneplus13/CPH2653_17.0.0.102(EX01)/`

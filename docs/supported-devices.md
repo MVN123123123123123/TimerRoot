@@ -211,7 +211,9 @@ for the older single-profile Samsung builds.
 |---|---|---|---|---|---|---|
 | Xiaomi 15 | `dada` | `OS3.0.307.0.WOCCNXM` | — | — | `conf/6.6.118-android15-8-gc44b714366cc-abogki519650608-4k.conf` | verified in QEMU |
 | Xiaomi 15 | `dada` | `OS4.0.0.11.XOCMIXM` (global, Android 17) | `CP2A.260605.016` | 2026-09-01 | `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf` | verified in QEMU |
+| Redmi Turbo 4 Pro / POCO F7 | `onyx` | `OS4.0.4.0.XOLCNXM` | — | — | `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf` | verified in QEMU |
 | Redmi Note 15 5G | `kunzite` | `OS3.0.304.0.WPQCNXM` | — | — | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | verified in QEMU |
+| Redmi Turbo 4 Pro / POCO F7 | `onyx` | `OS3.0.303.0.WOLMIXM` | — | — | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | verified in QEMU |
 | Redmi Note 17 5G | `mist` | `OS3.0.311.0.WPUCNXM` | — | — | `conf/6.6.118-android15-8-g666ad52b8230-ab15657065-4k.conf` | verified in QEMU |
 | Redmi Note 17 Pro 5G | `iolite` | `OS3.0.314.0.WDQCNXM` | — | — | `conf/6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k.conf` | verified in QEMU |
 
@@ -469,6 +471,15 @@ not publish the value for that build; read the real value on a device with
   `mist` share `...d48`. `task_alloc_bytes` stays `0x12c0` for all four,
   because their `vendor_boot`/`dtb`/`dtbo` images carry no
   `android_arch_task_struct_size=` parameter.
+- `onyx` (Redmi Turbo 4 Pro / POCO F7) needs no profile of its own: its two
+  builds are byte-identical to two existing payloads. `OS3.0.303.0.WOLMIXM`
+  matches `kunzite` (Image SHA-256 `81181e83…9db1126c`) and, like it, carries
+  no vendor task-size parameter, so `task_alloc_bytes` is `0x12c0`.
+  `OS4.0.4.0.XOLCNXM` matches the `dada` OS4 build
+  (`1073400e…c127195b`) and sets `android_arch_task_struct_size=512`, so
+  `task_alloc_bytes` is `0x14c0`. Both payloads were checked at the `Image`
+  byte level, not just by `uname -r`; the shared confs select on release
+  alone, so either build loads without a device-pinned profile.
 - The reference port
   [`quyicheng03-boop/CVE-2026-98260-dada-android`](https://github.com/quyicheng03-boop/CVE-2026-98260-dada-android)
   is titled "dada" but was built for
