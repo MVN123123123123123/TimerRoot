@@ -8,8 +8,8 @@ param(
     [string]$Sdk = "$env:LOCALAPPDATA\Android\Sdk",
     [string]$ShizukuApi = "",
     [string]$Out = "",
-    [int]$VersionCode = 40,
-    [string]$VersionName = "0.40"
+    [int]$VersionCode = 41,
+    [string]$VersionName = "0.41"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,10 +45,13 @@ New-Item -ItemType Directory -Force -Path $src, $gen, $classes, $dex | Out-Null
 
 # Assets: the prebuilt exploit plus the per-kernel confs from the repo root,
 # packaged as assets/conf/** (the layout UserService.install() expects).
+# conf/unsupported/ is dropped again: those profiles are blocked by the factory
+# kernel config and must not reach the app.
 $assets = Join-Path $work 'assets'
 New-Item -ItemType Directory -Force -Path $assets | Out-Null
 Copy-Item (Join-Path $root 'app/src/main/assets/*') $assets -Recurse -Force
 Copy-Item (Join-Path $root 'conf') (Join-Path $assets 'conf') -Recurse -Force
+Remove-Item (Join-Path (Join-Path $assets 'conf') 'unsupported') -Recurse -Force -ErrorAction SilentlyContinue
 
 # Shizuku API + provider sources
 Copy-Item (Join-Path $ShizukuApi 'api/src/main/java/*') $src -Recurse -Force

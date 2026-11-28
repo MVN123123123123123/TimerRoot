@@ -26,11 +26,17 @@ import java.net.URL;
 final class UpdateChecker {
 
     static final String REPO = "MVN123123123123123/TimerRoot";
-    static final String RELEASES_PAGE =
-            "https://github.com/" + REPO + "/releases/latest";
-
-    private static final String API_LATEST =
-            "https://api.github.com/repos/" + REPO + "/releases/latest";
+    /**
+     * Release this build checks for updates. The source keeps "latest" so main
+     * keeps tracking stable; the beta workflow rewrites this to "beta" because
+     * that release is a prerelease and /releases/latest would report stable.
+     */
+    private static final String RELEASE_TAG = "latest";
+    static final String RELEASES_PAGE = "https://github.com/" + REPO + "/releases/"
+            + ("latest".equals(RELEASE_TAG) ? "latest" : "tag/" + RELEASE_TAG);
+    private static final String API_LATEST = "https://api.github.com/repos/" + REPO
+            + "/releases/"
+            + ("latest".equals(RELEASE_TAG) ? "latest" : "tags/" + RELEASE_TAG);
     private static final String APK_ASSET = "TimerRoot.apk";
     /** The APK is about 1 MB today; refuse anything wildly larger. */
     private static final long MAX_APK_BYTES = 32L * 1024 * 1024;

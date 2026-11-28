@@ -9,6 +9,8 @@ gives a root shell in the shell domain, then late-loads **KernelSU**
 
 **recommends using [Shizuku Next](https://github.com/rushiranpise/Shizuku-Next) for Auto root operation.**
 
+**When having problems, read debug log [here](docs/images/Device-debug-button.png)**
+
 ![TimerRoot status screen](docs/images/status.png)
 
 ## Overview
@@ -41,6 +43,8 @@ one. The fixed target name (lynx) originated from the old build specifically por
 |---|---|
 | [Installation and usage](docs/installation.md) | Prerequisites, Shizuku setup, installing the exploit, first root, every screen and action, auto-root, Samsung mode, safety and troubleshooting |
 | [Building](docs/building.md) | JDK/SDK/NDK requirements, Gradle and Gradle-free builds, signing, CI release workflow, adding profiles |
+| [Porting a kernel](docs/porting.md) | Simplified, human-readable guide to deriving a new kernel profile: the six steps, the numbers you need, validation, QEMU and device gates |
+| [Slabinfo access audit](docs/slabinfo-access-audit.md) | Per-image evidence for shell UID/groups, Android DAC changes, kernel creation mode and SELinux policy; inconclusive image sets are identified |
 | [Supported devices](docs/supported-devices.md) | Manufacturer tables with build numbers, status legend and detailed per-family notes |
 | [Auto-root research](docs/auto-root.md) | Design, Shizuku/ADB field notes, boot implementation and verified logs |
 | [Contributions and credits](docs/contributions.md) | Every upstream project and per-device port this work took ideas from |

@@ -217,7 +217,8 @@ BootReceiver (directBootAware)
        ├─ if `Shizuku.pingBinder()` is false:
        │     open shell:  and run  <libshizuku.so> --apk=<base.apk>
        ├─ wait for Shizuku binder, check permission, bindUserService()
-       ├─ install bundled assets/timer if missing or wrong
+       ├─ install bundled assets/timer only if missing or incompatible
+       │     (a downloaded /data/local/tmp/timer is kept)
        ├─ `timer target` must print `target=lynx` before running anything
        ├─ once per boot: `timer shell` (root shell held by the app)
        ├─ then `timer fake`, replanted up to 3x
@@ -442,7 +443,7 @@ Files:
 | File | Purpose |
 | --- | --- |
 | `BootReceiver.java` | `directBootAware`; `LOCKED_BOOT_COMPLETED` starts Shizuku early and runs the exploit at BFU, `BOOT_COMPLETED` only retries when the BFU attempt failed before the exploit. After a soft restart both broadcasts only resume Shizuku and republish the result. |
-| `AutoRootService.java` | `specialUse` FGS state machine: at locked boot reuse/start Shizuku → bind at BFU → install asset → check `target=lynx` → `openRoot()` → `timer fake` → `keepPermissive()` → `ksud soft-reboot`. Stays alive after success so the root shell survives. |
+| `AutoRootService.java` | `specialUse` FGS state machine: at locked boot reuse/start Shizuku → bind at BFU → install asset if no usable binary → check `target=lynx` → `openRoot()` → `timer fake` → `keepPermissive()` → `ksud soft-reboot`. Stays alive after success so the root shell survives. |
 | `RestartJobService.java` | Fallback binder-push restart when the server is up but its binder never arrived (used after unlock, not at BFU). |
 | `AutoRoot.java` | Device-protected prefs, per-boot and restart guards, key pair, rotating log. |
 | `AdbKey.java` | RSA 2048 generation and the exact 524-byte public blob / key line. |
@@ -765,9 +766,11 @@ What it records:
 
 The capture runs **before** `openRoot()` / `timer fake` on every path —
 auto-root boot iteration, the manual *Get root shell* run, and the
-**Device debug log** button under *Settings -> Tools* (which also shows the
-log and captures one if none exists yet). Probing starts no exploit stage,
-so it cannot spend the one-shot trigger or park a process.
+**Device debug log** buttons under *Home -> Tools* and
+*Settings -> Auto-root -> View debug log* (which also show the log, capture
+one if none exists yet, and bind the shell user service if needed). Probing
+starts no exploit stage, so it cannot spend the one-shot trigger or park a
+process.
 
 Three logs have distinct jobs:
 

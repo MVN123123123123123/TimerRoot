@@ -66,9 +66,18 @@ public class MainActivity extends Activity {
      * targets a 6.12.69 OnePlus kernel and must not be used here: its timer
      * call site, cred layout and task offsets are all different.
      */
-    private static final String TIMER_URL =
+    static final String TIMER_URL =
             "https://github.com/MVN123123123123123/TimerRoot/releases/download/bingchiling/timer";
     private static final String TIMER_TARGET = "target=lynx";
+
+    /**
+     * Beta builds only (the beta workflow flips this to true): re-download and
+     * force-install the rolling beta timer on every run. The shell service
+     * keeps any installed protocol-3 binary, so an APK update alone cannot
+     * replace a binary that predates an exploit fix. Leave the source value
+     * false so main/stable builds never silently switch channels.
+     */
+    static final boolean AUTO_REFRESH_BETA = false;
 
     /*
      * Material You 3 color roles, resolved from the activity theme once at
@@ -104,6 +113,8 @@ public class MainActivity extends Activity {
     private boolean bound;
     private boolean rootOpen;
     private boolean downloading;
+    private boolean autoRefreshRunning;
+    private static boolean autoRefreshDone;
     private Runnable pendingServiceAction;
 
     private LinearLayout statusCard;
@@ -144,6 +155,9 @@ public class MainActivity extends Activity {
     private String selinux = "-";
     private String seccomp = "-";
 
+    /** Root-dependent Settings action; disabled until a uid-0 path exists. */
+    private MaterialButton installChannelButton;
+
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -157,6 +171,7 @@ public class MainActivity extends Activity {
                 pendingServiceAction = null;
                 ui.post(action);
             }
+            maybeAutoRefreshBeta();
         }
 
         @Override
@@ -223,7 +238,11 @@ public class MainActivity extends Activity {
         updateAutoRootUi();
         updateUpdateUi();
         maybeAutoCheckUpdates();
-        if (safePing() && safePermission() == 0) {
+        if (AUTO_REFRESH_BETA) {
+            /* Beta builds bind through the refresh path (it retries from
+             * onServiceConnected); avoid a second bindUserService call here. */
+            maybeAutoRefreshBeta();
+        } else if (safePing() && safePermission() == 0) {
             bindService();
         }
     }
@@ -339,8 +358,10 @@ public class MainActivity extends Activity {
         addSection(body, "Exploit");
         LinearLayout exploit = paddedCard();
         exploit.addView(bodyText("The binary is built for this kernel. Prepare "
-                + "installs the copy bundled in the APK; Download fetches the latest "
-                + "build from GitHub."));
+                + "installs the copy bundled in the APK (replacing any newer "
+                + "download); Download fetches the latest build from GitHub. "
+                + "Install channel and auto-root keep the installed binary and "
+                + "only refresh the profiles."));
         exploit.addView(spacer(14));
         exploit.addView(buttonRow(
                 compactButton("Prepare binary", v -> prepare()),
@@ -371,19 +392,27 @@ public class MainActivity extends Activity {
                 "Run the exploit on every boot", (b, on) -> applyAutoRoot(on));
         body.addView(autoCard);
         body.addView(spacer(10));
+        installChannelButton = compactButton("Install channel", v -> installChannel());
+        // Single-color tints ignore setEnabled(false); give this button
+        // explicit disabled-state colors so the gate is visible to the user.
+        installChannelButton.setBackgroundTintList(new ColorStateList(
+                new int[][]{{-android.R.attr.state_enabled}, {}},
+                new int[]{cSurfaceContainerHighest, cSecondaryContainer}));
+        installChannelButton.setTextColor(new ColorStateList(
+                new int[][]{{-android.R.attr.state_enabled}, {}},
+                new int[]{cOnSurfaceVariant, cOnSecondaryContainer}));
         body.addView(buttonRow(
                 compactButton("Run now", v -> confirmAutoRootNow()),
-                compactButton("Install channel", v -> installChannel())));
+                installChannelButton));
         body.addView(spacer(10));
-        body.addView(compactButton("View auto-root log", v -> {
-            addLog(AutoRoot.readLog(this).isEmpty() ? "auto-root log is empty"
-                    : AutoRoot.readLog(this));
-            showTab(1);
-        }));
+        body.addView(buttonRow(
+                compactButton("View auto-root log", v -> showAutoRootLog()),
+                compactButton("View debug log", v -> showDebugLog())));
         body.addView(spacer(12));
         body.addView(hintCard("Auto-root reruns the exploit once per real boot. "
                 + "Install the channel once so later boots can reach Shizuku without "
-                + "Wi-Fi; unlocking is still required."));
+                + "Wi-Fi; unlocking is still required. Install channel needs an "
+                + "active root shell or KernelSU - get root first."));
 
         addSection(body, "Boot screen");
         LinearLayout bootCard = card();
@@ -1187,8 +1216,21 @@ public class MainActivity extends Activity {
         refreshDetails();
     }
 
+    /**
+     * A uid-0 path is required for root-dependent actions. Install channel
+     * writes /data/property and /data/misc/adb: the exploit's shell root shell
+     * (rootOpen) or KernelSU's su (ksu=active) are the only supported ways.
+     * The service must also be bound, otherwise neither path can be used.
+     */
+    private boolean rootAvailable() {
+        return service != null && (rootOpen || "active".equals(ksu));
+    }
+
     private void applyDetails() {
         boolean active = rootOpen || "active".equals(ksu);
+        if (installChannelButton != null) {
+            installChannelButton.setEnabled(rootAvailable());
+        }
         if (statusCard != null) {
             statusCard.setBackground(cardBackground(
                     active ? cPrimaryContainer : cSurfaceContainer));
@@ -1322,7 +1364,7 @@ public class MainActivity extends Activity {
         toast("Preparing...");
         new Thread(() -> {
             try {
-                final String result = service.install(getPackageCodePath());
+                final String result = service.installForce(getPackageCodePath());
                 addLog(result);
                 if (result.startsWith("installed")) {
                     String target = service.run("target");
@@ -1340,6 +1382,44 @@ public class MainActivity extends Activity {
                 ui.post(() -> toast("prepare failed: " + t));
             }
         }).start();
+    }
+
+    /**
+     * Beta-channel only: pull the rolling beta asset once per app process and
+     * force-install it before any exploit stage can run. Silent on purpose -
+     * no permission prompt, no toast - because this runs at startup. If
+     * Shizuku is not ready yet the service-connected callback retries; if it
+     * never is, the manual Download/Prepare actions still work.
+     */
+    private void maybeAutoRefreshBeta() {
+        if (!AUTO_REFRESH_BETA || autoRefreshDone || autoRefreshRunning) {
+            return;
+        }
+        if (downloading) {
+            return; // a manual download owns /data/local/tmp/timer right now
+        }
+        if (!safePing() || safePermission() != 0) {
+            return;
+        }
+        if (service == null) {
+            if (!bound) {
+                bindService();
+            }
+            return; // onServiceConnected() calls us again
+        }
+        autoRefreshDone = true;
+        autoRefreshRunning = true;
+        final IUserService svc = service;
+        addLog("beta binary auto-refresh: downloading " + TIMER_URL);
+        new Thread(() -> {
+            BetaBinaryRefresh.Result result =
+                    BetaBinaryRefresh.refresh(this, svc, TIMER_URL);
+            ui.post(() -> {
+                addLog(result.message);
+                autoRefreshRunning = false;
+                refreshDetails();
+            });
+        }, "beta-binary-refresh").start();
     }
 
     /**
@@ -1482,8 +1562,11 @@ public class MainActivity extends Activity {
                 }
                 String out = service.openRoot();
                 // Only a real uid=0 shell counts; a failed attempt parks the
-                // exploit and prints diagnostics that must not look like success.
-                rootOpen = out.startsWith("root shell ready");
+                // exploit and prints diagnostics that must not look like
+                // success. A shell left over from an earlier run (activity
+                // recreated, service still bound) is still usable.
+                rootOpen = out.startsWith("root shell ready")
+                        || out.contains("root shell already open");
                 addLog(out);
                 ui.post(this::applyDetails);
                 if (rootOpen && samsung) {
@@ -1589,6 +1672,21 @@ public class MainActivity extends Activity {
                     }
                     if (tail.contains("KSU_MISSING")) {
                         failure = "ksud late-load failed - see the [ksu] log lines";
+                        break;
+                    }
+                    /*
+                     * The fake-cred stage gave up before ksud could run: the
+                     * child never reached euid 0, so the credential swap did
+                     * not land.  Check this before the generic "parked"
+                     * branch, which would otherwise blame ksud for a failure
+                     * that happened during the exploit's own writes.
+                     */
+                    if (tail.contains("child did not reach euid 0")
+                            || tail.contains("fake cred write failed")
+                            || tail.contains("no KASLR slide")) {
+                        failure = "the fake credential did not take effect, so"
+                                + " ksud never ran - see the plant/stage lines"
+                                + " in the log";
                         break;
                     }
                     /*
@@ -2064,6 +2162,11 @@ public class MainActivity extends Activity {
             toast("Bind the service first");
             return;
         }
+        if (!rootAvailable()) {
+            toast("Get root first - Install channel needs a root shell or KernelSU");
+            addLog("install channel skipped: no root shell and KernelSU is not active");
+            return;
+        }
         final String key = AutoRoot.publicKeyLine(this);
         if (key == null) {
             toast("Could not create the ADB key");
@@ -2130,6 +2233,7 @@ public class MainActivity extends Activity {
                             || out.contains("root shell already open");
                     rootOpen = ready;
                     addLog(out);
+                    ui.post(this::applyDetails);
                     if (!ready) {
                         ui.post(() -> {
                             toast("Could not get a root shell - reboot and retry");
@@ -2281,23 +2385,32 @@ public class MainActivity extends Activity {
         }).start();
     }
 
+    /** Opens the rotating auto-root history in the Log tab. */
+    private void showAutoRootLog() {
+        String log = AutoRoot.readLog(this);
+        addLog(log.isEmpty() ? "auto-root log is empty" : log);
+        showTab(1);
+    }
+
     /**
      * Opens the latest device-probe capture. The file lives on
      * /data/local/tmp, so the shell user service reads it (and can capture a
      * fresh one when none exists yet), then the text is shown on the Log tab.
+     * Binds the service first when needed, so the debug log is as reachable
+     * as the auto-root log.
      */
     private void showDebugLog() {
-        if (service == null) {
-            addLog("bind the service first");
-            return;
-        }
-        new Thread(() -> {
+        withService(() -> new Thread(() -> {
+            final IUserService svc = service;
+            if (svc == null) {
+                return;
+            }
             try {
-                String log = service.readDebugLog();
+                String log = svc.readDebugLog();
                 if (log == null || log.trim().isEmpty()) {
                     addLog("no device probe yet - capturing one now...");
-                    addLog(service.captureDebugLog());
-                    log = service.readDebugLog();
+                    addLog(svc.captureDebugLog());
+                    log = svc.readDebugLog();
                 }
                 final String text = log == null || log.trim().isEmpty()
                         ? "device debug log is empty (" + DeviceProbe.DEBUG_LOG + ")"
@@ -2309,16 +2422,40 @@ public class MainActivity extends Activity {
             } catch (Throwable t) {
                 addLog("device debug log failed: " + t);
             }
-        }).start();
+        }).start());
     }
 
     // ------------------------------------------------------------ plumbing
+
+    /** Runs {@code action} now, or after the user service binds. */
+    private void withService(Runnable action) {
+        if (service != null) {
+            action.run();
+            return;
+        }
+        if (!safePing()) {
+            showShizukuHelp();
+            return;
+        }
+        if (safePermission() != 0) {
+            try {
+                Shizuku.requestPermission(REQUEST_CODE);
+                toast("Grant Shizuku permission, then try again");
+            } catch (Throwable t) {
+                addLog("permission request failed: " + t);
+            }
+            return;
+        }
+        pendingServiceAction = action;
+        bindService();
+    }
 
     private void bindService() {
         try {
             Shizuku.bindUserService(serviceArgs(), connection);
             addLog("binding user service...");
         } catch (Throwable t) {
+            pendingServiceAction = null;
             addLog("bind failed: " + t);
         }
     }

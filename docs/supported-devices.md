@@ -12,6 +12,7 @@ Status legend:
 |---|---|
 | **tested** | Run on physical hardware. |
 | **verified in QEMU** | The shipped aarch64 binary ran against that factory kernel in `qemu-system-aarch64`, through `target`, `ids`, `probe`, `leak` and `verify` (F7-F11). The kernel is real; userspace, SELinux policy and KernelSU are not, so this does not replace a hardware run. |
+| **unsupported by configuration** | The profile is complete and passes F1–F10 (including the QEMU `target`/`ids`/`probe`/`leak` gates), but the factory kernel's embedded config lacks `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`. Without it the fired timer is expired inline in tick/IRQ context, so the exit path never dequeues the stale node and F11 cannot land a write. No conf change fixes it. These profiles live in `conf/unsupported/`, are not packaged into the APK, and are skipped by a `mass.py` sweep. |
 | **untested** | Profile exists but has not been run, or not even booted in QEMU (see the per-family notes). |
 
 
@@ -181,9 +182,9 @@ selected automatically on a Samsung device, or manually under
 |---|---|---|---|---|---|---|
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | — | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy S24 FE | SM-S721B (Exynos 2400e) | `S721BXXUFEZJ6` (EUX) | — | 2026-10 | `conf/samsung/samsung-s24fe-6.1.162.conf` | verified in QEMU |
-| Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/samsung/samsung-a15xzh-5.15.189.conf` | verified in QEMU |
-| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23-5.15.197.conf` | verified in QEMU |
-| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23fe-5.10.240.conf` | verified in QEMU |
+| Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/unsupported/samsung-a15xzh-5.15.189.conf` | unsupported by configuration |
+| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/unsupported/samsung-s23-5.15.197.conf` | unsupported by configuration |
+| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/unsupported/samsung-s23fe-5.10.240.conf` | unsupported by configuration |
 | Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | — | 2026-11-05 | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
 | Galaxy S25 Edge | SM-S937B | `S937BXXUBDZJB` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s25edge-6.6.127.conf` | verified in QEMU |
 
@@ -209,7 +210,10 @@ for the older single-profile Samsung builds.
 | Device | Codename | Factory build | Android build ID | Security patch | Profile | Status |
 |---|---|---|---|---|---|---|
 | Xiaomi 15 | `dada` | `OS3.0.307.0.WOCCNXM` | — | — | `conf/6.6.118-android15-8-gc44b714366cc-abogki519650608-4k.conf` | verified in QEMU |
+| Xiaomi 15 | `dada` | `OS4.0.0.11.XOCMIXM` (global, Android 17) | `CP2A.260605.016` | 2026-09-01 | `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf` | verified in QEMU |
+| Redmi Turbo 4 Pro / POCO F7 | `onyx` | `OS4.0.4.0.XOLCNXM` | — | — | `conf/6.6.118-android15-8-g0908354dac1b-ab16143355-4k.conf` | verified in QEMU |
 | Redmi Note 15 5G | `kunzite` | `OS3.0.304.0.WPQCNXM` | — | — | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | verified in QEMU |
+| Redmi Turbo 4 Pro / POCO F7 | `onyx` | `OS3.0.303.0.WOLMIXM` | — | — | `conf/6.6.118-android15-8-ge56cf6b09cca-ab15511674-4k.conf` | verified in QEMU |
 | Redmi Note 17 5G | `mist` | `OS3.0.311.0.WPUCNXM` | — | — | `conf/6.6.118-android15-8-g666ad52b8230-ab15657065-4k.conf` | verified in QEMU |
 | Redmi Note 17 Pro 5G | `iolite` | `OS3.0.314.0.WDQCNXM` | — | — | `conf/6.6.118-android15-8-gb9cc6ec16bc8-abogki536571621-4k.conf` | verified in QEMU |
 
@@ -222,8 +226,41 @@ profile.
 |---|---|---|---|---|---|---|---|
 | Redmi Note 15 4G | `spinel` | `OS3.0.303.0.WPGMIXM` | — | — | `6.12.69` | `conf/6.12.69-android16-6-g014ca48a80ee-ab15889839-4k.conf` | verified in QEMU |
 | Redmi Note 15 Pro 4G | `charoite` | `OS3.0.304.0.WPFMIXM` | — | — | `6.12.30` | `conf/6.12.30-android16-5-g6e872b4863d6-ab13847919-4k.conf` | verified in QEMU |
-| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | — | — | `5.15.194` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | verified in QEMU |
+| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | — | — | `5.15.194` | `conf/unsupported/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | unsupported by configuration |
 | Redmi Note 17 Pro Max 5G | `brussels` | `OS3.0.311.0.WDRMIXM` | — | — | `6.12.69` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | verified in QEMU |
+
+### Redmi Note 13, Redmi K70/K80/K100, Xiaomi 14/14T/15T/17T — Nov 2026 batch
+
+Each row is one factory kernel; the profile serves every device whose
+decompressed `Image` is byte-identical, so one conf can cover several models.
+Full F1–F11 evidence is in [`PORT_LOG.md`](../PORT_LOG.md).
+
+| Device | Codename | Factory build | Kernel | Profile | Status |
+|---|---|---|---|---|---|
+| Redmi K100 Pro / POCO F9 Pro | `athens` | `OS4.0.6.0.XPICNXM` | `6.12.69` | `conf/6.12.69-android16-6-g0a1dc0413ec7-ab16271006-4k.conf` | verified in QEMU |
+| Redmi K100 Pro Max / POCO F9 Ultra | `songyuan` | `OS4.0.8.0.XGNCNXM` | `6.12.69` | same as above | verified in QEMU |
+| Xiaomi 17T Pro | `warhol` | `OS4.0.5.0.XPSCNXM` | `6.12.69` | same as above | verified in QEMU |
+| Xiaomi 15 Pro | `haotian` | `OS4.0.4.0.XOBCNXM` | `6.6.118` | `conf/6.6.118-android15-8-gf72a02f47f4b-abogki551678766-4k.conf` | verified in QEMU |
+| Redmi K80 Pro | `miro` | `OS4.0.3.0.XOMCNXM` | `6.6.118` | same as above | verified in QEMU |
+| Xiaomi 15 Ultra | `xuanyuan` | `OS4.0.4.0.XOACNXM` | `6.6.118` | same as above | verified in QEMU |
+| Xiaomi 15T Pro | `klimt` | `OS3.0.342.0.XOSEUXM` | `6.6.118` | `conf/6.6.118-android15-8-g30c6145e49e0-ab15416827-4k.conf` | verified in QEMU |
+| Xiaomi 17T / Redmi Turbo 5 | `chagall` / `klee` | `OS4.0.5.0.XPTCNXM` / `OS4.0.5.0.XPJCNXM` | `6.6.118` | `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` (shared with OnePlus 13) | verified in QEMU |
+| Xiaomi 14 Ultra | `aurora` | `OS3.0.308.0.WNACNXM` | `6.1.157` | `conf/6.1.157-android14-11-g2b8d37d00a12-mi.conf` | verified in QEMU |
+| Redmi K80 / POCO F7 Pro | `zorn` | `OS4.0.3.0.XOKCNXM` | `6.1.157` | `conf/6.1.157-android14-11-g2de7246565ac-mi.conf` | verified in QEMU |
+| MIX Fold 4 | `goku` | `OS3.0.310.0.WNVCNXM` | `6.1.157` | `conf/6.1.157-android14-11-g5655d633b31a-mi.conf` | verified in QEMU |
+| Redmi K70E / POCO X6 Pro | `duchamp` | `OS3.0.305.0.WNLCNXM` | `6.1.138` | `conf/6.1.138-android14-11-g6ab8c9a86a33-ab14396278.conf` | verified in QEMU |
+| Xiaomi 14T Pro / Redmi K70 Ultra | `rothko` | `OS3.0.308.0.WNNCNXM` | `6.1.138` | same as above | verified in QEMU |
+| Xiaomi 14T | `degas` | `OS3.0.304.0.WNERUXM` | `6.1.138` | `conf/6.1.138-android14-11-g44bda9e8f6e9-ab13792638.conf` | verified in QEMU |
+| Redmi K70 / POCO F6 Pro | `vermeer` | `OS3.0.308.0.WNKCNXM` | `5.15.194` | `conf/unsupported/5.15.194-android13-8-00019-gf4321180a397-ab15212794.conf` | unsupported by configuration |
+| Redmi Note 13 Pro+ 5G | `zircon` | `OS3.0.305.0.WNOCNXM` | `5.15.194` | `conf/unsupported/5.15.194-android13-8-00038-g853eb7b6b965-ab15936612.conf` | unsupported by configuration |
+| Redmi Note 13 Pro 5G / POCO X6 5G | `garnet` | `OS3.0.306.0.WNRCNXM` | `5.10.236` | `conf/unsupported/5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284.conf` | unsupported by configuration |
+
+The three Xiaomi 5.x kernels in this table — plus `zephyr` (Redmi Note 17 4G,
+`5.15.194`) in the standalone-payload table above — have
+`CONFIG_POSIX_TIMERS=y` but no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` in the
+config embedded in their factory `Image`; the status legend above explains
+the consequence. The four are the whole 5.10/5.15 group: every 6.x kernel in
+this batch has the option `=y` and is supported.
 
 ### Xiaomi 17 series — 6.12.69 (4K)
 
@@ -251,8 +288,19 @@ Profiles:
 
 ## OPPO
 
-Imported vendor profiles. There is no factory image for these in the port
-workspace, so they could not be booted in QEMU; see the notes.
+### OnePlus 13 — 6.6.118 (4K)
+
+Full port from the factory `boot.img` (there is a factory image for this one in
+the port workspace, unlike the imported profiles below).
+
+| Device | Model | Factory build | Android build ID | Security patch | Kernel | Profile | Status |
+|---|---|---|---|---|---|---|---|
+| OnePlus 13 | CPH2653 | `17.0.0.102(EX01)` | — | — | `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k` | `conf/6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k.conf` | **tested** (hardware 2026-11-27) |
+
+### Imported OPPO vendor profiles
+
+No factory image for these in the port workspace, so they could not be booted
+in QEMU; see the notes.
 
 | Device | Model | Android build ID | Security patch | Kernel | Profile | Status |
 |---|---|---|---|---|---|---|
@@ -311,8 +359,8 @@ not publish the value for that build; read the real value on a device with
 ### Verification levels and known gaps
 
 - **tested** means a cold boot, a settled device and the full chain ran on
-  hardware. Only the Pixel 7a (`CP3A.261005.002.A1`) and Pixel 9a
-  (`CP3A.261005.005`) meet that bar.
+  hardware. The Pixel 7a (`CP3A.261005.002.A1`), the Pixel 9a
+  (`CP3A.261005.005`) and the OnePlus 13 (`17.0.0.102(EX01)`) meet that bar.
 - **verified in QEMU** means F7-F11 passed against the unmodified factory
   kernel (or a throwaway vendor-hook-patched `Image` where the factory kernel
   calls Knox/RKP, noted under Samsung). F12 (`permissive`) and F13 (`fake`)
@@ -320,8 +368,8 @@ not publish the value for that build; read the real value on a device with
   A QEMU pass is not a hardware substitute.
 - **untested** rows fall into two groups: profiles whose factory artifacts are
   in the workspace but that have no hardware run, and imported profiles with no
-  factory artifact in the workspace (the OPPO, realme and Meizu rows), which
-  could not even join the QEMU mass run.
+  factory artifact in the workspace (most of the OPPO, realme and Meizu rows),
+  which could not even join the QEMU mass run.
 - If your device is in a table but its status is untested, check the `kernel=`
   line first (the app runs `timer --conf ... target` and logs it) and compare
   it with the conf you intend to use. Do not run the exploit on a kernel that
@@ -423,6 +471,15 @@ not publish the value for that build; read the real value on a device with
   `mist` share `...d48`. `task_alloc_bytes` stays `0x12c0` for all four,
   because their `vendor_boot`/`dtb`/`dtbo` images carry no
   `android_arch_task_struct_size=` parameter.
+- `onyx` (Redmi Turbo 4 Pro / POCO F7) needs no profile of its own: its two
+  builds are byte-identical to two existing payloads. `OS3.0.303.0.WOLMIXM`
+  matches `kunzite` (Image SHA-256 `81181e83…9db1126c`) and, like it, carries
+  no vendor task-size parameter, so `task_alloc_bytes` is `0x12c0`.
+  `OS4.0.4.0.XOLCNXM` matches the `dada` OS4 build
+  (`1073400e…c127195b`) and sets `android_arch_task_struct_size=512`, so
+  `task_alloc_bytes` is `0x14c0`. Both payloads were checked at the `Image`
+  byte level, not just by `uname -r`; the shared confs select on release
+  alone, so either build loads without a device-pinned profile.
 - The reference port
   [`quyicheng03-boop/CVE-2026-98260-dada-android`](https://github.com/quyicheng03-boop/CVE-2026-98260-dada-android)
   is titled "dada" but was built for
@@ -434,7 +491,8 @@ not publish the value for that build; read the real value on a device with
   payload, so they have separate profiles. `charoite` is 6.12.30 and has no
   landlock cred blob (`selinux_blob_off = 0`). The three 6.12 kernels carry
   `android_arch_task_struct_size=512`, giving `task_alloc_bytes = 0x1440 +
-  0x200 = 0x1640`. `zephyr` is the repository's only 5.15 profile: 4-byte
+  0x200 = 0x1640`. `zephyr` is a 5.15 profile like the November-2026
+  `vermeer`/`zircon`, all three sharing the 5.15 data block: 4-byte
   `cred.usage`, `timer_alloc 0x108`, no vendor-size extension so
   `task_alloc_bytes` stays `0x1200`, and `pcp_free = 1`.
 - The Xiaomi 17 series is split by payload: `popsicle` has its own profile,
@@ -454,12 +512,24 @@ not publish the value for that build; read the real value on a device with
 
 ### OPPO, realme and Meizu
 
-- The three OPPO profiles and the realme profile are imported vendor profiles
-  from `rikumi/TimerRoot`. No factory image for them is in the port workspace,
-  so F7-F11 could not be run: they pass the parser, release/page-size matching
-  and the F6 `selfcheck` invariants, but they have no QEMU evidence. One was
-  derived from a device dump (`boot_a` from the running realme RMX6699), so
-  there is no factory image to boot even in principle.
+- The OnePlus 13 (`CPH2653`, reported by the device as `OP5D55L1`, OxygenOS/
+  ColorOS `17.0.0.102 (EX01)`) is a **full port** from its factory
+  `boot.img`/`vendor_boot.img`: `timer_site 0xffffffc080195d48`,
+  `copy_process_low21 0xab93c`, `task_alloc_bytes 0x12c0` (the image sets no
+  `android_arch_task_struct_size=`), `selinux_blob_off 0x0`. It passes
+  `validate_conf.py` with 0 errors, all of F7-F11 in QEMU as uid 2000, and
+  F7-F11/F15 on the device itself: the shipped binary matched profile
+  `6.6.118-android15-8-gc4127a25dcf3-ab15863337-4k` at 4096-byte pages and
+  completed the plant on the first attempt
+  (`pair pfn` agreed, `slab_own=31`), reaching `uid=0 euid=0` and
+  `setuid(0)=0` -> `resuid=0/0/0`. F12/F13 (permissive, KernelSU) were not
+  exercised by that run.
+- The three other OPPO profiles and the realme profile are imported vendor
+  profiles from `rikumi/TimerRoot`. No factory image for them is in the port
+  workspace, so F7-F11 could not be run: they pass the parser, release/page-size
+  matching and the F6 `selfcheck` invariants, but they have no QEMU evidence.
+  One was derived from a device dump (`boot_a` from the running realme RMX6699),
+  so there is no factory image to boot even in principle.
 - The two Meizu profiles live under `conf/dirty/` because
   `...-maybe-dirty` is not unique to one vendor build. They also match
   `device_model` (`MEIZU 21 Pro` / `MEIZU 22`), `android_release` (`16`) and
@@ -485,4 +555,6 @@ Adding a kernel means adding one `conf/*.conf`; the exploit source does not
 change. The profile must be derived from the exact factory
 `boot.img`/`vendor_boot.img` (kallsyms + BTF),for the procedure and
 [PORT_LOG.md](../PORT_LOG.md) for the evidence format. Do not add a row here as
-`tested` until F15/F16 pass on hardware.
+`tested` until F15/F16 pass on hardware. A kernel without
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK` is not a working profile: it belongs in
+`conf/unsupported/` (see `README.md` there) and is left out of the app.

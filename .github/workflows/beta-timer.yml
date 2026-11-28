@@ -10,8 +10,9 @@ name: Update beta timer release
 # stable.
 #
 # beta-test is merged into main regularly, so the app source keeps the stable
-# URL on both branches. The build rewrites TIMER_URL to the beta tag below, so
-# only the APK produced by this workflow points at the beta binary.
+# URLs on both branches. The build rewrites TIMER_URL and the update checker's
+# release tag below, so only the APK produced by this workflow fetches the beta
+# binary and checks the beta release for updates.
 on:
   push:
     branches: [beta-test]
@@ -163,8 +164,26 @@ jobs:
           set -euo pipefail
           f=app/src/main/java/com/kpgc/timerroot/MainActivity.java
           sed -i 's#/releases/download/bingchiling/timer#/releases/download/beta/timer#' "$f"
+          # Every beta run force-installs the newest beta asset. Without this
+          # the shell service keeps a stale protocol-3 binary across app
+          # updates, which is indistinguishable by the protocol marker.
+          sed -i 's/AUTO_REFRESH_BETA = false/AUTO_REFRESH_BETA = true/' "$f"
           grep -q '/releases/download/beta/timer' "$f"
           ! grep -q '/releases/download/bingchiling/timer' "$f"
+          grep -q 'AUTO_REFRESH_BETA = true' "$f"
+          ! grep -q 'AUTO_REFRESH_BETA = false' "$f"
+
+      # The beta release is a prerelease, so /releases/latest still resolves to
+      # the stable one. Point the update check at the fixed beta tag too, or a
+      # beta install would be offered the stable APK as an "update".
+      - name: Point update check at the beta release
+        shell: bash
+        run: |
+          set -euo pipefail
+          f=app/src/main/java/com/kpgc/timerroot/UpdateChecker.java
+          sed -i 's/RELEASE_TAG = "latest"/RELEASE_TAG = "beta"/' "$f"
+          grep -q 'RELEASE_TAG = "beta"' "$f"
+          ! grep -q 'RELEASE_TAG = "latest"' "$f"
 
       - name: Build app
         shell: bash

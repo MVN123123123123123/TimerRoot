@@ -72,6 +72,21 @@ Both actions:
 2. extract `assets/conf/**.conf` to `/data/local/tmp/timer-conf`;
 3. run `timer target`.
 
+**Prepare binary** is the only action that replaces an already installed
+binary. Every other install path (Install channel, the auto-root boot run)
+refreshes the profiles and keeps the installed `/data/local/tmp/timer` as long
+as it speaks this app's protocol, so a binary fetched with **Download exploit**
+is never replaced by an older copy bundled in the APK. Press **Prepare
+binary** explicitly to go back to the bundled build.
+
+**Beta builds only** (`beta-test` channel): the app re-downloads the rolling
+`beta/timer` asset and force-installs it once per app process start, and again
+before each auto-root boot run. This exists because a stale protocol-3 binary
+can otherwise survive an APK update indefinitely. The refresh is silent and
+best effort: a failed download leaves the current binary in place and is
+recorded in the app log and the device debug log. Stable builds keep the
+"newer download wins" behaviour above.
+
 A binary whose target check fails is rejected before anything touches the
 kernel.
 
@@ -85,6 +100,10 @@ lives in a HOCON file under `conf/`, and the app picks the file at runtime:
 
 - `release` must equal `uname -r`. A trailing `-4k` is optional on both sides,
   so `...-ab16252310` and `...-ab16252310-4k` are the same kernel.
+- Profiles under `conf/unsupported/` are **not** packaged into the app and are
+  skipped by a default `mass.py` sweep. Their kernel cannot run this exploit
+  (no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`), so a device that matches one gets
+  "no matching profile" instead of a run that fails after six plants.
 - When the profile sets `page_size`, `sysconf(_SC_PAGESIZE)` must match too.
   This is how the 4K and 16K builds of 6.1.162 are told apart; they share a
   release string.
@@ -208,7 +227,8 @@ auto-root/restart decisions. **Copy** puts the buffer on the clipboard;
 
 **Exploit**
 
-- **Prepare binary** — install the copy bundled in the APK.
+- **Prepare binary** — install the copy bundled in the APK, replacing whatever
+  is at `/data/local/tmp/timer`.
 - **Download exploit** — fetch the latest release binary and install it with
   the confs.
 
@@ -225,6 +245,9 @@ auto-root/restart decisions. **Copy** puts the buffer on the clipboard;
   exploit already ran this boot.
 - **Install channel** — one-time persistent localhost ADB setup (see below).
 - **View auto-root log** — open the rotating auto-root history in the Log tab.
+- **View debug log** — open `/data/local/tmp/timer-debug.log` in the Log tab.
+  It carries the kernel boot parameters, resolved profile and this boot's
+  iteration decisions, and is captured automatically before every exploit run.
 
 **Boot screen**
 
@@ -296,7 +319,8 @@ A `directBootAware` receiver handles `LOCKED_BOOT_COMPLETED`, starts the
 2. reuses or starts `shizuku_server` over `127.0.0.1:5555`;
 3. waits for the Shizuku binder, checks the permission and binds the user
    service;
-4. installs the bundled asset if needed, requires `target=lynx`, and runs
+4. installs the bundled asset only when no usable `/data/local/tmp/timer` is
+   present (a downloaded build is kept), requires `target=lynx`, and runs
    `timer shell`;
 5. runs `timer fake` (late-loads KernelSU and clears enforcing), replanting up
    to three times on a missed race;

@@ -42,6 +42,33 @@ stat -c %s timer                        # must be > 100000 bytes
 Then place it at `app/src/main/assets/timer` (the workflow copies it there) or
 install it on a device yourself.
 
+### Reproduce the released binary byte for byte
+
+The release asset is reproducible, but only from the repo root with the source
+named the same way. The compiler records both the working directory and the
+source path as typed, so building `p7a/timer_p7a.c` from anywhere else — or a
+copy such as `/tmp/timer.c` — yields a different binary even with identical
+flags:
+
+```bash
+cd /path/to/TimerRoot          # the source path must be relative, as in CI
+NDK=/opt/android-sdk/ndk/29.0.14206865
+CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang
+"$CC" -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -g -static -pthread \
+  -fdebug-compilation-dir=/home/runner/work/TimerRoot/TimerRoot \
+  -fdebug-prefix-map=$NDK=/usr/local/lib/android/sdk/ndk/29.0.14206865 \
+  -o timer p7a/timer_p7a.c
+sha256sum timer
+```
+
+`-fdebug-compilation-dir` sets `DW_AT_comp_dir` and `-fdebug-prefix-map` rewrites
+the toolchain paths recorded in `.comment`; neither can rewrite `DW_AT_name`.
+Check any build with `readelf --debug-dump=info timer | grep -m1 DW_AT_name`
+(it must say `p7a/timer_p7a.c`) and `readelf -p .comment` (clang and LLD 21.0.0
+from NDK 29.0.14206865). A source tree that differs at all, including a
+one-line fix, obviously produces a different hash — that is the point of
+recording the hash next to every transcript.
+
 ### Install at runtime
 
 At runtime the app can also fetch the latest release asset with **Settings ->
@@ -65,7 +92,9 @@ Notes:
 - The root `conf/` tree is copied into the build as `assets/conf/**` by the
   `syncConfAssets` task, which is wired to `preBuild` and every
   `merge*Assets` task. The APK therefore always carries the profiles from the
-  repository root; nothing needs to be copied by hand.
+  repository root; nothing needs to be copied by hand. `conf/unsupported/` is
+  excluded: those profiles are blocked by the factory kernel config, so
+  shipping them would only let a user pick one and watch it fail at F11.
 - `applicationId` is `com.kpgc.timerroot`, `minSdk` 30, `targetSdk` 36 and
   `compileSdk` 36. The version lives in `app/build.gradle`.
 - Shizuku's API and provider come from Maven
@@ -108,8 +137,8 @@ The script:
   `conf/**` as `assets/conf/**` with `aapt2`;
 - zipaligns and signs with a generated debug keystore.
 
-Parameters: `-Sdk`, `-ShizukuApi`, `-Out`, `-VersionCode` (default 40) and
-`-VersionName` (default `0.40`). Output is `build/TimerRoot.apk`.
+Parameters: `-Sdk`, `-ShizukuApi`, `-Out`, `-VersionCode` (default 41) and
+`-VersionName` (default `0.41`). Output is `build/TimerRoot.apk`.
 
 
 ## CI release workflow
@@ -137,8 +166,16 @@ replaced. The app fetches
 Add one `conf/<release>.conf` (or `conf/samsung/*.conf`, or `conf/dirty/*.conf`)
 and rebuild the app; the asset sync picks it up automatically. No Java or C
 change is needed. The profile must be derived from the exact factory
-`boot.img`/`vendor_boot.img`; use [SKILL.md](../SKILL.md) for the F1-F16
-procedure and record the evidence in [PORT_LOG.md](../PORT_LOG.md).
+`boot.img`/`vendor_boot.img`.
+
+A profile whose kernel lacks `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` does not go
+here: put it in `conf/unsupported/`, which is excluded from the APK and from a
+default `mass.py` sweep. See that directory's `README.md`.
+
+For a readable walkthrough of the whole process see
+[Porting a kernel](porting.md). Use [SKILL.md](../SKILL.md) for the F1-F16
+procedure (scripts, disassembly patterns, cross-checks and diagnostics) and
+record the evidence in [PORT_LOG.md](../PORT_LOG.md).
 
 Before shipping a profile, run its parser and invariants:
 
