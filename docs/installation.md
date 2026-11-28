@@ -100,6 +100,10 @@ lives in a HOCON file under `conf/`, and the app picks the file at runtime:
 
 - `release` must equal `uname -r`. A trailing `-4k` is optional on both sides,
   so `...-ab16252310` and `...-ab16252310-4k` are the same kernel.
+- Profiles under `conf/unsupported/` are **not** packaged into the app and are
+  skipped by a default `mass.py` sweep. Their kernel cannot run this exploit
+  (no `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`), so a device that matches one gets
+  "no matching profile" instead of a run that fails after six plants.
 - When the profile sets `page_size`, `sysconf(_SC_PAGESIZE)` must match too.
   This is how the 4K and 16K builds of 6.1.162 are told apart; they share a
   release string.

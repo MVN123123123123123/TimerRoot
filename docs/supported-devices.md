@@ -12,7 +12,7 @@ Status legend:
 |---|---|
 | **tested** | Run on physical hardware. |
 | **verified in QEMU** | The shipped aarch64 binary ran against that factory kernel in `qemu-system-aarch64`, through `target`, `ids`, `probe`, `leak` and `verify` (F7-F11). The kernel is real; userspace, SELinux policy and KernelSU are not, so this does not replace a hardware run. |
-| **unsupported by configuration** | The profile is complete and passes F1–F10 (including the QEMU `target`/`ids`/`probe`/`leak` gates), but the factory kernel's embedded config lacks `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`. Without it the fired timer is expired inline in tick/IRQ context, so the exit path never dequeues the stale node and F11 cannot land a write. No conf change fixes it. |
+| **unsupported by configuration** | The profile is complete and passes F1–F10 (including the QEMU `target`/`ids`/`probe`/`leak` gates), but the factory kernel's embedded config lacks `CONFIG_POSIX_CPU_TIMERS_TASK_WORK`. Without it the fired timer is expired inline in tick/IRQ context, so the exit path never dequeues the stale node and F11 cannot land a write. No conf change fixes it. These profiles live in `conf/unsupported/`, are not packaged into the APK, and are skipped by a `mass.py` sweep. |
 | **untested** | Profile exists but has not been run, or not even booted in QEMU (see the per-family notes). |
 
 
@@ -182,9 +182,9 @@ selected automatically on a Samsung device, or manually under
 |---|---|---|---|---|---|---|
 | Galaxy S24 / S26 Ultra | SM-S921N / SM-S948U | — | — | — | `conf/samsung/samsung-s26u-6.1.162.conf` | untested |
 | Galaxy S24 FE | SM-S721B (Exynos 2400e) | `S721BXXUFEZJ6` (EUX) | — | 2026-10 | `conf/samsung/samsung-s24fe-6.1.162.conf` | verified in QEMU |
-| Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/samsung/samsung-a15xzh-5.15.189.conf` | unsupported by configuration |
-| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23-5.15.197.conf` | unsupported by configuration |
-| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s23fe-5.10.240.conf` | unsupported by configuration |
+| Galaxy A15 5G | SM-A1560 (`a15xzh`) | `A1560ZHSAEZG1` | `BP4A.251205.006` | 2026-07-05 | `conf/unsupported/samsung-a15xzh-5.15.189.conf` | unsupported by configuration |
+| Galaxy S23 | SM-S911B | `S911BXXUAGZIF` (EUX) | — | 2026-10-05 | `conf/unsupported/samsung-s23-5.15.197.conf` | unsupported by configuration |
+| Galaxy S23 FE | SM-S711B (Exynos 2200) | `S711BXXSJGZI6` (EUX) | — | 2026-10-05 | `conf/unsupported/samsung-s23fe-5.10.240.conf` | unsupported by configuration |
 | Galaxy S26 FE | SM-S741B | `S741BXXS3AZK1` (EUX) | — | 2026-11-05 | `conf/samsung/samsung-s26fe-6.6.127.conf` | verified in QEMU |
 | Galaxy S25 Edge | SM-S937B | `S937BXXUBDZJB` (EUX) | — | 2026-10-05 | `conf/samsung/samsung-s25edge-6.6.127.conf` | verified in QEMU |
 
@@ -224,7 +224,7 @@ profile.
 |---|---|---|---|---|---|---|---|
 | Redmi Note 15 4G | `spinel` | `OS3.0.303.0.WPGMIXM` | — | — | `6.12.69` | `conf/6.12.69-android16-6-g014ca48a80ee-ab15889839-4k.conf` | verified in QEMU |
 | Redmi Note 15 Pro 4G | `charoite` | `OS3.0.304.0.WPFMIXM` | — | — | `6.12.30` | `conf/6.12.30-android16-5-g6e872b4863d6-ab13847919-4k.conf` | verified in QEMU |
-| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | — | — | `5.15.194` | `conf/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | unsupported by configuration |
+| Redmi Note 17 4G | `zephyr` | `OS3.0.311.0.WBUMIXM` | — | — | `5.15.194` | `conf/unsupported/5.15.194-android13-8-00015-gf5526d1116e5-ab15004895.conf` | unsupported by configuration |
 | Redmi Note 17 Pro Max 5G | `brussels` | `OS3.0.311.0.WDRMIXM` | — | — | `6.12.69` | `conf/6.12.69-android16-6-g586bfab1b9c5-abogki537510563-4k.conf` | verified in QEMU |
 
 ### Redmi Note 13, Redmi K70/K80/K100, Xiaomi 14/14T/15T/17T — Nov 2026 batch
@@ -249,9 +249,9 @@ Full F1–F11 evidence is in [`PORT_LOG.md`](../PORT_LOG.md).
 | Redmi K70E / POCO X6 Pro | `duchamp` | `OS3.0.305.0.WNLCNXM` | `6.1.138` | `conf/6.1.138-android14-11-g6ab8c9a86a33-ab14396278.conf` | verified in QEMU |
 | Xiaomi 14T Pro / Redmi K70 Ultra | `rothko` | `OS3.0.308.0.WNNCNXM` | `6.1.138` | same as above | verified in QEMU |
 | Xiaomi 14T | `degas` | `OS3.0.304.0.WNERUXM` | `6.1.138` | `conf/6.1.138-android14-11-g44bda9e8f6e9-ab13792638.conf` | verified in QEMU |
-| Redmi K70 / POCO F6 Pro | `vermeer` | `OS3.0.308.0.WNKCNXM` | `5.15.194` | `conf/5.15.194-android13-8-00019-gf4321180a397-ab15212794.conf` | unsupported by configuration |
-| Redmi Note 13 Pro+ 5G | `zircon` | `OS3.0.305.0.WNOCNXM` | `5.15.194` | `conf/5.15.194-android13-8-00038-g853eb7b6b965-ab15936612.conf` | unsupported by configuration |
-| Redmi Note 13 Pro 5G / POCO X6 5G | `garnet` | `OS3.0.306.0.WNRCNXM` | `5.10.236` | `conf/5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284.conf` | unsupported by configuration |
+| Redmi K70 / POCO F6 Pro | `vermeer` | `OS3.0.308.0.WNKCNXM` | `5.15.194` | `conf/unsupported/5.15.194-android13-8-00019-gf4321180a397-ab15212794.conf` | unsupported by configuration |
+| Redmi Note 13 Pro+ 5G | `zircon` | `OS3.0.305.0.WNOCNXM` | `5.15.194` | `conf/unsupported/5.15.194-android13-8-00038-g853eb7b6b965-ab15936612.conf` | unsupported by configuration |
+| Redmi Note 13 Pro 5G / POCO X6 5G | `garnet` | `OS3.0.306.0.WNRCNXM` | `5.10.236` | `conf/unsupported/5.10.236-android12-9-00003-gfb24cf99ad97-ab14313284.conf` | unsupported by configuration |
 
 The three Xiaomi 5.x kernels in this table — plus `zephyr` (Redmi Note 17 4G,
 `5.15.194`) in the standalone-payload table above — have
@@ -544,4 +544,6 @@ Adding a kernel means adding one `conf/*.conf`; the exploit source does not
 change. The profile must be derived from the exact factory
 `boot.img`/`vendor_boot.img` (kallsyms + BTF),for the procedure and
 [PORT_LOG.md](../PORT_LOG.md) for the evidence format. Do not add a row here as
-`tested` until F15/F16 pass on hardware.
+`tested` until F15/F16 pass on hardware. A kernel without
+`CONFIG_POSIX_CPU_TIMERS_TASK_WORK` is not a working profile: it belongs in
+`conf/unsupported/` (see `README.md` there) and is left out of the app.

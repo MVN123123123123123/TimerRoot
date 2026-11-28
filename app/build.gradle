@@ -4,10 +4,14 @@ plugins {
 
 // The per-kernel profiles live at the repository root so the exploit can be
 // built and run without the APK. Package them as assets/conf/**, which is
-// where UserService.install() unpacks them from.
+// where UserService.install() unpacks them from. conf/unsupported/ holds
+// profiles the factory kernel config cannot run (no
+// CONFIG_POSIX_CPU_TIMERS_TASK_WORK); shipping them would only let a user pick
+// one and watch it fail, so they stay out of the APK.
 def confAssets = layout.buildDirectory.dir('generated/conf-assets')
 def syncConfAssets = tasks.register('syncConfAssets', Sync) {
     from rootProject.file('conf')
+    exclude 'unsupported/**'
     into confAssets.map { it.dir('conf') }
 }
 

@@ -174,11 +174,13 @@ From the factory image of that exact build:
    `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` are absent, **stop**: the profile can
    pass F7–F10 and will never pass F11, because the fired timer is expired
    inline in tick/irq context and the exit path never dequeues the stale node.
-   Four factory kernels are known like this — the 5.15.194 `vermeer` and
-   `zircon` (Redmi Note 13 Pro/Pro+), the 5.15.194 `zephyr` (Redmi Note 17 4G)
-   and the 5.10.236 `garnet` (Redmi Note 13 Pro 5G). Their profiles are kept
-   as *unsupported by configuration*; do not retry the plant or bisect.
-   Details and the diagnostic signature are in `SKILL.md` §11.
+   Seven factory kernels are known like this — the 5.15.194 `vermeer` and
+   `zircon` (Redmi Note 13 Pro/Pro+), the 5.15.194 `zephyr` (Redmi Note 17 4G),
+   the 5.10.236 `garnet` (Redmi Note 13 Pro 5G), and the Samsung 5.15.197
+   `s23`, 5.10.240 `s23fe` and 5.15.189 `a15xzh`. Their profiles go in
+   `conf/unsupported/` (excluded from the APK, skipped by a default `mass.py`
+   sweep) and read *unsupported by configuration*; do not retry the plant or
+   bisect. Details and the diagnostic signature are in `SKILL.md` §11.
 
    When you re-verify such a kernel, re-run it with the current canonical
    `timer` and the slabinfo-readable harness rather than citing an older

@@ -713,7 +713,7 @@ image has no vendor-size setup and keeps `0x1200`.
 
 ### samsung a15xzh — `5.15.189-android13-8-33641424` (Samsung mode)
 
-`conf/samsung/samsung-a15xzh-5.15.189.conf`, for the Samsung Galaxy A15 5G
+`conf/unsupported/samsung-a15xzh-5.15.189.conf`, for the Samsung Galaxy A15 5G
 (SM-A1560). This is the first 5.15 **Samsung** profile and the second profile
 under `conf/samsung/`.
 
@@ -1011,7 +1011,7 @@ were re-derived from the SM-S937B factory `boot.img`.
 
 ### samsung s23 — `5.15.197-android13-8-34343818-abS911BXXUAGZIF` (Samsung mode)
 
-`conf/samsung/samsung-s23-5.15.197.conf`, for the Samsung Galaxy S23 (SM-S911B,
+`conf/unsupported/samsung-s23-5.15.197.conf`, for the Samsung Galaxy S23 (SM-S911B,
 Snapdragon 8 Gen 2, EUX firmware `S911BXXUAGZIF`, Android 17, patch 2026-10, 4K
 pages). This is the second 5.15 Samsung profile after `a15xzh` and the first
 S23-series one. The S23+ / S23 Ultra share the `34343818` build number but ship
@@ -1124,7 +1124,7 @@ hashes differ), so `release_prefix` pins the full banner including the
 
 ### samsung s23fe — `5.10.240-android12-9-33420454-abS711BXXSJGZI6` (Samsung mode)
 
-`conf/samsung/samsung-s23fe-5.10.240.conf`, for the Samsung Galaxy S23 FE
+`conf/unsupported/samsung-s23fe-5.10.240.conf`, for the Samsung Galaxy S23 FE
 (SM-S711B, Exynos 2200, EUX firmware `S711BXXSJGZI6`, Android 16, patch
 2026-10, 4K pages). This is the **first 5.10 profile** in the tree: every
 other profile is 5.15/6.x, and 5.10 has no `struct cred::ucounts`, so the
@@ -2159,6 +2159,24 @@ to land in 1..1024 would have passed the gate unnoticed, which is exactly the
 kind of silent mis-read the fix removes. Either way the evidence is still tied
 to `b05a46ff…`: re-run a profile before citing it against a release built from
 `cdd1e51e…`. The F14 table's cells were recorded under the older hash.
+
+### Unsupported profiles moved out of `conf/` (2026-11-28)
+
+The seven config-blocked profiles were moved to `conf/unsupported/` so they
+cannot be mistaken for working ones:
+
+- a default `mass.py` sweep now finds 43 profiles instead of 50 (the flag
+  `--include-unsupported` restores the full set, for reproducing the block);
+- `app/build.gradle` excludes the directory from `syncConfAssets` and
+  `scripts/build.ps1` deletes it after the asset copy, so the APK no longer
+  ships a profile that fails at plant 6;
+- `conf/unsupported/README.md` states the mechanism, the seven devices, and
+  how to run one deliberately;
+- `mkinitramfs.sh` still copies them into the QEMU initramfs, because a
+  deliberate `--include-unsupported` run needs the conf inside the guest.
+
+Nothing about the kernels changed: they still pass F7–F10 and still cannot
+pass F11.
 
 ### What has been verified without a device
 

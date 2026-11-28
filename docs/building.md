@@ -92,7 +92,9 @@ Notes:
 - The root `conf/` tree is copied into the build as `assets/conf/**` by the
   `syncConfAssets` task, which is wired to `preBuild` and every
   `merge*Assets` task. The APK therefore always carries the profiles from the
-  repository root; nothing needs to be copied by hand.
+  repository root; nothing needs to be copied by hand. `conf/unsupported/` is
+  excluded: those profiles are blocked by the factory kernel config, so
+  shipping them would only let a user pick one and watch it fail at F11.
 - `applicationId` is `com.kpgc.timerroot`, `minSdk` 30, `targetSdk` 36 and
   `compileSdk` 36. The version lives in `app/build.gradle`.
 - Shizuku's API and provider come from Maven
@@ -165,6 +167,10 @@ Add one `conf/<release>.conf` (or `conf/samsung/*.conf`, or `conf/dirty/*.conf`)
 and rebuild the app; the asset sync picks it up automatically. No Java or C
 change is needed. The profile must be derived from the exact factory
 `boot.img`/`vendor_boot.img`.
+
+A profile whose kernel lacks `CONFIG_POSIX_CPU_TIMERS_TASK_WORK` does not go
+here: put it in `conf/unsupported/`, which is excluded from the APK and from a
+default `mass.py` sweep. See that directory's `README.md`.
 
 For a readable walkthrough of the whole process see
 [Porting a kernel](porting.md). Use [SKILL.md](../SKILL.md) for the F1-F16

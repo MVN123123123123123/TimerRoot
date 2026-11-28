@@ -798,8 +798,11 @@ Four factory kernels found so far are blocked this way:
 | `5.15.194-android13-8-00015-gf5526d1116e5-ab15004895` | zephyr (Redmi Note 17 4G) | 5.15.194 |
 
 Their profiles are kept, documented and validated (F7–F10 all pass), but F11
-stays unfilled and the device row reads *unsupported by configuration*. Do not
-bisect the binary, re-derive constants, or retry the plant for these: the
+stays unfilled and the device row reads *unsupported by configuration*. They
+live in `conf/unsupported/` — excluded from the APK and skipped by a default
+`mass.py` sweep, so nobody picks one from the app or a full run and waits for
+six failed plants; `mass.py --include-unsupported` runs them deliberately. Do
+not bisect the binary, re-derive constants, or retry the plant for these: the
 reclaim is not the problem.
 
 Beware the stale-transcript objection: a blocked log taken before the harness
