@@ -94,7 +94,7 @@ Profiles:
 | Pixel 9 Pro XL | `komodo` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
 | Pixel 9 Pro Fold | `comet` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
 | **Pixel 9a** | `tegu` | `CP3A.261005.005` | 2026-10-05 | **tested** |
-| Pixel 10a | `stallion` | `CP3A.261005.005` | 2026-10-05 | verified in QEMU |
+| **Pixel 10a** | `stallion` | `CP3A.261005.005` | 2026-10-05 | **tested** (hardware 2026-11-28) |
 
 ### Pixel 10 series — 6.6.127 (4K)
 
@@ -360,7 +360,8 @@ not publish the value for that build; read the real value on a device with
 
 - **tested** means a cold boot, a settled device and the full chain ran on
   hardware. The Pixel 7a (`CP3A.261005.002.A1`), the Pixel 9a
-  (`CP3A.261005.005`) and the OnePlus 13 (`17.0.0.102(EX01)`) meet that bar.
+  (`CP3A.261005.005`), the Pixel 10a (`CP3A.261005.005`) and the OnePlus 13
+  (`17.0.0.102(EX01)`) meet that bar.
 - **verified in QEMU** means F7-F11 passed against the unmodified factory
   kernel (or a throwaway vendor-hook-patched `Image` where the factory kernel
   calls Knox/RKP, noted under Samsung). F12 (`permissive`) and F13 (`fake`)
@@ -386,6 +387,13 @@ not publish the value for that build; read the real value on a device with
   Those images are byte-identical too and share the 4K kernel's release string,
   so they have a separate profile selected by `sysconf(_SC_PAGESIZE)`. The
   Pixel 9a 16K image was verified end-to-end in QEMU as well.
+- The Pixel 10a (`stallion`) was run on hardware with the 6.1.162 profile
+  on 2026-11-28: KernelSU Manager reported `Working [Jailbreak mode]`,
+  `Version: 32680-5 (Custom)`, `LKM` on build `CP3A.261005.005` with the
+  matching `6.1.162-android14-11-g9dd05ae3a1de-ab16261587` banner. The
+  manager showed SELinux `Enforcing` at the time of the screenshot, so this
+  run is evidence for the root chain and KSU load, not for F12
+  (`permissive`). The November 6.1.172 row above remains QEMU-only.
 - The Pixel 10 series (6.6.127) ships one byte-identical kernel payload
   (36,866,560 bytes, SHA-256
   `0226c3be4224b02884d4f9b332aee58ec06c65b2263265e80f2498332ef15c06`), so one

@@ -1888,8 +1888,8 @@ ones in this batch (plus `zephyr` from the earlier port).
 | F12 permissive | pending | needs SELinux policy, not just the LSM being compiled in |
 | F13 `timer fake` | pending | needs KernelSU present |
 | F14 QEMU | pass | every generic profile with a workspace `Image` passes every gate (table below); s24fe and s25edge pass in their own shim runs, while s23 and s23fe stop at F11 as config-blocked; s26u is the only provenance exception, not a binary result |
-| F15 hardware | pass (OnePlus 13) | CPH2653 on `2026-11-27`: first-attempt plant; the `resuid=0/0/0` recorded then predates the uid-2000 rule, so the device run needs one repeat with the current harness before it can be cited as proof; not yet run on the other profiles |
-| F16 app | defer | tables carry `verified in QEMU`, or `tested` where F15 ran (OnePlus 13); other rows flip to `tested` only after their own hardware run |
+| F15 hardware | pass (OnePlus 13, Pixel 10a) | CPH2653 on `2026-11-27`: first-attempt plant; the `resuid=0/0/0` recorded then predates the uid-2000 rule, so the device run needs one repeat with the current harness before it can be cited as proof. Stallion on `2026-11-28`: KernelSU Manager active in LKM jailbreak mode on `CP3A.261005.005`; no root-shell transcript was captured. Neither device has a 200-run reliability measurement. |
+| F16 app | defer | tables carry `verified in QEMU`, or `tested` where F15 ran (OnePlus 13, Pixel 10a); other rows flip to `tested` only after their own hardware run |
 
 ### F14 — QEMU mass run
 
@@ -2897,3 +2897,20 @@ Two differences from the QEMU profile worth noting for future ports: `[base]`
 address sits in the `0xffffff81…` range instead of `0xffffff7f…`. Both are
 KASLR/slide artifacts; the `pair_slab_pfn()` agreement is what validated the
 base, and the plant still succeeded on the first attempt.
+
+## Pixel 10a (stallion), CP3A.261005.005 — 6.1.162 device gate (2026-11-28)
+
+Hardware report from the device owner. The phone is on the October build, not
+the November `6.1.172` one:
+
+- fingerprint: `google/stallion/stallion:17/CP3A.261005.005/16271449:user/release-keys`;
+- kernel: `6.1.162-android14-11-g9dd05ae3a1de-ab16261587`, matching the
+  bundled 6.1.162 profile by release (page size was not captured);
+- KernelSU Manager `v3.3.1 (32680-5)`, `Custom`: `Working [Jailbreak mode]`,
+  `LKM`. The manager showed SELinux `Enforcing` and seccomp `Filter`.
+
+The late-loaded module is active on hardware, so the October `stallion` row in
+`docs/supported-devices.md` is `tested` (hardware 2026-11-28). The evidence is
+a manager screenshot, not a shell log: it establishes the KSU endgame but adds
+no F11 `resuid` line, no F12 permissive result and no 200-run reliability
+rate. The November `6.1.172` row stays QEMU-only.
